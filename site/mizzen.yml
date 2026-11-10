@@ -1,4 +1,4 @@
-# Mizzen's own documentation, built by Mizzen with the Lateen theme.
+# Mizzen's documentation site, built by Mizzen with the Lateen theme.
 title: Mizzen
 description: A deterministic docs engine with exact source positions.
 lang: en
@@ -18,3 +18,19 @@ theme:
           url: https://github.com/arminazimi/mizzen
         - title: Lateen
           url: https://arminazimi.github.io/lateen/
+# Pages removed from the docs site; their old addresses lead to the home page.
+redirects:
+  "/audio/": "/"
+  "/audio/podcast-episode-12.mp3": "/"
+  "/compare/": "/"
+  "/languages/": "/"
+  "/roadmap/": "/"
+  "/recipes/analytics/": "/recipes/"
+  "/recipes/codeberg-pages/": "/recipes/"
+  "/recipes/comments/": "/recipes/"
+  "/recipes/content-negotiation/": "/recipes/"
+  "/recipes/forms/": "/recipes/"
+  "/recipes/from-pages-themes/": "/recipes/"
+  "/recipes/lifecycle/": "/recipes/"
+  "/recipes/pagefind/": "/recipes/"
+  "/recipes/rel-me/": "/recipes/"

@@ -1,52 +1,42 @@
 ---
-title: "Config"
-description: "Config: Mizzen reference."
+title: Configuration
+description: Slipway configuration reference.
+layout: doc
+permalink: /config/
+date: 2026-10-26
+author: Slipway
 ---
+<!-- Generated from packages/engine/schema/config.schema.json by tools/config-ref/run.ts. Do not edit below this line. -->
 
-A site's settings live in `mizzen.yml` at its root; every path in the file is relative to that folder. Without the file the engine builds with the defaults below and the folder name as the title. The top level is closed: an unknown key is an error with its line and column. The schema is [`schema/config.schema.json`](https://github.com/arminazimi/mizzen/blob/main/schema/config.schema.json), and `SiteConfig` in `src/contracts/config.ts` is the same shape.
+The site config file (ADR 0024). Every key is optional; an unknown key is an error.
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `title` | string | the folder name | Site name in the header, page titles, `llms.txt`, and JSON-LD. |
-| `description` | string | | One-sentence summary for the home page's meta description and `llms.txt`. |
-| `url` | string | | Scheme and host of the published site, without a trailing slash, such as `https://example.com`. Needed for canonical links, social images, and an absolute sitemap; without it they are relative or left out, with a warning. |
-| `base` | string | `""` | Path the site lives under, starting with `/` and without a trailing slash; empty at a domain root. Every URL the engine writes carries it. |
-| `lang` | string | `en` | Default language of every page, as a BCP 47 tag. A page's `lang` wins. |
-| `dir` | `ltr` or `rtl` | from `lang` | Default text direction: `rtl` for `fa`, `ar`, `he`, `ur`, and the other right-to-left languages. A page's `dir` wins. |
-| `languages` | list of `{code, name, prefix}` | `[]` | The site's languages, in switcher order. Leave it out for a one-language site. |
+| `title` | string |  | Site name for the header, page titles, llms.txt, and JSON-LD. Default: the folder name. |
+| `description` | string |  | One-sentence summary of the site, for the home page's meta description and llms.txt. |
+| `url` | string |  | Scheme and host of the published site, without a trailing slash, such as https://example.github.io. Without it canonical links, the sitemap, and social images are relative or left out, with a warning. |
+| `base` | string | `` | Path the site lives under, starting with / and without a trailing slash; empty at a domain root. Every URL the engine writes carries it. |
+| `lang` | string | `en` | Default language of every page, as a BCP 47 tag. A page's lang wins. |
+| `dir` | `ltr` or `rtl` |  | Default text direction. Unset, it comes from lang (rtl for fa, ar, he, ur, and the other right-to-left languages). A page's dir wins. |
+| `languages` | list of object | `[]` | The site's languages in switcher order. Leave it out for a one-language site. |
+| `languages[].code` | string | required | BCP 47 tag, such as fa. |
+| `languages[].name` | string | required | Name shown in the language switcher, in that language. |
+| `languages[].prefix` | string | required | URL prefix of this language's pages, such as /fa; empty for the default language. |
 | `source` | string | `.` | Folder that holds the content, relative to the site root. Files outside it are not pages. |
-| `include` | list of strings | `[]` | Paths under `source` that discovery would skip (names starting with `.` or `_`) but should copy or build, such as `.well-known`. |
-| `exclude` | list of strings | `[]` | Paths under `source` that are neither pages nor copied. `node_modules`, the output folder, and `mizzen.yml` are always excluded. |
-| `navigation` | string | `_data/navigation.yml` | Navigation file, relative to the site root. Without it, navigation is built from folders and each page's `order`. |
-| `defaults` | list of `{path, values}` | `[]` | Front matter applied to every page under a path unless the page sets the key itself. Later entries win over earlier ones; a page always wins. |
-| `repository` | `{url, branch, dir}` | | Where the source lives, for "Edit this page" links and the "Edit with your agent" prompt. `branch` defaults to `main`; `dir` is the site root's folder in the repository, default `""`. |
-| `theme` | `{name, options}` | | The theme package or folder, and the options handed to it unread. The theme validates its own options. |
-| `search` | `false` or `{text}` | `{}` | `false` builds no search index. `text` is the most characters of a page's body the index keeps (default `300`); titles and headings are always indexed. |
-| `redirects` | map of path to path or URL | `{}` | Redirect pages: each key is an old path under `base`, each value a path on the site or an `https` URL. |
-| `outputs` | map of name to boolean | every output on | Turns one output off by its name, such as `twins: false`. The names are in [Outputs](../outputs/). |
-
-```yaml
-title: Beacon
-description: Documentation for the Beacon deploy CLI.
-url: https://example.com
-base: /beacon
-lang: en
-source: docs
-navigation: _data/navigation.yml
-repository:
-  url: https://github.com/example/beacon
-  branch: main
-  dir: docs
-defaults:
-  - path: ""
-    values:
-      layout: doc
-search:
-  text: 300
-redirects:
-  /old/: /new/
-outputs:
-  twins: false
-```
-
-`mizzen.config.ts` is not a second config file. It holds code only: the site's plugins, default-exported as `{ plugins: [...] }`. It cannot set a key of `mizzen.yml`, so every setting stays readable without running the site's code.
+| `include` | list of string | `[]` | Paths under source that discovery would skip (names starting with . or _) but should be copied or built, such as .well-known. |
+| `exclude` | list of string | `[]` | Paths under source that are neither pages nor copied. node_modules, the output folder, and the config file are always excluded. |
+| `navigation` | string | `_data/navigation.yml` | Navigation file, relative to the site root. When it does not exist, navigation is built from folders and each page's order. |
+| `defaults` | list of object | `[]` | Front matter applied to every page under a path unless the page sets the key itself. Later entries win over earlier ones; a page always wins. |
+| `defaults[].path` | string | required | Folder relative to source; empty for every page. |
+| `defaults[].values` | object | required | Front matter keys and values to apply. |
+| `repository` | object |  | Where the source lives, for Edit this page links and the Edit with your agent prompt. |
+| `repository.url` | string | required | The repository's web URL, such as https://github.com/example/example. |
+| `repository.branch` | string | `main` | Branch that edit links point to. |
+| `repository.dir` | string | `` | The site root's folder inside the repository, such as docs. |
+| `theme` | object |  | The theme that builds the site and the options handed to it. |
+| `theme.name` | string |  | Theme package or folder. Default: the theme that ships with the engine. |
+| `theme.options` | object |  | Handed to the theme unread; the theme validates it against its own schema. |
+| `search` | `false` or object | `{}` | false builds no search index. As an object, text sets how much of each page's body the index keeps. |
+| `search.text` | integer | `300` | The most characters of a page's body the index keeps. Titles and headings are always indexed. |
+| `redirects` | object | `{}` | Redirect pages: each key is an old path under base, each value a path on the site or an https URL. |
+| `outputs` | object | `{}` | Turns an output off by its name (false), such as twins or llms. The loader checks the names against the output registry; an unknown name is an error. |
