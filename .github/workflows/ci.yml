@@ -1,6 +1,6 @@
 name: ci
 
-# Tests and type check. Mizzen and Lateen test against each other, so both are checked out side by side.
+# Tests, type check, and a build of the packages as they install. Mizzen and Lateen test against each other, so both are checked out side by side.
 on:
   push:
     branches: [main]
@@ -30,13 +30,16 @@ jobs:
       - name: Install both repositories
         run: |
           set -euo pipefail
-          (cd mizzen && npm install --no-audit --no-fund)
+          (cd mizzen && npm install --no-audit --no-fund && npm run build)
           (cd lateen && npm install --no-audit --no-fund --no-save ../mizzen)
       - name: Test
         run: npm test
         working-directory: mizzen
       - name: Type check
         run: npm run typecheck
+        working-directory: mizzen
+      - name: Build the packages and install them
+        run: scripts/smoke-package.sh ../mizzen ../lateen
         working-directory: mizzen
 
   # Measures line coverage and publishes it for the README badge. It runs on main only and holds the
@@ -65,7 +68,7 @@ jobs:
       - name: Install both repositories
         run: |
           set -euo pipefail
-          (cd mizzen && npm install --no-audit --no-fund)
+          (cd mizzen && npm install --no-audit --no-fund && npm run build)
           (cd lateen && npm install --no-audit --no-fund --no-save ../mizzen)
       - name: Measure coverage
         working-directory: mizzen

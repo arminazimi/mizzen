@@ -1,7 +1,6 @@
 {
   "name": "@velella/mizzen",
   "version": "0.1.0",
-  "private": true,
   "description": "A deterministic docs engine with exact source positions.",
   "keywords": [
     "docs",
@@ -28,13 +27,22 @@
     "node": ">=24"
   },
   "bin": {
-    "mizzen": "./bin/mizzen.ts"
+    "mizzen": "./bin/mizzen.js"
   },
   "exports": {
-    ".": "./src/index.ts",
-    "./contracts": "./src/contracts/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "default": "./dist/contracts/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "test": "node --test \"test/**/*.test.ts\"",
     "test:coverage": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-exclude=\"test/**\" --test-coverage-exclude=\"scripts/**\" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \"test/**/*.test.ts\"",
     "coverage:badge": "node scripts/coverage-badge.ts coverage/lcov.info coverage/coverage.json",
@@ -58,5 +66,14 @@
     "@types/node": "^26.6.6",
     "preact": "^11.2.0",
     "typescript": "^7.0.2"
+  },
+  "files": [
+    "bin/mizzen.js",
+    "dist",
+    "schema",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -16,6 +16,7 @@ import type { Page, Site } from "../contracts/content.ts";
 import type { Diagnostic } from "../contracts/diagnostic.ts";
 import type { Pager, Trail } from "../contracts/nav.ts";
 import type { Head } from "../contracts/render.ts";
+import { OWN_EXTENSION } from "../runtime/modules.ts";
 import { navState } from "../nav/tree.ts";
 import { hreflangLinks } from "../outputs/hreflang.ts";
 import { opensearchLink } from "../outputs/opensearch.ts";
@@ -301,7 +302,7 @@ class WorkerPool implements RenderPool {
     this.#state = state;
     for (let index = 0; index < workers; index++) {
       // An empty execArgv keeps the test runner's flags out of the worker; type stripping is on by default on Node 24+.
-      const worker = new Worker(new URL("./parallel.ts", import.meta.url), { execArgv: [], name: "mizzen-render" });
+      const worker = new Worker(new URL(`./parallel${OWN_EXTENSION}`, import.meta.url), { execArgv: [], name: "mizzen-render" });
       const slot: Slot = { worker, ready: false, dead: false, current: undefined, batchID: 0 };
       worker.on("message", (reply: Reply) => this.#onReply(slot, reply));
       worker.on("error", (error: unknown) => this.#fail(slot, messageOf(error)));

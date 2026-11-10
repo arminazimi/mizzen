@@ -12,6 +12,7 @@ import { copyAssets } from "./assets.ts";
 import { buildIslandModules, islandUrl } from "../render/islands.ts";
 import { cacheKey, cacheRootOf, restoreCache, writeCache } from "./cache.ts";
 import { createDiagnostics, sortDiagnostics, type Diagnostics } from "./diagnostics.ts";
+import { moduleName } from "../runtime/modules.ts";
 import { createRenderPool, renderOnePage, type RenderPool } from "./parallel.ts";
 import { placeholderDiagnostics } from "./placeholder-diagnostic.ts";
 
@@ -94,7 +95,7 @@ async function loadOutputs(dir: string, diagnostics: Diagnostics): Promise<Outpu
     return [];
   }
   const names = (await readdir(dir, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.startsWith("."))
+    .filter((entry) => entry.isFile() && moduleName(entry.name) !== null)
     .map((entry) => entry.name)
     .sort(byCodePoint);
 
@@ -122,10 +123,10 @@ async function loadOutputs(dir: string, diagnostics: Diagnostics): Promise<Outpu
       continue;
     }
     const output = found[0]!;
-    const expected = file.slice(0, -".ts".length);
+    const expected = moduleName(file)!;
     if (output.name !== expected) {
       diagnostics.error("output.name-mismatch", `Output file "${file}" is named "${output.name}"; it must be "${expected}".`, {
-        help: "Make the output's name equal to its file name, without `.ts`.",
+        help: "Make the output's name equal to its file name, without its extension.",
       });
       continue;
     }

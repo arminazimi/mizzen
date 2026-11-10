@@ -2,6 +2,7 @@ import { access, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Diagnostic } from "../contracts/diagnostic.ts";
+import { allowTypeScriptInPackages } from "../runtime/typescript-in-packages.ts";
 import type { Chrome, Component, Layout } from "../contracts/render.ts";
 
 /** What a theme's `src/index.ts` exports for discovery. */
@@ -115,6 +116,7 @@ async function sideFiles(themeRoot: string, folder: string, name: string): Promi
  * Adding a unit never edits an index: a temporary folder is enough.
  */
 export async function loadRegistry(themeRoot: string): Promise<ThemeRegistry> {
+  allowTypeScriptInPackages();
   const diagnostics: Diagnostic[] = [];
   const layouts: Record<string, RegisteredLayout> = {};
   const chrome: Record<string, RegisteredChrome> = {};

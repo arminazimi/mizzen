@@ -40,7 +40,7 @@ jobs:
       - name: Install both repositories
         run: |
           set -euo pipefail
-          (cd mizzen && npm install --no-audit --no-fund)
+          (cd mizzen && npm install --no-audit --no-fund && npm run build)
           (cd lateen && npm install --no-audit --no-fund --no-save ../mizzen)
       - name: Build the site
         run: node mizzen/bin/mizzen.ts build mizzen/site --out "$RUNNER_TEMP/site"

@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { moduleName } from "../runtime/modules.ts";
 import type { Nodes, Root } from "mdast";
 import remarkParse from "remark-parse";
 import { unified, type Plugin } from "unified";
@@ -38,10 +39,10 @@ function readUnit(mod: Record<string, unknown>): MarkdownPlugin | null {
   return null;
 }
 
-/** Load every `*.ts` plugin from `plugins/`, sorted by `order` then `name`. */
+/** Load every plugin module from `plugins/`, sorted by `order` then `name`. */
 export async function loadMarkdownPlugins(): Promise<readonly MarkdownPlugin[]> {
   const dir = fileURLToPath(new URL("./plugins/", import.meta.url));
-  const names = (await readdir(dir)).filter((n) => n.endsWith(".ts")).sort(byCodePoint);
+  const names = (await readdir(dir)).filter((n) => moduleName(n) !== null).sort(byCodePoint);
   const loaded: MarkdownPlugin[] = [];
   for (const file of names) {
     const mod = (await import(pathToFileURL(join(dir, file)).href)) as Record<string, unknown>;

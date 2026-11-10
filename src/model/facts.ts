@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { moduleName } from "../runtime/modules.ts";
 import type { Diagnostic, Page, Site, SiteConfig, SourcePos } from "../contracts/index.ts";
 
 /** What a fact receives when it runs: the site root, its content folder, the config, the final pages, and `_data`. */
@@ -22,7 +23,7 @@ export interface FactContext {
  * {@link Fact.name}. A fact lives in its own file in `facts/`, so adding one edits no shared index.
  */
 export interface Fact {
-  /** The key in `Site.data`; must equal the file name without `.ts`. */
+  /** The key in `Site.data`; must equal the file name without its extension. */
   readonly name: string;
   /** Computes the value. A returned `undefined` is treated as no value. */
   compute(ctx: FactContext): unknown | Promise<unknown>;
@@ -78,7 +79,7 @@ function atFile(file: string): SourcePos {
 
 /**
  * Reads every `*.ts` file of `dir` in file-name order and returns the facts they export. A file must export exactly
- * one object with a string `name` and a `compute` function, and `name` must equal the file name without `.ts`.
+ * one object with a string `name` and a `compute` function, and `name` must equal the file name without its extension.
  * A file that cannot be imported, exports no fact, exports more than one, or is named differently is left out with a
  * `facts.load-failed` error; the other files still load. A missing folder is the same error.
  */
@@ -90,7 +91,7 @@ export async function loadFacts(dir?: string): Promise<LoadFactsResult> {
   let names: string[];
   try {
     names = (await readdir(folder, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.startsWith("."))
+      .filter((entry) => entry.isFile() && moduleName(entry.name) !== null)
       .map((entry) => entry.name)
       .sort(byCodePoint);
   } catch (err) {
@@ -99,7 +100,7 @@ export async function loadFacts(dir?: string): Promise<LoadFactsResult> {
       id: "facts.load-failed",
       severity: "error",
       message: `Cannot read the facts folder "${folder}": ${detail}.`,
-      help: "Point the facts folder at a folder of `.ts` fact files.",
+      help: "Point the facts folder at a folder of fact files.",
     });
     return { facts, diagnostics };
   }
@@ -146,14 +147,14 @@ export async function loadFacts(dir?: string): Promise<LoadFactsResult> {
       continue;
     }
     const fact = found[0]!;
-    const expected = file.slice(0, -".ts".length);
+    const expected = moduleName(file)!;
     if (fact.name !== expected) {
       diagnostics.push({
         id: "facts.load-failed",
         severity: "error",
         message: `Fact file "${file}" is named "${fact.name}"; it must be "${expected}".`,
         pos: atFile(path),
-        help: "Make the fact's name equal to its file name, without `.ts`.",
+        help: "Make the fact's name equal to its file name, without its extension.",
       });
       continue;
     }
