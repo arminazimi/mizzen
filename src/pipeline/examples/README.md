@@ -30,7 +30,7 @@ clean start, a bounded run, and cleanup — not isolation from the host.
 ## `cache.ts`
 
 `exampleCache({ dir?, root?, runtime? })` opens a result cache. The folder is `dir` when given, otherwise
-`<root>/.slipway/examples` (with the working directory as the default root). It is created on the first write, is safe
+`<root>/.mizzen/examples` (with the working directory as the default root). It is created on the first write, is safe
 to delete, and needs no config key.
 
 `cachedRun(cache, { code, lang, kind }, runner)` looks up the key `exampleCacheKey` makes from the code, language,

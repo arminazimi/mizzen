@@ -1,5 +1,5 @@
 /**
- * A proof record for one agent edit ([#1508], N29).
+ * A proof record for one agent edit (#1508, N29).
  *
  * An edit is reviewable only when the reviewer can see what the files held before it, what they
  * hold after it, and how the checks that follow an edit ended. This module writes that record as
@@ -30,7 +30,6 @@
  * input ({@link ProofDoctor}), and only the fields the record keeps are copied. The record's JSON
  * Schema is exported as {@link proofSchema} so a caller or a test can validate what it wrote.
  *
- * [#1508]: https://github.com/arminazimi/slipway/issues/1508
  */
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
@@ -39,7 +38,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 /** The proof format version. Only 1 exists. */
 export const PROOF_VERSION = 1;
 
-/** The levels `slipway doctor` reports, in order. `null` means an L0 MUST failed. */
+/** The levels `mizzen doctor` reports, in order. `null` means an L0 MUST failed. */
 export const PROOF_LEVELS = ["L0", "L1", "L2", "L3"] as const;
 
 /** A doctor level: one of {@link PROOF_LEVELS}, or `null` when the doctor reached none. */
@@ -182,7 +181,7 @@ export class ProofError extends Error {
  */
 export const proofSchema: Record<string, unknown> = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  title: "Slipway edit proof record",
+  title: "Mizzen edit proof record",
   description:
     "One agent edit's proof: SHA-256 before and after for every touched file, the doctor level, and the examples re-run. No wall-clock timestamp; `date` is present only when the caller or SOURCE_DATE_EPOCH supplied one.",
   type: "object",

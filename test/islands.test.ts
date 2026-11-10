@@ -216,7 +216,7 @@ test("buildIslandModules rejects a package import, which a browser cannot resolv
 });
 
 test("islandUrl puts the module under the site's base", () => {
-  assert.equal(islandUrl("/slipway", "chrome/drawer/client.ts"), "/slipway/assets/theme/islands/chrome/drawer/client.js");
+  assert.equal(islandUrl("/mizzen", "chrome/drawer/client.ts"), "/mizzen/assets/theme/islands/chrome/drawer/client.js");
   assert.equal(islandUrl("", "chrome/drawer/client.ts"), "/assets/theme/islands/chrome/drawer/client.js");
 });
 

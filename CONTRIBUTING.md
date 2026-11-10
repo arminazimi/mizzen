@@ -22,7 +22,7 @@ npm run typecheck
 npm test
 ```
 
-A change to behavior needs a test beside the others in `test/`. A change to the docs site is checked with `node ../mizzen/bin/slipway.ts check site` and must report 0 errors.
+A change to behavior needs a test beside the others in `test/`. A change to the docs site is checked with `node ../mizzen/bin/mizzen.ts check site` and must report 0 errors.
 
 ## Ground rules
 

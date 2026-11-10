@@ -1,12 +1,12 @@
 /**
- * A content-addressed result cache for example runners ([#1463]).
+ * A content-addressed result cache for example runners (#1463).
  *
  * Each example result is stored under one SHA-256 key of its code, language, kind, and runtime. The key covers the
  * inputs that change what an example does; editing any of them misses the entry and runs the example again. The
  * runtime defaults to Node's `process.version` and the engine's {@link version}, so upgrading either reruns the
  * examples too.
  *
- * One JSON file per key lives in the cache folder, `<root>/.slipway/examples` by default or the `dir` a caller names.
+ * One JSON file per key lives in the cache folder, `<root>/.mizzen/examples` by default or the `dir` a caller names.
  * The folder is disposable: missing, unreadable, or corrupt entries are misses, and every failure here is swallowed.
  * An entry is written whole — a temporary folder then one rename — so a reader never sees half an entry and no
  * temporary file is left behind.
@@ -17,7 +17,6 @@
  * The cache is a build-local speed-up, not shared state: it is safe to delete at any time and needs no locking. Two
  * writers of the same key each write a complete file and the last rename wins.
  *
- * [#1463]: https://github.com/arminazimi/slipway/issues/1463
  */
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -28,7 +27,7 @@ import { version } from "../../index.ts";
 export const EXAMPLE_CACHE_FORMAT = 1;
 
 /** Folder under a site root that holds the example cache, relative to the root. */
-export const EXAMPLE_CACHE_DIR = ".slipway/examples";
+export const EXAMPLE_CACHE_DIR = ".mizzen/examples";
 
 /** A key has 64 lowercase hexadecimal characters, and so does a file named after one. */
 const KEY = /^[0-9a-f]{64}$/;
@@ -50,7 +49,7 @@ export interface ExampleKeyInput {
 export interface ExampleCacheOptions {
   /** The cache folder itself. Wins over {@link root}; relative paths resolve against the working directory. */
   readonly dir?: string;
-  /** The site root. The default cache folder is `<root>/.slipway/examples`. Default root: the working directory. */
+  /** The site root. The default cache folder is `<root>/.mizzen/examples`. Default root: the working directory. */
   readonly root?: string;
   /**
    * The runtime identity in every key. Default: Node's `process.version` and the engine's version. Pass this only to
@@ -102,7 +101,7 @@ export function exampleCacheKey(input: ExampleKeyInput, runtime: string = defaul
   return hash.digest("hex");
 }
 
-/** The default cache folder of a site: `<root>/.slipway/examples`. */
+/** The default cache folder of a site: `<root>/.mizzen/examples`. */
 export function exampleCacheDirOf(root: string): string {
   return join(resolve(root), EXAMPLE_CACHE_DIR);
 }
@@ -129,7 +128,7 @@ function storable(result: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * Opens the cache at `options.dir`, or `<options.root>/.slipway/examples` when no folder is named. Nothing is read or
+ * Opens the cache at `options.dir`, or `<options.root>/.mizzen/examples` when no folder is named. Nothing is read or
  * written until {@link ExampleCache.get} or {@link ExampleCache.set} is called, so opening a cache cannot fail.
  */
 export function exampleCache(options: ExampleCacheOptions = {}): ExampleCache {

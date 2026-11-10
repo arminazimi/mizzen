@@ -63,7 +63,7 @@ function ldOf(head: ReturnType<typeof headMeta>, type: string): Readonly<Record<
 }
 
 // The shapes the test checks come from schema.org: each type's required properties and the value types it expects.
-// Only the objects Slipway writes are covered; the list is the shape, not the whole vocabulary.
+// Only the objects Mizzen writes are covered; the list is the shape, not the whole vocabulary.
 const ABSOLUTE = /^https?:\/\//;
 
 function assertTechArticle(ld: Readonly<Record<string, unknown>>): void {

@@ -28,7 +28,7 @@
     "node": ">=24"
   },
   "bin": {
-    "mizzen": "./bin/slipway.ts"
+    "mizzen": "./bin/mizzen.ts"
   },
   "exports": {
     ".": "./src/index.ts",

@@ -62,7 +62,7 @@ function site(pages: readonly Page[], repository?: RepositoryConfig): Site {
 }
 
 function github(): RepositoryConfig {
-  return { url: "https://github.com/arminazimi/evergreen" };
+  return { url: "https://github.com/example/evergreen" };
 }
 
 function gitlab(): RepositoryConfig {
@@ -79,7 +79,7 @@ test("GitHub: the link opens a new issue with the title, page, source line, and 
   const url = suggestIssueLink(github(), target, target.headings[0]!);
   assert.ok(url !== undefined);
 
-  assert.ok(url.startsWith("https://github.com/arminazimi/evergreen/issues/new?title="));
+  assert.ok(url.startsWith("https://github.com/example/evergreen/issues/new?title="));
   assert.equal(value(url, "title"), "Suggest edit: Install — Install");
   assert.equal(
     value(url, "body"),
@@ -156,7 +156,7 @@ test("there is no link without a repository, a web URL, or a page URL", () => {
   const target = page("/guide/install/", "Install");
   assert.equal(suggestIssueLink(undefined, target, target.headings[0]!), undefined);
   assert.equal(suggestIssueLink({ url: "" }, target, target.headings[0]!), undefined);
-  assert.equal(suggestIssueLink({ url: "git@github.com:arminazimi/evergreen.git" }, target, target.headings[0]!), undefined);
+  assert.equal(suggestIssueLink({ url: "git@github.com:example/evergreen.git" }, target, target.headings[0]!), undefined);
   assert.equal(suggestIssueLink(github(), page("", "Install"), target.headings[0]), undefined);
   assert.deepEqual(suggestLinksOf(site([target])), []);
 });

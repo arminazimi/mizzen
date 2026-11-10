@@ -264,7 +264,7 @@ test("the sitemap is exactly what the protocol describes for a site with a base 
       page("/evergreen/dashboard/", "app"),
       page("/evergreen/logo.svg", "asset"),
     ],
-    "https://arminazimi.github.io/",
+    "https://example.github.io/",
     "/evergreen",
   );
   assert.equal(
@@ -273,11 +273,11 @@ test("the sitemap is exactly what the protocol describes for a site with a base 
       '<?xml version="1.0" encoding="UTF-8"?>',
       '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
       "  <url>",
-      "    <loc>https://arminazimi.github.io/evergreen/</loc>",
+      "    <loc>https://example.github.io/evergreen/</loc>",
       "    <lastmod>2026-11-01</lastmod>",
       "  </url>",
       "  <url>",
-      "    <loc>https://arminazimi.github.io/evergreen/guide/install/</loc>",
+      "    <loc>https://example.github.io/evergreen/guide/install/</loc>",
       "  </url>",
       "</urlset>",
       "",
@@ -495,7 +495,7 @@ test(
         page("/evergreen/café/", "doc"),
         page("/evergreen/hidden/", "doc", { sitemap: false }),
       ],
-      "https://arminazimi.github.io",
+      "https://example.github.io",
       "/evergreen",
     );
     assertValidSitemap(await sitemapXml(model));
@@ -514,7 +514,7 @@ test(
         page("/evergreen/q&a/", "doc", { translation_key: "qa" }),
         page("/evergreen/fa/q&a/", "doc", { translation_key: "qa" }, "fa"),
       ],
-      "https://arminazimi.github.io",
+      "https://example.github.io",
       "/evergreen",
       { languages: LANGUAGES },
     );

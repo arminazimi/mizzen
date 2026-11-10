@@ -132,7 +132,7 @@ export function formatJson(diagnostics: readonly Diagnostic[]): string {
 
 /** Options of {@link formatSarif}. */
 export interface SarifOptions {
-  /** The tool that found the problems; defaults to the name `slipway`. */
+  /** The tool that found the problems; defaults to the name `mizzen`. */
   readonly tool?: { readonly name: string; readonly version?: string; readonly informationUri?: string };
 }
 
@@ -164,7 +164,7 @@ export function formatSarif(diagnostics: readonly Diagnostic[], options: SarifOp
   const sorted = sortDiagnostics(diagnostics);
   const ids = [...new Set(sorted.map((d) => d.id))].sort();
   const driver = {
-    name: options.tool?.name ?? "slipway",
+    name: options.tool?.name ?? "mizzen",
     ...(options.tool?.version === undefined ? {} : { version: options.tool.version }),
     ...(options.tool?.informationUri === undefined ? {} : { informationUri: options.tool.informationUri }),
     rules: ids.map((id) => ({ id })),

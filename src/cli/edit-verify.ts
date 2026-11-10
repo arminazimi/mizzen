@@ -1,16 +1,15 @@
 /**
- * `mizzen edit verify <proof.json> [--site <dir>] [--doctor]`: check a proof record against the working tree ([#1512]).
+ * `mizzen edit verify <proof.json> [--site <dir>] [--doctor]`: check a proof record against the working tree (#1512).
  *
  * The proof record ([N29](../edits/proof.ts)) keeps the SHA-256 of every touched file after the edit. This command
  * re-hashes the files it names under the site root and stops at the first one that changed, went missing, or came
  * back after the proof recorded it as deleted, so an edit an agent reports is checked against what is on disk.
  *
- * The doctor is a separate package, so it runs as a command and never as an import: `slipway doctor <dir> --format
+ * The doctor is a separate package, so it runs as a command and never as an import: `mizzen doctor <dir> --format
  * json`, whose `level` is compared with the one the proof recorded. Without `--doctor` the hashes are still checked
  * and the command says that the doctor check did not run. A matching proof exits 0, a mismatching file or doctor
  * level exits 1, and a proof that cannot be read is a usage error and exits 2.
  *
- * [#1512]: https://github.com/arminazimi/slipway/issues/1512
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -22,7 +21,7 @@ import { PROOF_LEVELS, PROOF_VERSION, type ProofLevel } from "../edits/proof.ts"
 
 /** A command that runs the doctor CLI, as an executable and the arguments before `doctor`. */
 export interface DoctorCommand {
-  /** The executable, such as `slipway` or `process.execPath`. */
+  /** The executable, such as `mizzen` or `process.execPath`. */
   readonly command: string;
   /** Arguments before the doctor's own, used to run a TypeScript entry point through Node. */
   readonly prefix?: readonly string[];
@@ -36,7 +35,7 @@ export interface VerifyProofOptions {
   readonly siteRoot?: string;
   /** Rerun the doctor and compare its level with the recorded one. Default: false. */
   readonly doctor?: boolean;
-  /** How to run the doctor; default: the sibling doctor package, else `slipway` on the PATH. */
+  /** How to run the doctor; default: the sibling doctor package, else `mizzen` on the PATH. */
   readonly doctorCommand?: DoctorCommand;
   /** Environment for the doctor process. Default: this process's. */
   readonly env?: NodeJS.ProcessEnv;
@@ -97,7 +96,7 @@ class ProofReadError extends Error {
 }
 
 /** The doctor entry point beside this package in the monorepo, when it is there. */
-const SIBLING_DOCTOR = fileURLToPath(new URL("../../../doctor/bin/slipway.ts", import.meta.url));
+const SIBLING_DOCTOR = fileURLToPath(new URL("../../../doctor/bin/mizzen.ts", import.meta.url));
 
 /** Compares by code point, never by locale (ADR 0022, rule 5). */
 function byCodePoint(a: string, b: string): number {
@@ -194,13 +193,13 @@ async function fileState(siteRoot: string, entry: ProofFileEntry): Promise<Verif
   return hashBytes(bytes) === entry.after ? "ok" : "changed";
 }
 
-/** The default doctor command: the sibling package when it exists, else the installed `slipway`. */
+/** The default doctor command: the sibling package when it exists, else the installed `mizzen`. */
 function defaultDoctorCommand(): DoctorCommand {
   if (existsSync(SIBLING_DOCTOR)) return { command: process.execPath, prefix: [SIBLING_DOCTOR] };
-  return { command: "slipway" };
+  return { command: "mizzen" };
 }
 
-/** Runs `slipway doctor <siteRoot> --format json` and reads its level, without importing the doctor package. */
+/** Runs `mizzen doctor <siteRoot> --format json` and reads its level, without importing the doctor package. */
 function runDoctor(
   siteRoot: string,
   command: DoctorCommand,

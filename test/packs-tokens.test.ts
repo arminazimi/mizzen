@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { estimateTokens, TOKEN_ERROR_MARGIN, TOKEN_METHOD } from "../src/packs/tokens.ts";
 
 const ENGLISH =
-  "Slipway builds a docs site from Markdown. It reads the configuration file, discovers pages, and renders them with the theme. Every build is deterministic: the same input gives byte-identical output, in the same order, with LF line endings. When a page has an error, the engine still writes the site and reports the diagnostic with its source position.";
+  "Mizzen builds a docs site from Markdown. It reads the configuration file, discovers pages, and renders them with the theme. Every build is deterministic: the same input gives byte-identical output, in the same order, with LF line endings. When a page has an error, the engine still writes the site and reports the diagnostic with its source position.";
 
 const PERSIAN =
   "اسلیپوی یک سایت مستندات را از فایل‌های مارک‌داون می‌سازد. پیکربندی سایت در فایل mizzen.yml قرار دارد و هر مسیر در آن نسبت به ریشه سایت خوانده می‌شود. ساخت خروجی قطعی است: ورودی یکسان، خروجی یکسان بایت‌به‌بایت می‌دهد، با همان ترتیب و با پایان خط LF. وقتی صفحه‌ای خطا داشته باشد، موتور سایت را می‌نویسد و خطا را با موقعیت منبع گزارش می‌کند.";
@@ -17,7 +17,7 @@ const TYPESCRIPT = `export function tokens(text: string): number {
   return total;
 }`;
 
-const CHINESE = "Slipway 从 Markdown 构建文档站点。它读取配置文件，发现页面并用主题渲染。相同的输入产生字节完全相同的输出。";
+const CHINESE = "Mizzen 从 Markdown 构建文档站点。它读取配置文件，发现页面并用主题渲染。相同的输入产生字节完全相同的输出。";
 
 /**
  * The fixture corpus. Each entry pairs a text with the number of tokens `cl100k_base` — a common reference

@@ -118,7 +118,7 @@ export function synonymConfig(synonyms: Synonyms): string {
   }
 
   const header = [
-    "# Pagefind configuration written by Slipway's `search-synonyms` output.",
+    "# Pagefind configuration written by Mizzen's `search-synonyms` output.",
     "# Each key is a search term; each value is a word or phrase that should match it.",
     "#",
     "# Pagefind 1.6 has no `synonyms` option and ignores keys it does not know, so",

@@ -4,7 +4,7 @@ import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 import { twinUrl } from "./twins.ts";
 
 /** Where the manifest lands, relative to the output folder. */
-const FILE = ".slipway/manifest.json";
+const FILE = ".mizzen/manifest.json";
 
 /** Compares by code point, never by locale (ADR 0022, rule 5). */
 function byCodePoint(a: string, b: string): number {
@@ -55,13 +55,13 @@ interface ManifestPage {
 }
 
 /**
- * Writes `.slipway/manifest.json` into the output folder: the build's index, one entry per doc page, so doctor and the
+ * Writes `.mizzen/manifest.json` into the output folder: the build's index, one entry per doc page, so doctor and the
  * MCP server read the build instead of guessing which URL and file came from which source.
  *
  * Each entry names the page's URL, source file, title, layout, the output files it writes, and two SHA-256 hashes: the
  * Markdown or HTML body as the model read it (`source`), and the body after Markdown became HTML (`html`). Front
  * matter is not part of either hash: the title, URL, and layout are separate fields, so a front-matter edit still
- * changes the manifest. Hashing the files themselves is `output.build-hash`'s job ([#1252]), which runs once every
+ * changes the manifest. Hashing the files themselves is `output.build-hash`'s job (#1252), which runs once every
  * output has written.
  *
  * Pages are sorted by URL and output paths by code point, so the same model gives the same bytes (ADR 0022, rule 5).
@@ -69,7 +69,6 @@ interface ManifestPage {
  * output of their own. A page lists the files its enabled outputs write: the HTML file and the Markdown twin, each
  * unless `outputs` turns that output off.
  *
- * [#1252]: https://github.com/arminazimi/slipway/issues/1252
  */
 export const manifest: Output = {
   name: "manifest",

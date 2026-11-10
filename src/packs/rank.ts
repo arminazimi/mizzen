@@ -101,7 +101,7 @@ const MD_LINK = /!?\[[^\]]*\]\(\s*(<[^>]*>|[^\s)]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^
 const MD_DEFINITION = /^[ \t]{0,3}\[[^\]]+\]:[ \t]*(?:<([^>]+)>|(\S+))/gm;
 
 /** The origin used only to resolve relative URLs and percent-encode both sides the same way. */
-const ORIGIN = "https://slipway.invalid";
+const ORIGIN = "https://mizzen.invalid";
 
 /** A scheme (`https:`, `mailto:`) or protocol-relative (`//`) URL, which leaves the site. */
 const EXTERNAL = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i;

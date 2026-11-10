@@ -90,7 +90,7 @@ test("one change triggers exactly one rebuild, writes the output, and reports it
   });
   try {
     assert.match(text(join(out, "index.html")), /Before/, "the initial build writes the output");
-    assert.equal(existsSync(join(root, ".slipway", "cache")), false, "cache is off unless asked for");
+    assert.equal(existsSync(join(root, ".mizzen", "cache")), false, "cache is off unless asked for");
     await settle();
 
     const started = performance.now();
@@ -164,7 +164,7 @@ test("cache is passed to every build, and stop closes the watchers and resolves 
     log: (message) => logs.push(message),
   });
   try {
-    const cacheRoot = join(root, ".slipway", "cache");
+    const cacheRoot = join(root, ".mizzen", "cache");
     assert.equal(existsSync(cacheRoot), true, "the initial build writes a cache entry");
     assert.ok(
       readdirSync(cacheRoot).some((entry) => /^[0-9a-f]{64}$/.test(entry)),

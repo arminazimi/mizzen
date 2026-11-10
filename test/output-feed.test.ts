@@ -112,19 +112,19 @@ test("the 30 most recently changed doc pages appear newest first, with absolute 
       page("/evergreen/logo.svg", { kind: "asset", frontMatter: { last_modified_at: "2026-12-01" } }),
       page("/evergreen/c/", { title: "C", frontMatter: { last_modified_at: "2026-10-02" } }),
     ],
-    { url: "https://arminazimi.github.io", base: "/evergreen", lang: "fa", title: "Evergreen & Co" },
+    { url: "https://example.github.io", base: "/evergreen", lang: "fa", title: "Evergreen & Co" },
   );
   const xml = await only(model);
 
   assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-8"\?>\n<feed xmlns="http:\/\/www\.w3\.org\/2005\/Atom" xml:lang="fa">/);
   assert.match(xml, /<title>Evergreen &amp; Co<\/title>/);
-  assert.match(xml, /<link href="https:\/\/arminazimi\.github\.io\/evergreen\/changes\.xml" rel="self" type="application\/atom\+xml"\/>/);
-  assert.match(xml, /<link href="https:\/\/arminazimi\.github\.io\/evergreen\/" rel="alternate" type="text\/html"\/>/);
-  assert.match(xml, /<id>https:\/\/arminazimi\.github\.io\/evergreen\/changes\.xml<\/id>/);
+  assert.match(xml, /<link href="https:\/\/example\.github\.io\/evergreen\/changes\.xml" rel="self" type="application\/atom\+xml"\/>/);
+  assert.match(xml, /<link href="https:\/\/example\.github\.io\/evergreen\/" rel="alternate" type="text\/html"\/>/);
+  assert.match(xml, /<id>https:\/\/example\.github\.io\/evergreen\/changes\.xml<\/id>/);
   assert.match(xml, /<updated>2026-11-01T06:00:00\.000Z<\/updated>/);
   assert.deepEqual(titles(xml), ["A", "B", "C"], "newest first, then URL ascending on a tie");
-  assert.match(xml, /<link href="https:\/\/arminazimi\.github\.io\/evergreen\/a\/" rel="alternate" type="text\/html"\/>/);
-  assert.match(xml, /<id>https:\/\/arminazimi\.github\.io\/evergreen\/a\/<\/id>/);
+  assert.match(xml, /<link href="https:\/\/example\.github\.io\/evergreen\/a\/" rel="alternate" type="text\/html"\/>/);
+  assert.match(xml, /<id>https:\/\/example\.github\.io\/evergreen\/a\/<\/id>/);
   assert.match(xml, /<updated>2026-10-02T00:00:00\.000Z<\/updated>/);
 });
 

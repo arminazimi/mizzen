@@ -12,7 +12,7 @@ const pos = { file: "guide/install.md", line: 1, column: 1, endLine: 1, endColum
 /** A site config with the defaults a build fills in, plus the given overrides. */
 function config(overrides: Partial<SiteConfig> = {}): SiteConfig {
   return {
-    title: "Slipway",
+    title: "Mizzen",
     base: "",
     lang: "en",
     dir: "ltr",

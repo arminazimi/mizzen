@@ -8,7 +8,7 @@ import { runShellExample } from "../pipeline/examples/run-shell.ts";
 
 /**
  * Writes `examples.json`: one entry per page with how many runnable examples it declares, how many passed, how many
- * failed, and how many were not run ([#1465]).
+ * failed, and how many were not run (#1465).
  *
  * Every fence marked `test` is found again from the page's Markdown by `examplesOf`, then run: `js`, `mjs`, and `ts`
  * through `runNodeExample`, `bash` and `sh` through `runShellExample`. An example passes when it exits with code 0
@@ -33,10 +33,9 @@ import { runShellExample } from "../pipeline/examples/run-shell.ts";
  *
  * `examplesReport` runs every example unless `cacheDir` names a folder. The output enables the cache only when
  * `MIZZEN_EXAMPLES_CACHE` is set: a path uses that folder, and `1`, `true`, or an empty value use the default
- * `.slipway/examples` under the working directory. With the cache on, changing the code, language, runner, Node
+ * `.mizzen/examples` under the working directory. With the cache on, changing the code, language, runner, Node
  * version, or engine version misses the entry and the example runs again.
  *
- * [#1465]: https://github.com/arminazimi/slipway/issues/1465
  */
 
 /** The runner family of a supported example language; also the `kind` of its cache key. */
@@ -253,7 +252,7 @@ export async function examplesReport(
 /**
  * The cache folder `MIZZEN_EXAMPLES_CACHE` asks for, or `undefined` when the variable is unset.
  *
- * A value of `1`, `true`, or nothing is the default `.slipway/examples` under the working directory; any other value
+ * A value of `1`, `true`, or nothing is the default `.mizzen/examples` under the working directory; any other value
  * is a folder path, resolved by the cache against the working directory. The output calls this once per build, so the
  * variable is read at run time and never by {@link examplesReport}.
  */

@@ -1,11 +1,10 @@
 /**
- * `mizzen verify <dir> [--hash <hex>]`: check a built folder against the hash its manifest recorded ([#1252]).
+ * `mizzen verify <dir> [--hash <hex>]`: check a built folder against the hash its manifest recorded (#1252).
  *
- * The expected hash comes from `--hash` when given, otherwise from `build.hash` in `<dir>/.slipway/manifest.json`.
+ * The expected hash comes from `--hash` when given, otherwise from `build.hash` in `<dir>/.mizzen/manifest.json`.
  * The folder is hashed by the same rule the build used, and, when the manifest carries the per-file record, the first
  * file that changed, went missing, or was added is named. Exit 0 is a match and 1 is a mismatch; a usage error is 2.
  *
- * [#1252]: https://github.com/arminazimi/slipway/issues/1252
  */
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";

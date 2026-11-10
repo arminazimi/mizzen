@@ -79,7 +79,7 @@ test("front matter values that are not usable fall through to the chain", () => 
 
 test("every page in fixtures/rtl-site resolves to fa and rtl", () => {
   const root = fileURLToPath(new URL("../fixtures/rtl-site", import.meta.url));
-  const { config } = loadConfig(root, { path: join(root, "slipway.yml") });
+  const { config } = loadConfig(root, { path: join(root, "fixture.yml") });
   assert.equal(config.lang, "fa");
   assert.equal(config.dir, "rtl");
 

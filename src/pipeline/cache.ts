@@ -1,5 +1,5 @@
 /**
- * A whole-build cache for `mizzen build` ([#1060]): the output of a build is kept in `.slipway/cache` and copied back
+ * A whole-build cache for `mizzen build` (#1060): the output of a build is kept in `.mizzen/cache` and copied back
  * when every input that shaped it is unchanged.
  *
  * The key is one SHA-256 of the site's config file, every discovered source file (pages, assets, app pages, and
@@ -12,7 +12,6 @@
  * miss, never bad output. Every failure here is swallowed by {@link restoreCache} and {@link writeCache}: a cache that
  * cannot be read or written leaves the build to run cold.
  *
- * [#1060]: https://github.com/arminazimi/slipway/issues/1060
  */
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
@@ -25,10 +24,10 @@ import { version } from "../index.ts";
 export const CACHE_FORMAT = 1;
 
 /** Folder under a site root that holds the cache, relative to the root. */
-export const CACHE_DIR = ".slipway/cache";
+export const CACHE_DIR = ".mizzen/cache";
 
 /** Folders that never affect a build, skipped while hashing a theme or outputs folder. */
-const SKIP_DIRS = new Set(["node_modules", ".git", ".slipway", "dist", "test"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", ".mizzen", "dist", "test"]);
 
 /** A key has 64 lowercase hexadecimal characters, and so does a directory named after one. */
 const KEY = /^[0-9a-f]{64}$/;
@@ -315,7 +314,7 @@ export async function writeCache(
   }
 }
 
-/** The default cache folder of a site: `<root>/.slipway/cache`. */
+/** The default cache folder of a site: `<root>/.mizzen/cache`. */
 export function cacheRootOf(root: string): string {
   return join(resolve(root), CACHE_DIR);
 }

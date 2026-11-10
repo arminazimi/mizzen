@@ -45,12 +45,12 @@ test("a snippet that hangs is killed when the timeout fires", async () => {
 });
 
 test("the environment is an allow-list, with HOME and TMPDIR inside the run folder", async () => {
-  const before = process.env.SLIPWAY_TEST_SECRET;
-  process.env.SLIPWAY_TEST_SECRET = "must-not-leak";
+  const before = process.env.MIZZEN_TEST_SECRET;
+  process.env.MIZZEN_TEST_SECRET = "must-not-leak";
   try {
     const result = await runShellExample({
       shell: "sh",
-      code: 'printf "%s|%s|%s|%s|%s\\n" "$SLIPWAY_TEST_SECRET" "$HOME" "$TMPDIR" "$NO_COLOR" "$EXTRA"',
+      code: 'printf "%s|%s|%s|%s|%s\\n" "$MIZZEN_TEST_SECRET" "$HOME" "$TMPDIR" "$NO_COLOR" "$EXTRA"',
       env: { EXTRA: "explicit" },
     });
     const [secret, home, temp, noColor, extra] = result.stdout.trimEnd().split("|");
@@ -61,8 +61,8 @@ test("the environment is an allow-list, with HOME and TMPDIR inside the run fold
     assert.equal(noColor, "1");
     assert.equal(extra, "explicit", "the caller's env option is the explicit way in");
   } finally {
-    if (before === undefined) delete process.env.SLIPWAY_TEST_SECRET;
-    else process.env.SLIPWAY_TEST_SECRET = before;
+    if (before === undefined) delete process.env.MIZZEN_TEST_SECRET;
+    else process.env.MIZZEN_TEST_SECRET = before;
   }
 });
 

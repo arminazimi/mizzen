@@ -24,7 +24,7 @@ interface Entry {
   readonly before?: string | null;
 }
 
-/** Writes a proof at `<root>/.slipway/proof.json` for `entries` and returns its path. */
+/** Writes a proof at `<root>/.mizzen/proof.json` for `entries` and returns its path. */
 async function record(root: string, entries: readonly Entry[], doctor?: ProofLevel): Promise<string> {
   const files = entries.map((entry) => entry.path);
   const before: Record<string, string | null> = {};
@@ -39,9 +39,9 @@ async function record(root: string, entries: readonly Entry[], doctor?: ProofLev
     before,
     after,
     ...(doctor === undefined ? {} : { doctor: { level: doctor } }),
-    out: ".slipway/proof.json",
+    out: ".mizzen/proof.json",
   });
-  return join(root, ".slipway", "proof.json");
+  return join(root, ".mizzen", "proof.json");
 }
 
 function capture() {
@@ -143,7 +143,7 @@ test("a file the proof records as deleted but is present again exits 1 as extra"
 test("a malformed or absent proof exits 2", async () => {
   const root = tree({ "a.md": "one\n" });
   try {
-    const malformed = join(root, ".slipway", "proof.json");
+    const malformed = join(root, ".mizzen", "proof.json");
     mkdirSync(dirname(malformed), { recursive: true });
     writeFileSync(malformed, '{"version":1,"files":[');
     const bad = capture();
@@ -151,7 +151,7 @@ test("a malformed or absent proof exits 2", async () => {
     assert.deepEqual(bad.logs, []);
     assert.match(bad.errors[0] ?? "", /is not a valid proof: it is not JSON\./);
 
-    const wrongVersion = join(root, ".slipway", "wrong.json");
+    const wrongVersion = join(root, ".mizzen", "wrong.json");
     writeFileSync(wrongVersion, '{"version":2,"files":[]}');
     const version = capture();
     assert.equal(await main(["edit", "verify", wrongVersion, "--site", root], version.io), 2);

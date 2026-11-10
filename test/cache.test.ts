@@ -291,10 +291,10 @@ test("the cache is off by default and lives under the site root when on", async 
   const { parent, out } = scratch();
   try {
     await build({ root, out, themeRoot: theme, defaultLayout: "doc" });
-    assert.equal(existsSync(join(root, ".slipway")), false, "a build without `cache` writes no cache into the site");
+    assert.equal(existsSync(join(root, ".mizzen")), false, "a build without `cache` writes no cache into the site");
 
     await build({ root, out, themeRoot: theme, defaultLayout: "doc", cache: true });
-    assert.equal(entries(join(root, ".slipway/cache")).length, 1, "`cache: true` uses `<root>/.slipway/cache`");
+    assert.equal(entries(join(root, ".mizzen/cache")).length, 1, "`cache: true` uses `<root>/.mizzen/cache`");
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(theme, { recursive: true, force: true });

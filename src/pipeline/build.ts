@@ -31,7 +31,7 @@ export interface BuildOptions {
   readonly outputsDir?: string;
   /** Reuse the output of an unchanged build from the cache. Off by default; `mizzen build` turns it on. */
   readonly cache?: boolean;
-  /** Folder the cache lives in. Default: `<root>/.slipway/cache`. Only used when `cache` is true. */
+  /** Folder the cache lives in. Default: `<root>/.mizzen/cache`. Only used when `cache` is true. */
   readonly cacheDir?: string;
   /**
    * Pages to render at once in worker threads. `1`, the default, renders in this process, byte for byte as before;

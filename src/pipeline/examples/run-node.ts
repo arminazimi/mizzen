@@ -1,5 +1,5 @@
 /**
- * Runs one recorded Node or TypeScript example in a child process ([#1461]).
+ * Runs one recorded Node or TypeScript example in a child process (#1461).
  *
  * The snippet is written into a fresh `mkdtemp` folder, beside a `package.json` for `js` and `mjs` (so both are ES
  * modules), and run by `process.execPath` with that folder as the working directory. `ts` relies on Node's native type
@@ -17,7 +17,6 @@
  * terminal, and everything else in `process.env` is dropped. The duration is measured with a monotonic clock, because
  * the result reports it. No other clock or environment value is read.
  *
- * [#1461]: https://github.com/arminazimi/slipway/issues/1461
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
@@ -175,7 +174,7 @@ export async function runNodeExample(options: RunNodeExampleOptions): Promise<No
   }
 
   // `realpath` makes the folder canonical, so `process.cwd()` in the example equals the path the runner set as HOME.
-  const root = await realpath(await mkdtemp(join(options.cwd ?? tmpdir(), "slipway-example-")));
+  const root = await realpath(await mkdtemp(join(options.cwd ?? tmpdir(), "mizzen-example-")));
   const stdout = collector();
   const stderr = collector();
   const startedAt = performance.now();

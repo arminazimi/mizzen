@@ -57,9 +57,9 @@ test("robots.txt allows every path and names the sitemap at the site root", asyn
 });
 
 test("the Sitemap line carries the base, so a project site under /evergreen names /evergreen/sitemap.xml", async () => {
-  const sitemap = "https://arminazimi.github.io/evergreen/sitemap.xml";
-  assert.equal(sitemapUrl(site("https://arminazimi.github.io", "/evergreen")), sitemap);
-  const { files } = await run(site("https://arminazimi.github.io", "/evergreen"));
+  const sitemap = "https://example.github.io/evergreen/sitemap.xml";
+  assert.equal(sitemapUrl(site("https://example.github.io", "/evergreen")), sitemap);
+  const { files } = await run(site("https://example.github.io", "/evergreen"));
   assert.equal(files[0]?.contents, robotsText(sitemap));
   assert.ok(String(files[0]?.contents).includes(`\nSitemap: ${sitemap}\n`));
 });

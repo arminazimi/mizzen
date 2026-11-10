@@ -265,12 +265,12 @@ test("the default runner runs a js example and a sh example", async () => {
   });
 });
 
-test("the cache is enabled only when MIZZEN_EXAMPLES_CACHE is set, and 1 means .slipway/examples", () => {
+test("the cache is enabled only when MIZZEN_EXAMPLES_CACHE is set, and 1 means .mizzen/examples", () => {
   assert.equal(examplesCacheDir({}), undefined);
   assert.equal(examplesCacheDir({ MIZZEN_EXAMPLES_CACHE: "/tmp/example-cache" }), "/tmp/example-cache");
-  assert.equal(examplesCacheDir({ MIZZEN_EXAMPLES_CACHE: "  " }), join(process.cwd(), ".slipway", "examples"));
-  assert.equal(examplesCacheDir({ MIZZEN_EXAMPLES_CACHE: "1" }), join(process.cwd(), ".slipway", "examples"));
-  assert.equal(examplesCacheDir({ MIZZEN_EXAMPLES_CACHE: "TRUE" }), join(process.cwd(), ".slipway", "examples"));
+  assert.equal(examplesCacheDir({ MIZZEN_EXAMPLES_CACHE: "  " }), join(process.cwd(), ".mizzen", "examples"));
+  assert.equal(examplesCacheDir({ MIZZEN_EXAMPLES_CACHE: "1" }), join(process.cwd(), ".mizzen", "examples"));
+  assert.equal(examplesCacheDir({ MIZZEN_EXAMPLES_CACHE: "TRUE" }), join(process.cwd(), ".mizzen", "examples"));
 });
 
 /** A temporary site tree. */

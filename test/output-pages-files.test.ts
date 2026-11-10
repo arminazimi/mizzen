@@ -67,10 +67,9 @@ test("a custom domain writes .nojekyll and CNAME with the bare host and one trai
 
 test("a *.github.io site gets no CNAME, with or without a path, port, or mixed case", async () => {
   for (const url of [
-    "https://arminazimi.github.io",
-    "https://arminazimi.github.io/slipway",
-    "https://arminazimi.github.io/slipway/",
-    "https://ArmInAzimi.GitHub.io/",
+    "https://example.github.io",
+    "https://example.github.io/mizzen/",
+    "https://Example.GitHub.io/",
     "http://example.github.io:8080/docs",
     "https://github.io",
   ]) {
@@ -90,7 +89,7 @@ test("a missing, empty, or invalid url gets no CNAME", async () => {
 
 test("CNAME holds only the host: a port, path, query, fragment, and trailing root dot are dropped", async () => {
   const cases: Array<[string, string]> = [
-    ["https://docs.example.com/slipway/", "docs.example.com"],
+    ["https://docs.example.com/mizzen/", "docs.example.com"],
     ["https://example.com:8443/", "example.com"],
     ["https://example.com/?q=1#top", "example.com"],
     ["https://Example.COM", "example.com"],
@@ -107,7 +106,7 @@ test("CNAME holds only the host: a port, path, query, fragment, and trailing roo
 });
 
 test("base does not change the CNAME, because it is a path on the same host", async () => {
-  const files = await run(site({ url: "https://docs.example.com", base: "/slipway" }));
+  const files = await run(site({ url: "https://docs.example.com", base: "/mizzen" }));
   assert.equal(files[1]?.contents, "docs.example.com\n");
 });
 

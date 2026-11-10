@@ -15,7 +15,7 @@ const THEME = fileURLToPath(new URL("../../lateen", import.meta.url));
 const FIXTURE = fileURLToPath(new URL("../fixtures/docs-site", import.meta.url));
 
 /** Folders another test's build may be writing into the fixture; a build cache is never input. */
-const TRANSIENT = new Set([".slipway", ".tmp", "node_modules", ".git"]);
+const TRANSIENT = new Set([".mizzen", ".tmp", "node_modules", ".git"]);
 
 /** Copies the fixture into `parent` so the CLI's build cache cannot land inside the shared fixture. */
 function copyFixture(parent: string): string {

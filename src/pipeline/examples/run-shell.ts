@@ -1,5 +1,5 @@
 /**
- * Runs one shell example in a throwaway folder with a scrubbed environment ([#1462]).
+ * Runs one shell example in a throwaway folder with a scrubbed environment (#1462).
  *
  * The unit is the shell counterpart of the Node example runner (N02). A caller hands it the code of a `bash` or `sh`
  * snippet and gets back what the snippet printed, its exit code, how long it took, and whether it ran inside an OS
@@ -28,7 +28,6 @@
  * The result depends on the host: `PATH` and `LANG` come from the process, and the duration is wall-clock time. Both
  * are documented rather than hidden; the exit code, stdout, and stderr are whatever the snippet chose to emit.
  *
- * [#1462]: https://github.com/arminazimi/slipway/issues/1462
  */
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";

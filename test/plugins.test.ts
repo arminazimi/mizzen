@@ -19,7 +19,7 @@ const pos = { file: "guide/install.md", line: 1, column: 1, endLine: 1, endColum
 /** A site config with the defaults a build fills in. */
 function config(): SiteConfig {
   return {
-    title: "Slipway",
+    title: "Mizzen",
     base: "",
     lang: "en",
     dir: "ltr",
@@ -225,7 +225,7 @@ test("the output hooks get the files and the site they came from", async () => {
   ];
   const input = [...files];
   const result = await runOutputsHooks(plugins, input, site([page("/install/")]));
-  assert.deepEqual(result.value.map((f) => f.path), ["index.html", "robots-Slipway.txt"]);
+  assert.deepEqual(result.value.map((f) => f.path), ["index.html", "robots-Mizzen.txt"]);
   assert.deepEqual(result.diagnostics, []);
   assert.deepEqual(input, files, "the list handed in is not changed");
 });

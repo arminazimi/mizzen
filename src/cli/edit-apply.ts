@@ -1,6 +1,6 @@
 /**
  * `mizzen edit apply <patch.json> [dir] [--dry-run] [--proof <path>]`: apply one agent patch and
- * write its proof ([#1510], N30).
+ * write its proof (#1510, N30).
  *
  * The patch is the plain-data shape of N27 (`src/edits/patch.ts`): one span with 1-based lines and
  * columns, the optional text it expected to find there, its replacement, and the optional SHA-256
@@ -17,7 +17,6 @@
  * patch or a refused path (the file is unchanged), `2` a usage problem, such as a patch that is
  * missing or is not a patch.
  *
- * [#1510]: https://github.com/arminazimi/slipway/issues/1510
  */
 import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";

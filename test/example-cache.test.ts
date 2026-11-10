@@ -173,13 +173,13 @@ test("a custom folder is used, created on demand, and a non-object result is not
 test("without a folder the cache lives under the site root and is safe to delete", async () => {
   const root = scratch();
   try {
-    assert.equal(exampleCacheDirOf(root), join(resolve(root), ".slipway", "examples"));
+    assert.equal(exampleCacheDirOf(root), join(resolve(root), ".mizzen", "examples"));
     const cache = exampleCache({ root });
     const key = cache.key(EXAMPLE);
     assert.equal(cache.dir, exampleCacheDirOf(root));
 
     await cache.set(key, { ok: true, stdout: "hi\n" });
-    assert.equal(existsSync(join(root, ".slipway", "examples", `${key}.json`)), true);
+    assert.equal(existsSync(join(root, ".mizzen", "examples", `${key}.json`)), true);
 
     rmSync(cache.dir, { recursive: true, force: true });
     assert.equal(await cache.get(key), undefined, "a deleted cache is a miss");

@@ -97,10 +97,10 @@ async function manifestOf(model: Site): Promise<{ version: number; pages: Entry[
 
 const byUrl = (entries: readonly Entry[]): Map<string, Entry> => new Map(entries.map((e) => [e.url, e]));
 
-test("the output is named after its file and writes .slipway/manifest.json", async () => {
+test("the output is named after its file and writes .mizzen/manifest.json", async () => {
   assert.equal(manifest.name, "manifest");
   const file = await run(site([page("/")]));
-  assert.equal(file.path, ".slipway/manifest.json");
+  assert.equal(file.path, ".mizzen/manifest.json");
   assert.ok(String(file.contents).endsWith("\n"), "the file ends with a line feed");
 });
 

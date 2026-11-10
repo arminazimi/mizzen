@@ -1,5 +1,5 @@
 /**
- * One SHA-256 for a whole build, recorded in `.slipway/manifest.json` and checked by `mizzen verify` ([#1252]).
+ * One SHA-256 for a whole build, recorded in `.mizzen/manifest.json` and checked by `mizzen verify` (#1252).
  *
  * Every file the build writes, except the manifest that records the result, is hashed; the whole-build hash is the
  * SHA-256 of one line per file (`<path>`, a NUL, the file's hash, and a line feed), with the paths sorted by code
@@ -8,14 +8,13 @@
  * The manifest cannot hash itself, so it is left out: a change to the record is not a change to the build. A site
  * file that replaces the manifest makes the build leave it alone.
  *
- * [#1252]: https://github.com/arminazimi/slipway/issues/1252
  */
 import { createHash } from "node:crypto";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
 /** Where the manifest lands, relative to the output folder. The build hash leaves it out. */
-export const MANIFEST_PATH = ".slipway/manifest.json";
+export const MANIFEST_PATH = ".mizzen/manifest.json";
 
 /** The files of a build and the hash of all of them: what the manifest's `build` field holds. */
 export interface BuildRecord {

@@ -28,7 +28,7 @@ export const RELOAD_MARKER = "data-mizzen-dev";
 export const OVERLAY_MARKER = "data-mizzen-overlay";
 
 /** Folder under the site root that `mizzen dev` writes to when `--out` is not given. Hidden, so discovery skips it. */
-export const DEFAULT_DEV_OUT = ".slipway/dev";
+export const DEFAULT_DEV_OUT = ".mizzen/dev";
 
 /** Port the dev server binds when `--port` is not given. Port `0` asks the operating system for a free one. */
 export const DEFAULT_DEV_PORT = 3000;
@@ -40,7 +40,7 @@ export const DEFAULT_DEV_HOST = "127.0.0.1";
 const WATCH_DELAY = 40;
 
 /** Folders that never affect a build and would otherwise make the watcher rebuild in a loop. */
-const IGNORED = new Set(["node_modules", ".git", ".tmp", ".slipway"]);
+const IGNORED = new Set(["node_modules", ".git", ".tmp", ".mizzen"]);
 
 /**
  * The inline client: one SSE connection per page, closed before the reload so it does not reconnect first, and an
@@ -99,7 +99,7 @@ export interface DevOptions {
   readonly host?: string;
   /** Layout for a page that names none in its front matter or in `defaults`. */
   readonly defaultLayout?: string;
-  /** Reuse an unchanged build from `.slipway/cache`, as `mizzen build` does. Off by default. */
+  /** Reuse an unchanged build from `.mizzen/cache`, as `mizzen build` does. Off by default. */
   readonly cache?: boolean;
   /** Receives one line per rebuild and any diagnostic text. Default: silent. */
   readonly log?: (message: string) => void;

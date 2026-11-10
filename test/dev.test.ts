@@ -11,7 +11,7 @@ const THEME = fileURLToPath(new URL("../../lateen", import.meta.url));
 const FIXTURE = fileURLToPath(new URL("../fixtures/docs-site", import.meta.url));
 
 /** Folders other test files write into the fixture while it is being copied; a build cache is never input. */
-const TRANSIENT = new Set([".slipway", ".tmp", "node_modules", ".git"]);
+const TRANSIENT = new Set([".mizzen", ".tmp", "node_modules", ".git"]);
 
 /** Copies the fixture without the folders a concurrent build may be writing, so the copy cannot race. */
 function copyFixture(to: string): void {

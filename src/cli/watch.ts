@@ -15,13 +15,13 @@ import { build } from "../pipeline/build.ts";
 import { formatText } from "../pipeline/diagnostics.ts";
 
 /** Folder under the site root that `mizzen watch` writes to when `--out` is not given. Hidden, so discovery skips it. */
-export const DEFAULT_WATCH_OUT = ".slipway/watch";
+export const DEFAULT_WATCH_OUT = ".mizzen/watch";
 
 /** How long changes are collected before one rebuild, so an editor's burst of writes builds once. */
 export const DEFAULT_WATCH_DEBOUNCE_MS = 40;
 
 /** Folders that never affect a build and would otherwise make the watcher rebuild in a loop. */
-const IGNORED = new Set(["node_modules", ".git", ".tmp", ".slipway"]);
+const IGNORED = new Set(["node_modules", ".git", ".tmp", ".mizzen"]);
 
 /** What one watch rebuild wrote and how long it took. */
 export interface WatchBuild {
@@ -43,7 +43,7 @@ export interface WatchOptions {
   readonly themeRoot: string;
   /** Layout for a page that names none in its front matter or in `defaults`. */
   readonly defaultLayout?: string;
-  /** Reuse an unchanged build from `.slipway/cache`, as `mizzen build` does. Off by default. */
+  /** Reuse an unchanged build from `.mizzen/cache`, as `mizzen build` does. Off by default. */
   readonly cache?: boolean;
   /** Receives one line per rebuild and any diagnostic text. Default: silent. */
   readonly log?: (message: string) => void;
@@ -194,7 +194,7 @@ export async function watch(options: WatchOptions): Promise<Watcher> {
   };
 }
 
-/** The default output folder of a site under watch: `<root>/.slipway/watch`. */
+/** The default output folder of a site under watch: `<root>/.mizzen/watch`. */
 export function watchOutOf(root: string): string {
   return join(resolve(root), DEFAULT_WATCH_OUT);
 }

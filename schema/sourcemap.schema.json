@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/arminazimi/slipway/schema/sourcemap.schema.json",
-  "title": "Slipway source map",
+  "$id": "https://github.com/velella-sh/mizzen/schema/sourcemap.schema.json",
+  "title": "Mizzen source map",
   "description": "/sourcemap.json at the site root: which source file, and which line in it, produced each built page, section, and link. Version 0 is a draft; see spec/sourcemap/v0.md. A url must not appear twice, which JSON Schema cannot express; tools/theme/sourcemap.ts checks it.",
   "type": "object",
   "required": [

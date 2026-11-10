@@ -194,14 +194,14 @@ test("keeps an absolute file inside the site root relative in the record", () =>
 test("writes the record atomically, replacing an old one whole and leaving no temporary entry", async () => {
   const root = scratch();
   try {
-    const out = ".slipway/proof.json";
+    const out = ".mizzen/proof.json";
     const first = await writeProof({ ...input({ after: { "docs/a.md": "one\n" } }), siteRoot: root, out });
     assert.equal(readFileSync(join(root, out), "utf8"), formatProof(first));
 
     const second = await writeProof({ ...input({ after: { "docs/a.md": "two\n" } }), siteRoot: root, out });
     assert.equal(readFileSync(join(root, out), "utf8"), formatProof(second));
-    assert.deepEqual(readdirSync(join(root, ".slipway")), ["proof.json"], "no staging folder is left");
-    assert.deepEqual(readdirSync(root), [".slipway"]);
+    assert.deepEqual(readdirSync(join(root, ".mizzen")), ["proof.json"], "no staging folder is left");
+    assert.deepEqual(readdirSync(root), [".mizzen"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -210,7 +210,7 @@ test("writes the record atomically, replacing an old one whole and leaving no te
 test("a refused record writes nothing and leaves an existing record untouched", async () => {
   const root = scratch();
   try {
-    const out = join(root, ".slipway", "proof.json");
+    const out = join(root, ".mizzen", "proof.json");
     const first = await writeProof({ ...input(), siteRoot: root, out });
     const bytes = readFileSync(out, "utf8");
 
@@ -220,12 +220,12 @@ test("a refused record writes nothing and leaves an existing record untouched", 
     );
     assert.equal(readFileSync(out, "utf8"), bytes);
 
-    const missing = join(root, ".slipway", "never.json");
+    const missing = join(root, ".mizzen", "never.json");
     await assert.rejects(
       writeProof({ ...input({ files: ["../outside.md"] }), siteRoot: root, out: missing }),
       (error: unknown) => error instanceof ProofError && error.code === "invalid-path",
     );
-    assert.deepEqual(readdirSync(join(root, ".slipway")), ["proof.json"]);
+    assert.deepEqual(readdirSync(join(root, ".mizzen")), ["proof.json"]);
     assert.equal(first.version, PROOF_VERSION);
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -95,7 +95,7 @@ function validator() {
 test("SARIF 2.1.0 output validates against the SARIF schema", () => {
   const validate = validator();
   for (const set of [sample().all, [], [{ id: "only.note", severity: "info", message: "m" } satisfies Diagnostic]]) {
-    const log: unknown = JSON.parse(formatSarif(set, { tool: { name: "slipway", version: "0.1.0", informationUri: "https://github.com/arminazimi/slipway" } }));
+    const log: unknown = JSON.parse(formatSarif(set, { tool: { name: "mizzen", version: "0.1.0", informationUri: "https://github.com/velella-sh/mizzen" } }));
     assert.equal(validate(log), true, JSON.stringify(validate.errors));
   }
   assert.equal(validate({ version: "2.1.0", runs: [{ tool: {}, results: [] }] }), false, "the validator must reject an invalid log");
@@ -106,7 +106,7 @@ test("SARIF: levels, rules, regions, encoded URIs, and help", () => {
     runs: { tool: { driver: { name: string; rules: { id: string }[] } }; results: Record<string, any>[] }[];
   };
   const run = log.runs[0]!;
-  assert.equal(run.tool.driver.name, "slipway");
+  assert.equal(run.tool.driver.name, "mizzen");
   assert.deepEqual(run.tool.driver.rules.map((r) => r.id), ["build.note", "config.unknown-key", "link.broken", "md.فارسی"]);
   assert.deepEqual(run.results.map((r) => r["level"]), ["error", "warning", "error", "note"]);
   const first = run.results[0]!;

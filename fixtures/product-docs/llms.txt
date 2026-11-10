@@ -1,6 +1,6 @@
 # Beacon
 
-> Documentation for the Beacon deploy CLI. This file is written by the product's own tooling, not by Slipway.
+> Documentation for the Beacon deploy CLI. This file is written by the product's own tooling, not by Mizzen.
 
 Sections:
 

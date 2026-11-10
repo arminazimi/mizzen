@@ -68,16 +68,16 @@ test("a timeout kills the example and reports a timeout instead of hanging", asy
 });
 
 test("the environment is scrubbed to PATH, HOME, TMPDIR, LANG, and NO_COLOR", async () => {
-  process.env.SLIPWAY_SCRUB_PROBE = "leaked";
+  process.env.MIZZEN_SCRUB_PROBE = "leaked";
   try {
     const result = await runNodeExample({
       lang: "js",
-      env: { SLIPWAY_EXTRA: "kept" },
+      env: { MIZZEN_EXTRA: "kept" },
       code: [
         "console.log(JSON.stringify({",
         "  cwd: process.cwd(),",
-        '  probe: process.env.SLIPWAY_SCRUB_PROBE ?? null,',
-        '  extra: process.env.SLIPWAY_EXTRA ?? null,',
+        '  probe: process.env.MIZZEN_SCRUB_PROBE ?? null,',
+        '  extra: process.env.MIZZEN_EXTRA ?? null,',
         '  home: process.env.HOME ?? null,',
         '  tmpdir: process.env.TMPDIR ?? null,',
         '  lang: process.env.LANG ?? null,',
@@ -97,7 +97,7 @@ test("the environment is scrubbed to PATH, HOME, TMPDIR, LANG, and NO_COLOR", as
     assert.equal(seen.noColor, "1");
     assert.equal(seen.hasPath, true);
   } finally {
-    delete process.env.SLIPWAY_SCRUB_PROBE;
+    delete process.env.MIZZEN_SCRUB_PROBE;
   }
 });
 

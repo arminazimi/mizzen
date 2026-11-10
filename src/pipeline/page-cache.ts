@@ -1,5 +1,5 @@
 /**
- * A per-page Markdown cache ([#1561]): every page's mdast tree is kept under `<dir>/<hash>.json`, keyed by the page's
+ * A per-page Markdown cache (#1561): every page's mdast tree is kept under `<dir>/<hash>.json`, keyed by the page's
  * expanded Markdown, the line its body starts on, the Markdown plugins (name and order), and the engine version.
  *
  * Only the parse stage is cached. Front matter, includes, titles, permalinks, navigation, data, facts, rendering, and
@@ -8,7 +8,6 @@
  * entry is a miss, never bad content. Writes land in a temporary folder first and are renamed into place, so a reader
  * never sees half an entry.
  *
- * [#1561]: https://github.com/arminazimi/slipway/issues/1561
  */
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";

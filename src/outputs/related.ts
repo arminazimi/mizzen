@@ -37,7 +37,7 @@ const MAX_RELATED = 5;
 const FILE = "related.json";
 
 /** A fake origin, so relative URLs resolve without the environment deciding anything. */
-const ORIGIN = "https://slipway.invalid";
+const ORIGIN = "https://mizzen.invalid";
 
 /** A scheme (`https:`, `mailto:`) or protocol-relative (`//`) URL, which leaves the site. */
 const EXTERNAL = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i;

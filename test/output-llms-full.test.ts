@@ -11,7 +11,7 @@ const pos = { file: "guide/install.md", line: 1, column: 1, endLine: 1, endColum
 /** A site config with the defaults a build fills in, plus the given overrides. */
 function config(overrides: Partial<SiteConfig> = {}): SiteConfig {
   return {
-    title: "Slipway",
+    title: "Mizzen",
     base: "",
     lang: "en",
     dir: "ltr",
@@ -240,7 +240,7 @@ test("with no main list the reading order follows docs, and a site with no pages
   );
   assert.deepEqual(sources(await run(model)), ["/a/", "/b/"]);
 
-  assert.equal(await run(site([], {})), "# Slipway\n");
+  assert.equal(await run(site([], {})), "# Mizzen\n");
   assert.equal(await run(site([], {}, { title: "Docs", description: "A  summary.\n" })), "# Docs\n\n> A summary.\n");
 });
 

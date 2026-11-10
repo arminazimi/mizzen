@@ -11,7 +11,7 @@ const pos = { file: "guide/install.md", line: 1, column: 1, endLine: 1, endColum
 /** A site config with the defaults a build fills in, plus the given overrides. */
 function config(overrides: Partial<SiteConfig> = {}): SiteConfig {
   return {
-    title: "Slipway",
+    title: "Mizzen",
     base: "",
     lang: "en",
     dir: "ltr",
@@ -134,7 +134,7 @@ test("the description is the summary, and each link carries its page's descripti
   assert.equal(
     await run(model),
     [
-      "# Slipway",
+      "# Mizzen",
       "",
       "> A site for agents.",
       "",
@@ -162,7 +162,7 @@ test("sections follow the navigation groups, in order, and a page listed twice i
   assert.equal(
     text,
     [
-      "# Slipway",
+      "# Mizzen",
       "",
       "## Pages",
       "",
@@ -196,7 +196,7 @@ test("external links, links to missing pages, app pages, and files without a twi
       ],
     },
   );
-  assert.equal(await run(model), "# Slipway\n\n## Guide\n\n- [Install](/guide/install/index.md)\n");
+  assert.equal(await run(model), "# Mizzen\n\n## Guide\n\n- [Install](/guide/install/index.md)\n");
 });
 
 test("link text is escaped, and a description keeps no line break", async () => {
@@ -216,5 +216,5 @@ test("a site without a url links with paths that include base, and an empty navi
     { base: "/docs", title: "Docs", description: "Summary." },
   );
   assert.equal(await run(model), "# Docs\n\n> Summary.\n\n## Pages\n\n- [Guide](/docs/guide/index.md)\n");
-  assert.equal(await run(site([], {})), "# Slipway\n");
+  assert.equal(await run(site([], {})), "# Mizzen\n");
 });

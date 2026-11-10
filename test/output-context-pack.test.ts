@@ -8,7 +8,7 @@ import { estimateTokens } from "../src/packs/tokens.ts";
 /** A site config with the defaults a build fills in, plus the given overrides. */
 function config(overrides: Partial<SiteConfig> = {}): SiteConfig {
   return {
-    title: "Slipway",
+    title: "Mizzen",
     base: "",
     lang: "en",
     dir: "ltr",

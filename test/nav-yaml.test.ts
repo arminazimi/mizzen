@@ -55,10 +55,10 @@ test("the 0.2 shape: main, docs, and per-language lists, with groups, children, 
 });
 
 test("an https link and a language suffix of three letters are accepted", () => {
-  const text = "main:\n  - title: Source\n    url: https://github.com/arminazimi/slipway\ndocs_fil:\n  - title: Home\n    url: /\n";
+  const text = "main:\n  - title: Source\n    url: https://github.com/velella-sh/mizzen\ndocs_fil:\n  - title: Home\n    url: /\n";
   const { nav, diagnostics } = navFromYaml(text, "_data/navigation.yml");
   assert.deepEqual(diagnostics, []);
-  assert.deepEqual(nav.main, [{ title: "Source", url: "https://github.com/arminazimi/slipway" }]);
+  assert.deepEqual(nav.main, [{ title: "Source", url: "https://github.com/velella-sh/mizzen" }]);
   assert.deepEqual(nav.docs_fil, [{ title: "Home", url: "/" }]);
 });
 

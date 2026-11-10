@@ -31,7 +31,7 @@ export interface CssBundlerOptions {
   readonly base: readonly string[];
   /** Browsers to lower the CSS for. Unset keeps modern syntax, including logical properties. */
   readonly targets?: Targets;
-  /** The site's base path (`/slipway`, or `""`); `url()` references to theme files are rewritten to start with it. */
+  /** The site's base path (`/mizzen`, or `""`); `url()` references to theme files are rewritten to start with it. */
   readonly urlBase?: string;
 }
 

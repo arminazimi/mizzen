@@ -359,7 +359,7 @@ export function islandPath(rel: string): string {
   return `${ISLAND_DIR}/${rel.split(sep).join("/").replace(/\.ts$/, ".js")}`;
 }
 
-/** The URL of an island's entry module under `base` (the site's base path, `""` or `/slipway`). */
+/** The URL of an island's entry module under `base` (the site's base path, `""` or `/mizzen`). */
 export function islandUrl(base: string, clientRel: string): string {
   return `${base}/${islandPath(clientRel)}`;
 }

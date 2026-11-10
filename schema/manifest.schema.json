@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Mizzen build manifest",
-  "description": "`.slipway/manifest.json` in the output folder: one entry per rendered page, naming its URL, source file, title, layout, output files, and hashes, so doctor and the MCP server read the build instead of guessing. Pages are sorted by URL and output paths by code point.",
+  "description": "`.mizzen/manifest.json` in the output folder: one entry per rendered page, naming its URL, source file, title, layout, output files, and hashes, so doctor and the MCP server read the build instead of guessing. Pages are sorted by URL and output paths by code point.",
   "type": "object",
   "required": [
     "pages",
