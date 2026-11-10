@@ -1,4 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
-<title id="title">Slipway mark (dark surface)</title>
-<defs><clipPath id="m-above"><polygon points="-112.6,-51.4 378.9,292.7 545.8,54.3 54.3,-289.8"/></clipPath><clipPath id="m-below"><polygon points="-122.9,-36.7 368.6,307.4 201.7,545.8 -289.8,201.7"/></clipPath></defs><g fill="none" stroke-width="16"><g clip-path="url(#m-above)" stroke="#ECEFF4"><circle cx="128" cy="128" r="88"/><circle cx="128" cy="128" r="58"/></g><g clip-path="url(#m-below)" stroke="#7E9CD8"><circle cx="128" cy="128" r="88"/><circle cx="128" cy="128" r="58"/></g></g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="Mizzen"><title>Mizzen</title><path d="M30 26L90 26L30 92ZM30 43L30 38L42 38L42 43ZM30 53L30 48L35 48L35 53ZM30 63L30 58L42 58L42 63ZM30 73L30 68L35 68L35 73Z" fill="#E6C384" fill-rule="evenodd"/></svg>

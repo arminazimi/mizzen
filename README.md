@@ -1,8 +1,40 @@
-# Mizzen (`@velella/mizzen`)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/arminazimi/mizzen/main/.github/assets/mark-night.svg">
+    <img src="https://raw.githubusercontent.com/arminazimi/mizzen/main/.github/assets/mark-day.svg" width="96" height="96" alt="Mizzen">
+  </picture>
+</p>
 
-A deterministic docs engine with exact source positions: config, the content model, Markdown, navigation, the render host, outputs, diagnostics, and the CLI. It lives in its own repository, split from the Slipway monorepo (ADR 0025 in `arminazimi/slipway`).
+<h1 align="center">Mizzen</h1>
 
-It knows nothing about the theme: nothing here imports from the theme, and no theme name, color, or layout appears in it. `test/boundary.test.ts` is the place to enforce it.
+<p align="center">
+  <strong>Same input. Same site.</strong><br>
+  A deterministic docs engine with exact source positions.
+</p>
+
+<p align="center">
+  <a href="https://github.com/arminazimi/mizzen/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/arminazimi/mizzen/ci.yml?branch=main&label=CI&logo=github&logoColor=white&labelColor=1F1F28&color=3F6E66&style=flat"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-3F6E66?labelColor=1F1F28&style=flat"></a>
+  <a href="https://arminazimi.github.io/mizzen/"><img alt="docs" src="https://img.shields.io/badge/docs-mizzen-3F6E66?labelColor=1F1F28&style=flat"></a>
+</p>
+
+<p align="center">
+  <a href="https://arminazimi.github.io/mizzen/install/">Quick start</a> ·
+  <a href="https://arminazimi.github.io/mizzen/">Documentation</a> ·
+  <a href="#contributing">Contributing</a> ·
+  <a href="https://github.com/arminazimi/lateen">Lateen</a>
+</p>
+
+---
+
+A deterministic docs engine with exact source positions: config, the content model, Markdown, navigation, the render host, outputs, diagnostics, and the CLI. It knows nothing about the theme: nothing here imports from the theme, and no theme name, color, or layout appears in it. `test/boundary.test.ts` is the place to enforce it.
+
+## Why Mizzen
+
+- **Deterministic.** The same input gives byte-identical output, in the same order, with LF line endings.
+- **Traceable.** Every page keeps the exact source position of its text, so a tool or an agent can edit the right line.
+- **Agent-ready.** A build also writes `llms.txt`, Markdown twins, a source map, and per-page JSON beside the HTML.
+- **Theme-free.** The engine knows nothing about colors or layouts; [Lateen](https://github.com/arminazimi/lateen) draws the pages.
 
 A build runs eight stages, each a function from typed input to typed output: config, discover, front matter, Markdown, HTML, site model, render, and outputs. Stages talk only through the frozen types in `src/contracts/`. The same input gives byte-identical output, in the same order, with LF line endings.
 
@@ -279,3 +311,15 @@ The loader and the hook runners are `loadCodeConfig()`, `runContentHooks()`, `ru
 - `bin/slipway.ts`: the `mizzen` command.
 - `schema/config.schema.json`: the site config schema.
 - `test/`: `*.test.ts` files for `node --test`.
+
+## Contributing
+
+Bug reports, fixes, and docs improvements are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
+
+## License
+
+[Apache-2.0](LICENSE).
+
+---
+
+<p align="center">Mizzen is part of <a href="https://velella.sh">Velella</a>. The mast behind the sail.</p>

@@ -1,5 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
-<title id="title">Slipway</title>
-<rect width="256" height="256" rx="56" fill="#1F1F28"/>
-<defs><clipPath id="f-above"><polygon points="-108.6,-57.2 382.9,287 545.8,54.3 54.3,-289.8"/></clipPath><clipPath id="f-below"><polygon points="-126.9,-31 364.6,313.2 201.7,545.8 -289.8,201.7"/></clipPath></defs><g fill="none" stroke-width="36"><g clip-path="url(#f-above)" stroke="#ECEFF4"><circle cx="128" cy="128" r="76"/></g><g clip-path="url(#f-below)" stroke="#7E9CD8"><circle cx="128" cy="128" r="76"/></g></g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img" aria-label="Mizzen"><title>Mizzen</title><style>.t{fill:#1F1F28}.m{fill:#E6C384}@media (prefers-color-scheme: light){.t{fill:#ECEFF4}.m{fill:#8A6220}}</style><rect class="t" width="16" height="16" rx="3.5"/><path class="m" d="M4 3L12 3L4 13ZM4 7L4 6L6 6L6 7ZM4 10L4 9L6 9L6 10Z" fill-rule="evenodd"/></svg>
