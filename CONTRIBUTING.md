@@ -7,8 +7,8 @@ Thank you for helping. Most contributions are a bug report, a fix, a docs improv
 Mizzen needs Node 24 or later, which runs the TypeScript source directly: there is no build step.
 
 ```bash
-git clone https://github.com/arminazimi/lateen.git
-git clone https://github.com/arminazimi/mizzen.git
+git clone https://github.com/velella-sh/lateen.git
+git clone https://github.com/velella-sh/mizzen.git
 cd mizzen
 npm ci
 ```

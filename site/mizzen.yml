@@ -2,10 +2,10 @@
 title: Mizzen
 description: A deterministic docs engine with exact source positions.
 lang: en
-url: https://arminazimi.github.io
+url: https://velella.sh
 base: /mizzen
 repository:
-  url: https://github.com/arminazimi/mizzen
+  url: https://github.com/velella-sh/mizzen
   branch: main
   dir: site
 theme:
@@ -22,9 +22,9 @@ theme:
       license: "Apache-2.0 license"
       links:
         - title: GitHub
-          url: https://github.com/arminazimi/mizzen
+          url: https://github.com/velella-sh/mizzen
         - title: Lateen
-          url: https://arminazimi.github.io/lateen/
+          url: https://velella.sh/lateen/
         - title: Install
           url: /install/
         - title: Configuration

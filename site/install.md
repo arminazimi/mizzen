@@ -5,7 +5,7 @@ layout: doc
 permalink: /install/
 ---
 
-Mizzen turns a folder of Markdown into a static docs site. It is a deterministic engine: the same input gives byte-identical output, and every page keeps the exact source position of its text. A theme draws the pages; [Lateen](https://arminazimi.github.io/lateen/) is the default.
+Mizzen turns a folder of Markdown into a static docs site. It is a deterministic engine: the same input gives byte-identical output, and every page keeps the exact source position of its text. A theme draws the pages; [Lateen](https://velella.sh/lateen/) is the default.
 
 ## Requirements
 

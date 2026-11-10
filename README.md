@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/arminazimi/mizzen/main/.github/assets/mark-night.svg">
-    <img src="https://raw.githubusercontent.com/arminazimi/mizzen/main/.github/assets/mark-day.svg" width="96" height="96" alt="Mizzen">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/velella-sh/mizzen/main/.github/assets/mark-night.svg">
+    <img src="https://raw.githubusercontent.com/velella-sh/mizzen/main/.github/assets/mark-day.svg" width="96" height="96" alt="Mizzen">
   </picture>
 </p>
 
@@ -13,16 +13,16 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/arminazimi/mizzen/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/arminazimi/mizzen/ci.yml?branch=main&label=CI&logo=github&logoColor=white&labelColor=1F1F28&color=8A6220&style=flat"></a>
+  <a href="https://github.com/velella-sh/mizzen/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/velella-sh/mizzen/ci.yml?branch=main&label=CI&logo=github&logoColor=white&labelColor=1F1F28&color=8A6220&style=flat"></a>
   <a href="https://www.npmjs.com/package/@velella/mizzen"><img alt="npm" src="https://img.shields.io/npm/v/@velella/mizzen?label=npm&logo=npm&logoColor=white&labelColor=1F1F28&color=8A6220&style=flat"></a>
-  <a href="https://github.com/arminazimi/mizzen/actions/workflows/ci.yml"><img alt="coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Farminazimi%2Fmizzen%2Fbadges%2Fcoverage.json&labelColor=1F1F28&style=flat"></a>
+  <a href="https://github.com/velella-sh/mizzen/actions/workflows/ci.yml"><img alt="coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fvelella-sh%2Fmizzen%2Fbadges%2Fcoverage.json&labelColor=1F1F28&style=flat"></a>
 </p>
 
 <p align="center">
-  <a href="https://arminazimi.github.io/mizzen/install/">Quick start</a> ·
-  <a href="https://arminazimi.github.io/mizzen/">Documentation</a> ·
+  <a href="https://velella.sh/mizzen/install/">Quick start</a> ·
+  <a href="https://velella.sh/mizzen/">Documentation</a> ·
   <a href="#contributing">Contributing</a> ·
-  <a href="https://github.com/arminazimi/lateen">Lateen</a>
+  <a href="https://github.com/velella-sh/lateen">Lateen</a>
 </p>
 
 ---
@@ -34,7 +34,7 @@ A deterministic docs engine with exact source positions: config, the content mod
 - **Deterministic.** The same input gives byte-identical output, in the same order, with LF line endings.
 - **Traceable.** Every page keeps the exact source position of its text, so a tool or an agent can edit the right line.
 - **Agent-ready.** A build also writes `llms.txt`, Markdown twins, a source map, and per-page JSON beside the HTML.
-- **Theme-free.** The engine knows nothing about colors or layouts; [Lateen](https://github.com/arminazimi/lateen) draws the pages.
+- **Theme-free.** The engine knows nothing about colors or layouts; [Lateen](https://github.com/velella-sh/lateen) draws the pages.
 
 A build runs eight stages, each a function from typed input to typed output: config, discover, front matter, Markdown, HTML, site model, render, and outputs. Stages talk only through the frozen types in `src/contracts/`. The same input gives byte-identical output, in the same order, with LF line endings.
 
@@ -47,7 +47,7 @@ The source is TypeScript that Node runs directly through type stripping (Node 24
 - `npm test` runs `node --test` on `test/**/*.test.ts`.
 - `npm run typecheck` runs `tsc --noEmit`.
 
-Many tests build the fixtures in `fixtures/` with the theme, so check out [Lateen](https://github.com/arminazimi/lateen) next to this repository (`../lateen`) and run `npm ci` in both.
+Many tests build the fixtures in `fixtures/` with the theme, so check out [Lateen](https://github.com/velella-sh/lateen) next to this repository (`../lateen`) and run `npm ci` in both.
 
 ## CLI
 

@@ -14,13 +14,13 @@
     "deterministic",
     "source-map"
   ],
-  "homepage": "https://arminazimi.github.io/mizzen/",
+  "homepage": "https://velella.sh/mizzen/",
   "bugs": {
-    "url": "https://github.com/arminazimi/mizzen/issues"
+    "url": "https://github.com/velella-sh/mizzen/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/arminazimi/mizzen.git"
+    "url": "git+https://github.com/velella-sh/mizzen.git"
   },
   "license": "Apache-2.0",
   "type": "module",
