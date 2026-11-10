@@ -4,3 +4,17 @@ description: A deterministic docs engine with exact source positions.
 lang: en
 url: https://arminazimi.github.io
 base: /mizzen
+repository:
+  url: https://github.com/arminazimi/mizzen
+  branch: main
+  dir: site
+theme:
+  options:
+    footer:
+      copyright: "© Velella"
+      license: "Apache-2.0 license"
+      links:
+        - title: GitHub
+          url: https://github.com/arminazimi/mizzen
+        - title: Lateen
+          url: https://arminazimi.github.io/lateen/

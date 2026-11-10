@@ -1,0 +1,27 @@
+main:
+  - title: Start
+    children:
+      - title: "Mizzen"
+        url: /
+      - title: "No build step"
+        url: /no-build-step/
+  - title: Use
+    tab: true
+    children:
+      - title: "Commands"
+        url: /commands/
+      - title: "CLI"
+        url: /cli/
+      - title: "Config"
+        url: /config/
+  - title: Extend
+    tab: true
+    children:
+      - title: "Programmatic API"
+        url: /programmatic-api/
+      - title: "Plugins"
+        url: /plugins/
+      - title: "Outputs"
+        url: /outputs/
+      - title: "Layout"
+        url: /layout/
