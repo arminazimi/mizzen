@@ -1,0 +1,204 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import type { Heading, Page, SourcePos } from "../src/contracts/index.ts";
+import { rankPages } from "../src/packs/rank.ts";
+
+function pos(file: string): SourcePos {
+  return { file, line: 1, column: 1, endLine: 1, endColumn: 1 };
+}
+
+interface PageOptions {
+  readonly title?: string;
+  readonly headings?: readonly string[];
+  readonly html?: string;
+  readonly markdown?: string;
+  readonly source?: string;
+}
+
+function page(url: string, options: PageOptions = {}): Page {
+  const source = options.source ?? "guide/page.md";
+  const headings: Heading[] = (options.headings ?? []).map((text, index) => ({
+    depth: 2,
+    id: `heading-${index}`,
+    text,
+    pos: pos(source),
+  }));
+  return {
+    url,
+    source: pos(source),
+    frontMatter: {},
+    title: options.title ?? "Page",
+    lang: "en",
+    dir: "ltr",
+    headings,
+    html: options.html ?? "",
+    markdown: options.markdown ?? "",
+    kind: "doc",
+  };
+}
+
+/** The five-page fixture the acceptance criteria ask for: three guide pages, a reference page, and an about page. */
+function fivePages(): readonly Page[] {
+  return [
+    page("/reference/cli/", {
+      title: "CLI reference",
+      html: "<p>Run the command.</p><p>The install flag prints help.</p>",
+    }),
+    page("/guide/deploy/", {
+      title: "Deploy the site",
+      html: '<p>Build the site and install it behind a proxy.</p><p>Install again after a release.</p><a href="/guide/configure/">Configure first</a>',
+    }),
+    page("/guide/configure/", {
+      title: "Configure the site",
+      html:
+        '<p>Install the engine, then install the plugin.</p><p>Install notes cover install order.</p><a href="/guide/deploy/">Deploy</a>',
+    }),
+    page("/guide/install/", {
+      title: "Install the engine",
+      headings: ["Install"],
+      html: '<p>Download the package.</p><a href="/guide/configure/">Next</a>',
+    }),
+    page("/about/", {
+      title: "About",
+      html: "<p>A page about the project.</p>",
+    }),
+  ];
+}
+
+test("five pages rank by query terms and inbound links", () => {
+  const ranked = rankPages(fivePages(), "install");
+
+  assert.deepEqual(
+    ranked.map((entry) => entry.page.url),
+    ["/guide/install/", "/guide/configure/", "/guide/deploy/", "/reference/cli/", "/about/"],
+  );
+  assert.equal(ranked[0]?.score, 12);
+  assert.equal(ranked[0]?.inboundLinks, 0);
+  assert.equal(ranked[1]?.score, 6);
+  assert.equal(ranked[1]?.inboundLinks, 2);
+  assert.equal(ranked[2]?.inboundLinks, 1);
+  assert.equal(ranked[4]?.score, 0);
+});
+
+test("title, headings, and body carry their documented weights, and headings are not counted as body", () => {
+  const ranked = rankPages(
+    [
+      page("/body/", { title: "Other", html: "<p>Install once.</p>" }),
+      page("/heading/", { title: "Other", headings: ["Install"], html: "<h2>Install</h2><p>Nothing.</p>" }),
+      page("/title/", { title: "Install", html: "<p>Nothing.</p>" }),
+      page("/none/", { title: "Other", html: "<p>Nothing.</p>" }),
+    ],
+    "install",
+  );
+
+  assert.deepEqual(
+    ranked.map((entry) => entry.page.url),
+    ["/title/", "/heading/", "/body/", "/none/"],
+  );
+  assert.deepEqual(ranked.map((entry) => entry.score), [8, 4, 1, 0]);
+});
+
+test("the same input always gives the same order, with URL code points breaking ties", () => {
+  const pages = [page("/m/", { title: "Same" }), page("/z/", { title: "Same" }), page("/a/", { title: "Same" })];
+  const before = pages.map((entry) => entry.url);
+
+  const first = rankPages(pages, "same");
+  const second = rankPages([...pages].reverse(), "same");
+
+  assert.deepEqual(first.map((entry) => entry.page.url), ["/a/", "/m/", "/z/"]);
+  assert.deepEqual(second.map((entry) => entry.page.url), first.map((entry) => entry.page.url));
+  assert.deepEqual(second.map((entry) => entry.score), first.map((entry) => entry.score));
+  assert.deepEqual(pages.map((entry) => entry.url), before, "ranking does not mutate the input");
+});
+
+test("an empty or stopword-only query returns every page with score zero, ordered by URL", () => {
+  const expected = ["/about/", "/guide/configure/", "/guide/deploy/", "/guide/install/", "/reference/cli/"];
+
+  for (const query of ["", "   ", "the and of", "The OF this", "در و از"]) {
+    const ranked = rankPages(fivePages(), query);
+    assert.deepEqual(ranked.map((entry) => entry.page.url), expected, query);
+    assert.ok(ranked.every((entry) => entry.score === 0), query);
+  }
+});
+
+test("duplicate query terms count once", () => {
+  const once = rankPages(fivePages(), "install");
+  const twice = rankPages(fivePages(), "install install INSTALL");
+
+  assert.deepEqual(twice.map((entry) => entry.page.url), once.map((entry) => entry.page.url));
+  assert.deepEqual(twice.map((entry) => entry.score), once.map((entry) => entry.score));
+});
+
+test("Persian and Arabic forms match across ZWNJ, letter variants, and diacritics", () => {
+  const pages = [
+    page("/fa/a/", { title: "می‌رود", html: "<p>متن</p>" }),
+    page("/fa/b/", { title: "ميرود", html: "<p>متن</p>" }),
+    page("/fa/c/", { title: "کتاب", html: "<p>متن</p>" }),
+    page("/fa/d/", { title: "كِتَاب", html: "<p>متن</p>" }),
+    page("/fa/e/", { title: "دیگر", html: "<p>متن</p>" }),
+  ];
+
+  for (const query of ["میرود", "می‌رود", "ميرود"]) {
+    const ranked = rankPages(pages, query);
+    assert.deepEqual(
+      ranked.slice(0, 2).map((entry) => entry.page.url),
+      ["/fa/a/", "/fa/b/"],
+      query,
+    );
+    assert.ok(ranked.slice(2).every((entry) => entry.score === 0), query);
+  }
+
+  const ketab = rankPages(pages, "کتاب");
+  assert.deepEqual(
+    ketab.slice(0, 2).map((entry) => entry.page.url),
+    ["/fa/c/", "/fa/d/"],
+  );
+  assert.ok(ketab.slice(2).every((entry) => entry.score === 0));
+});
+
+test("inbound links raise an equal match, with and without the site base", () => {
+  const pages = [
+    page("/docs/guide/a/", { title: "Alpha", html: '<p>Alpha</p><a href="/guide/b/">B</a>' }),
+    page("/docs/guide/b/", { title: "Alpha", html: "<p>Alpha</p>" }),
+  ];
+
+  for (const options of [{ base: "/docs" }, {}]) {
+    const ranked = rankPages(pages, "alpha", options);
+    assert.deepEqual(
+      ranked.map((entry) => entry.page.url),
+      ["/docs/guide/b/", "/docs/guide/a/"],
+      JSON.stringify(options),
+    );
+    assert.equal(ranked[0]?.inboundLinks, 1);
+  }
+});
+
+test("a page with only Markdown contributes links through permalink", () => {
+  const pages = [
+    page("/guide/a/", { title: "Alpha", source: "guide/a.md", markdown: "[Beta](b.md)" }),
+    page("/guide/b/", { title: "Alpha", source: "guide/b.md" }),
+  ];
+
+  const ranked = rankPages(pages, "alpha");
+  assert.deepEqual(ranked.map((entry) => entry.page.url), ["/guide/b/", "/guide/a/"]);
+  assert.equal(ranked[0]?.inboundLinks, 1);
+});
+
+test("self-links are ignored, repeated links count once per page, and anchors and queries still name the page", () => {
+  const pages = [
+    page("/z/", {
+      title: "Alpha",
+      html: '<a href="/z/">self</a><a href="/b/?from=z#top">B</a><a href="/b/">B again</a>',
+    }),
+    page("/a/", { title: "Alpha" }),
+    page("/b/", { title: "Alpha" }),
+    page("/c/", { title: "Alpha", html: '<a href="/b/">B</a>' }),
+  ];
+
+  const ranked = rankPages(pages, "alpha");
+  assert.deepEqual(
+    ranked.map((entry) => entry.page.url),
+    ["/b/", "/a/", "/c/", "/z/"],
+  );
+  assert.equal(ranked[0]?.inboundLinks, 2);
+});

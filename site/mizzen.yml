@@ -1,0 +1,6 @@
+# Mizzen's own documentation, built by Mizzen with the Lateen theme.
+title: Mizzen
+description: A deterministic docs engine with exact source positions.
+lang: en
+url: https://arminazimi.github.io
+base: /mizzen

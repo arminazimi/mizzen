@@ -1,0 +1,35 @@
+main:
+  - title: Home
+    url: /
+  - title: Guide
+    children:
+      - title: Install
+        url: /install/
+      - title: Quickstart
+        url: /quickstart/
+      - title: Configuration
+        url: /configuration/
+      - title: Commands
+        url: /commands/
+      - title: Output format
+        url: /output/
+      - title: CI integration
+        url: /ci/
+  - title: Operations
+    children:
+      - title: Troubleshooting
+        url: /troubleshooting/
+      - title: Security
+        url: /security/
+      - title: FAQ
+        url: /faq/
+  - title: Reference
+    url: /reference/
+    match: /reference/
+  - title: Rules
+    url: /rules/
+    match: /rules/
+  - title: Features
+    url: /features/
+  - title: Dashboard
+    url: /dashboard/

@@ -1,0 +1,21 @@
+# Rule hooks-011
+
+Reports when a artifact is not readable.
+
+## Details
+
+| Property | Value |
+| --- | --- |
+| Category | `hooks` |
+| Severity | `info` |
+| Limit | 68 |
+
+## Fix
+
+Change the artifact so it no longer is not readable, then run `beacon doctor` again.
+
+```bash
+beacon doctor --rule hooks-011
+```
+
+See [all rules](./index.md) or the [doctor command](../reference/doctor.md).

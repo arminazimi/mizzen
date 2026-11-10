@@ -1,0 +1,40 @@
+name: ci
+
+# Tests and type check. Mizzen and Lateen test against each other, so both are checked out side by side.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: mizzen
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: arminazimi/lateen
+          path: lateen
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install both repositories
+        run: |
+          set -euo pipefail
+          (cd mizzen && npm install --no-audit --no-fund)
+          (cd lateen && npm install --no-audit --no-fund --no-save ../mizzen)
+      - name: Test
+        run: npm test
+        working-directory: mizzen
+      - name: Type check
+        run: npm run typecheck
+        working-directory: mizzen

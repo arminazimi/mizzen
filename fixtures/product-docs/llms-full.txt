@@ -1,0 +1,44 @@
+# Beacon - full text
+
+Written by the product's own tooling, like llms.txt. Every page below is also served as a Markdown
+twin, so an agent can read the site without a browser.
+
+## Beacon
+
+Beacon is a deploy CLI: it builds a site or a service, uploads the artifact, and records the release.
+
+## Install
+
+Beacon ships as a single binary: Homebrew, npm, or `go install`. The binary needs no runtime.
+
+## Quickstart
+
+`beacon init`, `beacon build`, `beacon deploy staging`. Each deploy is recorded, so
+`beacon rollback` and `beacon releases` stay available.
+
+## Configuration
+
+`beacon.yml` holds `build`, `publish`, `environments`, and `hooks`. Flags, then environment
+variables, then the file.
+
+## Commands
+
+`init`, `build`, `deploy`, `releases`, `rollback`, `status`. `--env`, `--dry-run`, `--json`.
+
+## Output format
+
+One line per step in text; `--json` prints one object per step with `step`, `status`, `seconds`,
+and `detail`.
+
+## CI integration
+
+`beacon deploy production --json | tee beacon.json`; keep credentials in the secret store.
+
+## Troubleshooting, security, FAQ
+
+Timeouts come from a cold cache, `error: no credentials` from an unscoped secret, and an old site
+from a target mismatch. Tokens come from `BEACON_TOKEN` and are never written to disk.
+
+## Reference
+
+Thirty generated pages, one per command, under /reference/.

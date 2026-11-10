@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Site config",
+  "description": "The site config file (ADR 0024). Every key is optional; an unknown key is an error.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Site name for the header, page titles, llms.txt, and JSON-LD. Default: the folder name."
+    },
+    "description": {
+      "type": "string",
+      "description": "One-sentence summary of the site, for the home page's meta description and llms.txt."
+    },
+    "url": {
+      "type": "string",
+      "pattern": "^https?://[^/]+$",
+      "description": "Scheme and host of the published site, without a trailing slash, such as https://example.github.io. Without it canonical links, the sitemap, and social images are relative or left out, with a warning."
+    },
+    "base": {
+      "type": "string",
+      "pattern": "^(/.*[^/])?$",
+      "default": "",
+      "description": "Path the site lives under, starting with / and without a trailing slash; empty at a domain root. Every URL the engine writes carries it."
+    },
+    "lang": {
+      "type": "string",
+      "minLength": 2,
+      "default": "en",
+      "description": "Default language of every page, as a BCP 47 tag. A page's lang wins."
+    },
+    "dir": {
+      "enum": ["ltr", "rtl"],
+      "description": "Default text direction. Unset, it comes from lang (rtl for fa, ar, he, ur, and the other right-to-left languages). A page's dir wins."
+    },
+    "languages": {
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/language" },
+      "description": "The site's languages in switcher order. Leave it out for a one-language site."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "default": ".",
+      "description": "Folder that holds the content, relative to the site root. Files outside it are not pages."
+    },
+    "include": {
+      "type": "array",
+      "default": [],
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Paths under source that discovery would skip (names starting with . or _) but should be copied or built, such as .well-known."
+    },
+    "exclude": {
+      "type": "array",
+      "default": [],
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Paths under source that are neither pages nor copied. node_modules, the output folder, and the config file are always excluded."
+    },
+    "navigation": {
+      "type": "string",
+      "minLength": 1,
+      "default": "_data/navigation.yml",
+      "description": "Navigation file, relative to the site root. When it does not exist, navigation is built from folders and each page's order."
+    },
+    "defaults": {
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/defaultsEntry" },
+      "description": "Front matter applied to every page under a path unless the page sets the key itself. Later entries win over earlier ones; a page always wins."
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https?://",
+          "description": "The repository's web URL, such as https://github.com/example/example."
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "default": "main",
+          "description": "Branch that edit links point to."
+        },
+        "dir": {
+          "type": "string",
+          "default": "",
+          "description": "The site root's folder inside the repository, such as docs."
+        }
+      },
+      "description": "Where the source lives, for Edit this page links and the Edit with your agent prompt."
+    },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Theme package or folder. Default: the theme that ships with the engine."
+        },
+        "options": {
+          "type": "object",
+          "description": "Handed to the theme unread; the theme validates it against its own schema."
+        }
+      },
+      "description": "The theme that builds the site and the options handed to it."
+    },
+    "search": {
+      "oneOf": [
+        { "const": false },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300,
+              "description": "The most characters of a page's body the index keeps. Titles and headings are always indexed."
+            }
+          }
+        }
+      ],
+      "default": {},
+      "description": "false builds no search index. As an object, text sets how much of each page's body the index keeps."
+    },
+    "redirects": {
+      "type": "object",
+      "default": {},
+      "propertyNames": { "pattern": "^/" },
+      "additionalProperties": { "type": "string", "pattern": "^(/|https://)" },
+      "description": "Redirect pages: each key is an old path under base, each value a path on the site or an https URL."
+    },
+    "outputs": {
+      "type": "object",
+      "default": {},
+      "additionalProperties": { "type": "boolean" },
+      "description": "Turns an output off by its name (false), such as twins or llms. The loader checks the names against the output registry; an unknown name is an error."
+    }
+  },
+  "$defs": {
+    "language": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "name", "prefix"],
+      "properties": {
+        "code": { "type": "string", "minLength": 2, "description": "BCP 47 tag, such as fa." },
+        "name": { "type": "string", "minLength": 1, "description": "Name shown in the language switcher, in that language." },
+        "prefix": {
+          "type": "string",
+          "pattern": "^(/.*[^/])?$",
+          "description": "URL prefix of this language's pages, such as /fa; empty for the default language."
+        }
+      }
+    },
+    "defaultsEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "values"],
+      "properties": {
+        "path": { "type": "string", "description": "Folder relative to source; empty for every page." },
+        "values": { "type": "object", "description": "Front matter keys and values to apply." }
+      }
+    }
+  }
+}

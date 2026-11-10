@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=../../packages/engine/schema/config.schema.json
+title: Beacon
+description: Documentation for the Beacon deploy CLI, in the shape of a real product's site.
+lang: en
+url: https://example.com
+defaults:
+  - path: ""
+    values:
+      layout: doc

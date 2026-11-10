@@ -1,0 +1,14 @@
+# Fixture config for a site in docs/: the site root is this folder, the repository root is its parent.
+title: Subfolder
+description: "A small site in docs/, for paths from the repository root."
+url: https://example.com
+base: ""
+lang: en
+repository:
+  url: https://github.com/example/subfolder-repo
+  branch: main
+  dir: docs
+defaults:
+  - path: ""
+    values:
+      layout: doc

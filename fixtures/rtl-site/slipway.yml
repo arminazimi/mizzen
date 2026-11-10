@@ -1,0 +1,6 @@
+# Fixture config for a small right-to-left site.
+title: راهنمای بیکن
+description: مستندات ابزار استقرار بیکن به زبان فارسی، با متن آمیخته به انگلیسی.
+url: https://example.com
+lang: fa
+dir: rtl

@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mizzen build manifest",
+  "description": "`.slipway/manifest.json` in the output folder: one entry per rendered page, naming its URL, source file, title, layout, output files, and hashes, so doctor and the MCP server read the build instead of guessing. Pages are sorted by URL and output paths by code point.",
+  "type": "object",
+  "required": [
+    "pages",
+    "version"
+  ],
+  "properties": {
+    "build": {
+      "$ref": "#/$defs/build"
+    },
+    "pages": {
+      "type": "array",
+      "description": "Every page the build renders, sorted by URL comparing code points.",
+      "items": {
+        "$ref": "#/$defs/page"
+      }
+    },
+    "version": {
+      "const": 1,
+      "description": "The format version. Only 1 exists."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "build": {
+      "type": "object",
+      "description": "One SHA-256 for the whole build: every file in the output folder except this manifest, hashed in path order. The build writes it after every other file, so `mizzen verify` can check a folder against it.",
+      "required": [
+        "files",
+        "hash"
+      ],
+      "properties": {
+        "files": {
+          "type": "object",
+          "description": "SHA-256 of each file's bytes, keyed by its path relative to the output folder. The manifest is not listed: it records the hash.",
+          "additionalProperties": {
+            "$ref": "#/$defs/hash"
+          },
+          "propertyNames": {
+            "$ref": "#/$defs/path"
+          }
+        },
+        "hash": {
+          "$ref": "#/$defs/hash",
+          "description": "SHA-256 of one line per file: the path, a NUL, the file's hash, and a line feed, with paths sorted by code point."
+        }
+      },
+      "additionalProperties": false
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the bytes, as 64 lowercase hexadecimal characters."
+    },
+    "page": {
+      "type": "object",
+      "required": [
+        "hashes",
+        "layout",
+        "outputs",
+        "source",
+        "title",
+        "url"
+      ],
+      "properties": {
+        "hashes": {
+          "type": "object",
+          "description": "SHA-256 of the page's source body and of its rendered body. Front matter is not included; the title, URL, and layout are separate fields. Hashing the written files is `output.build-hash`'s job.",
+          "required": [
+            "html",
+            "source"
+          ],
+          "properties": {
+            "html": {
+              "$ref": "#/$defs/hash",
+              "description": "SHA-256 of the body after Markdown became HTML, without the layout or head."
+            },
+            "source": {
+              "$ref": "#/$defs/hash",
+              "description": "SHA-256 of the Markdown or HTML body as the model read it, without front matter."
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/hash"
+          }
+        },
+        "layout": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The layout from front matter after `defaults`, or `null` when the page names none and the build used its fallback layout."
+        },
+        "outputs": {
+          "type": "array",
+          "description": "Files this page writes, relative to the output folder, sorted by code point. A page lists its HTML file and Markdown twin, each unless `outputs` turns that output off.",
+          "items": {
+            "$ref": "#/$defs/path"
+          },
+          "uniqueItems": true
+        },
+        "source": {
+          "$ref": "#/$defs/path",
+          "description": "The source file, relative to the site root, with forward slashes."
+        },
+        "title": {
+          "type": "string",
+          "description": "The page's title, as the build resolved it: front matter, else the first `h1`, else the file name."
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "The page's output URL, including the site's `base`, such as `/quickstart/` or `/guide/install/`."
+        }
+      },
+      "additionalProperties": false
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^([a-zA-Z]:)?[\\\\/]|(^|/)\\.\\.(/|$)|\\\\"
+      },
+      "description": "A relative path with forward slashes: no leading slash, drive letter, backslash, or `..` segment."
+    }
+  }
+}

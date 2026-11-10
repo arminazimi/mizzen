@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/arminazimi/slipway/schema/sourcemap.schema.json",
+  "title": "Slipway source map",
+  "description": "/sourcemap.json at the site root: which source file, and which line in it, produced each built page, section, and link. Version 0 is a draft; see spec/sourcemap/v0.md. A url must not appear twice, which JSON Schema cannot express; tools/theme/sourcemap.ts checks it.",
+  "type": "object",
+  "required": [
+    "version",
+    "pages"
+  ],
+  "properties": {
+    "pages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/page"
+      }
+    },
+    "version": {
+      "const": 0,
+      "description": "The format version. Only 0 exists."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "column": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based column in the source file, counting Unicode code points; a tab is one column."
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based line in the source file, front matter included."
+    },
+    "page": {
+      "type": "object",
+      "required": [
+        "url",
+        "source"
+      ],
+      "properties": {
+        "links": {
+          "type": "array",
+          "description": "Links in document order.",
+          "items": {
+            "$ref": "#/$defs/link"
+          }
+        },
+        "sections": {
+          "type": "array",
+          "description": "Headings in document order.",
+          "items": {
+            "$ref": "#/$defs/section"
+          }
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The source file, relative to the site source folder, with forward slashes.",
+          "not": {
+            "pattern": "^([a-zA-Z]:)?[\\\\/]|(^|/)\\.\\.(/|$)|\\\\"
+          }
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "The page's URL path from the site root, as the generator writes it (`/docs/intro.html` or `/docs/intro/`)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "section": {
+      "type": "object",
+      "required": [
+        "id",
+        "level",
+        "line",
+        "text"
+      ],
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/column",
+          "description": "1-based column where the heading starts. Absent at the level-0 and level-1 maps of ADR 0007."
+        },
+        "endColumn": {
+          "$ref": "#/$defs/column",
+          "description": "Column of the heading's last character (inclusive). Absent when the map has no end (ADR 0026)."
+        },
+        "endLine": {
+          "$ref": "#/$defs/line",
+          "description": "1-based line where the heading ends; the same as `line` for a one-line heading. Absent when the map has no end (ADR 0026)."
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The heading's id in the built HTML."
+        },
+        "level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6
+        },
+        "line": {
+          "$ref": "#/$defs/line"
+        },
+        "text": {
+          "type": "string",
+          "description": "The heading's plain text."
+        }
+      },
+      "additionalProperties": false
+    },
+    "link": {
+      "type": "object",
+      "required": [
+        "href",
+        "line"
+      ],
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/column",
+          "description": "1-based column where the link starts. Absent at the level-0 and level-1 maps of ADR 0007."
+        },
+        "endColumn": {
+          "$ref": "#/$defs/column",
+          "description": "Column of the link's last character (inclusive). Absent when the map has no end (ADR 0026)."
+        },
+        "endLine": {
+          "$ref": "#/$defs/line",
+          "description": "1-based line where the link ends; the same as `line` for a one-line link. Absent when the map has no end (ADR 0026)."
+        },
+        "href": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The link target as written in the source."
+        },
+        "line": {
+          "$ref": "#/$defs/line"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

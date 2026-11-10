@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=../../../schema/navigation.schema.json
+main:
+  - title: Home
+    url: /
+  - title: Reference
+    url: /reference/
+  - title: Dashboard
+    url: /dashboard/

@@ -1,0 +1,55 @@
+name: deploy-site
+
+# Builds site/ with Mizzen and the Lateen theme and deploys it to this repository's GitHub Pages site,
+# https://arminazimi.github.io/mizzen/. Pages' source must be set to "GitHub Actions".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: mizzen
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: arminazimi/lateen
+          path: lateen
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install both repositories
+        run: |
+          set -euo pipefail
+          (cd mizzen && npm install --no-audit --no-fund)
+          (cd lateen && npm install --no-audit --no-fund --no-save ../mizzen)
+      - name: Build the site
+        run: node mizzen/bin/slipway.ts build mizzen/site --out "$RUNNER_TEMP/site"
+      - name: Check the site
+        run: node mizzen/bin/slipway.ts check mizzen/site
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+          include-hidden-files: true
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

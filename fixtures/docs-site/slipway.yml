@@ -1,0 +1,16 @@
+# Fixture config: one file, every path relative to this folder (ADR 0024).
+title: Beacon
+description: "Documentation for the Beacon deploy CLI, shaped like Evergreen's site: about 600 pages, mostly generated."
+url: https://example.com
+base: ""
+lang: en
+navigation: _data/navigation.yml
+repository:
+  url: https://github.com/example/beacon-docs
+  branch: main
+defaults:
+  - path: ""
+    values:
+      layout: doc
+exclude:
+  - generate.mjs

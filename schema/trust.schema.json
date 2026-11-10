@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mizzen trust report",
+  "description": "`trust.json` in the output folder: one entry per doc page, keyed by the page URL including `base`. Keys are sorted by code point. Each entry has `level`, `reasons`, and, when known, `lastReviewer`, in that order, with exactly three reasons in the fixed order examples, drift, review. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes. App and asset pages are left out.",
+  "type": "object",
+  "propertyNames": {
+    "pattern": "^/"
+  },
+  "additionalProperties": {
+    "$ref": "#/$defs/entry"
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": [
+        "level",
+        "reasons"
+      ],
+      "properties": {
+        "level": {
+          "description": "The worst level the reasons support: `at-risk` beats `review-due` beats `verified`.",
+          "enum": [
+            "at-risk",
+            "review-due",
+            "verified"
+          ]
+        },
+        "reasons": {
+          "description": "Exactly three reasons, in the fixed order examples, drift, review.",
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/reason"
+          }
+        },
+        "lastReviewer": {
+          "description": "The author name of the last commit that touched the page's source, when git or the data file names one; absent otherwise.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "reason": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "description": "A stable identifier for one finding. `examples.unknown` is the output's own code: the page declares examples but their result is unavailable, so the page cannot be verified.",
+          "enum": [
+            "drift.clean",
+            "drift.findings",
+            "drift.unknown",
+            "examples.failed",
+            "examples.none",
+            "examples.passed",
+            "examples.unknown",
+            "review.overdue",
+            "review.recent",
+            "review.unknown"
+          ]
+        },
+        "message": {
+          "description": "The sentence a maintainer reads to see what the code found.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

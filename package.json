@@ -1,0 +1,41 @@
+{
+  "name": "@velella/mizzen",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A deterministic docs engine with exact source positions.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "mizzen": "./bin/slipway.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./contracts": "./src/contracts/index.ts"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "lightningcss": "^1.33.0",
+    "pagefind": "^1.6.0",
+    "preact": "^11.2.0",
+    "preact-render-to-string": "^6.8.2",
+    "rehype-stringify": "^10.0.1",
+    "remark-directive": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-rehype": "^11.1.2",
+    "unified": "^11.0.5",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "preact": "^11.2.0",
+    "typescript": "^7.0.2"
+  }
+}
