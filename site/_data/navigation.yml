@@ -1,8 +1,4 @@
 # yaml-language-server: $schema=../../schema/navigation.schema.json
-# Docs-only navigation. The six top-level groups are the sidebar; Write and Reference are marked
-# `tab: true` so they also appear as the header's section tabs. spec/docs-site/_data/navigation.yml
-# carries the same items in the same order, so the theme docs and the spec site at /spec/ show one
-# navigation and link to each other.
 main:
   - title: Start
     children:
@@ -10,79 +6,17 @@ main:
         url: /
       - title: Install and quickstart
         url: /install/
-  - title: Write
+  - title: Guide
     tab: true
     children:
-      - title: Guides
-        url: /guides/
-      - title: Migrate from Jekyll
-        url: /guides/migration/
-      - title: Documentation from a docs/ folder
-        url: /recipes/docs-folder/
-      - title: Versioned documentation
-        url: /recipes/versioned-docs/
-  - title: Components
-    children:
-      - title: Component reference
-        url: /components/
-      - title: Badge
-        url: /components/badge/
-      - title: Callout
-        url: /components/callout/
-      - title: Cards
-        url: /components/cards/
-      - title: Changelog entry
-        url: /components/changelog-entry/
-      - title: Code
-        url: /components/code/
-      - title: Code tabs
-        url: /components/code-tabs/
-      - title: Details
-        url: /components/details/
-      - title: Embed
-        url: /components/embed/
-      - title: Endpoint
-        url: /components/endpoint/
-      - title: Figure
-        url: /components/figure/
-      - title: File tree
-        url: /components/file-tree/
-      - title: Heading anchor
-        url: /components/heading-anchor/
-      - title: Kbd
-        url: /components/kbd/
-      - title: Page status
-        url: /components/page-status/
-      - title: Schema table
-        url: /components/schema-table/
-      - title: Steps
-        url: /components/steps/
-      - title: Table
-        url: /components/table/
-      - title: Terminal
-        url: /components/terminal/
-  - title: Customize
-    children:
-      - title: Customization guide
-        url: /guides/customize/
-      - title: Social cards
-        url: /guides/social-cards/
-      - title: Redirects
-        url: /recipes/redirects/
-  - title: Deploy
-    children:
-      - title: Recipes
-        url: /recipes/
-      - title: Deploy to Cloudflare Pages
-        url: /recipes/cloudflare-pages/
-      - title: Deploy to GitLab Pages
-        url: /recipes/gitlab-pages/
-      - title: Deploy to Netlify
-        url: /recipes/netlify/
-      - title: Deploy to Vercel
-        url: /recipes/vercel/
-      - title: Custom domain
-        url: /recipes/custom-domain/
+      - title: Command line
+        url: /cli/
+      - title: Outputs
+        url: /outputs/
+      - title: Plugins
+        url: /plugins/
+      - title: Programmatic API
+        url: /api/
   - title: Reference
     tab: true
     children:
@@ -90,5 +24,3 @@ main:
         url: /config/
       - title: Front matter
         url: /front-matter/
-      - title: The Spec
-        url: /spec/

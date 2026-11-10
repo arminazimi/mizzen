@@ -1,10 +1,10 @@
 ---
 title: Configuration
-description: Slipway configuration reference.
+description: The mizzen.yml keys Mizzen reads.
 layout: doc
 permalink: /config/
 date: 2026-10-26
-author: Slipway
+author: Velella
 ---
 <!-- Generated from packages/engine/schema/config.schema.json by tools/config-ref/run.ts. Do not edit below this line. -->
 

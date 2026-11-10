@@ -27,21 +27,5 @@ theme:
           url: https://arminazimi.github.io/lateen/
         - title: Install
           url: /install/
-        - title: Accessibility
-          url: /accessibility/
-# Pages removed from the docs site; their old addresses lead to the home page.
-redirects:
-  "/audio/": "/"
-  "/audio/podcast-episode-12.mp3": "/"
-  "/compare/": "/"
-  "/languages/": "/"
-  "/roadmap/": "/"
-  "/recipes/analytics/": "/recipes/"
-  "/recipes/codeberg-pages/": "/recipes/"
-  "/recipes/comments/": "/recipes/"
-  "/recipes/content-negotiation/": "/recipes/"
-  "/recipes/forms/": "/recipes/"
-  "/recipes/from-pages-themes/": "/recipes/"
-  "/recipes/lifecycle/": "/recipes/"
-  "/recipes/pagefind/": "/recipes/"
-  "/recipes/rel-me/": "/recipes/"
+        - title: Configuration
+          url: /config/
