@@ -8,7 +8,7 @@ const FOLDER = "pagefind";
 /** The section a page that sits at the site root belongs to, like `llms.ts` does for links outside a group. */
 const ROOT_SECTION = "Pages";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -86,7 +86,7 @@ function reportErrors(ctx: OutputContext, page: Page | undefined, errors: readon
  * config writes no index at all.
  *
  * Pagefind writes to disk, so the index is built and read back in memory as the output contract asks; files come
- * back under `pagefind/`, sorted by path (ADR 0022, rule 5). Pagefind errors are diagnostics, not throws.
+ * back under `pagefind/`, sorted by path. Pagefind errors are diagnostics, not throws.
  */
 export const search: Output = {
   name: "search",

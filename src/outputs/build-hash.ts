@@ -3,7 +3,7 @@
  *
  * Every file the build writes, except the manifest that records the result, is hashed; the whole-build hash is the
  * SHA-256 of one line per file (`<path>`, a NUL, the file's hash, and a line feed), with the paths sorted by code
- * point (ADR 0022, rule 5). The build and `verify` run the same rule, so both agree byte for byte.
+ * point. The build and `verify` run the same rule, so both agree byte for byte.
  *
  * The manifest cannot hash itself, so it is left out: a change to the record is not a change to the build. A site
  * file that replaces the manifest makes the build leave it alone.
@@ -24,7 +24,7 @@ export interface BuildRecord {
   readonly files: Readonly<Record<string, string>>;
 }
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 export function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

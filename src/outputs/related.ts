@@ -74,7 +74,7 @@ interface Profile {
   readonly headings: ReadonlySet<string>;
 }
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -262,7 +262,7 @@ export async function relatedPages(site: Site): Promise<readonly RelatedPage[]> 
 /**
  * Writes `related.json`: one entry per doc page, with up to five related pages ordered by score and then URL. The
  * JSON is two-space indented with a final line feed and fixed key order, so the same model gives the same bytes
- * (ADR 0022, rule 5).
+ *.
  */
 export const related: Output = {
   name: "related",

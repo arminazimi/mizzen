@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Page front matter",
-  "description": "The front matter keys the engine reads (ADR 0024, rule 3). Every key is optional; an unknown key is kept and passed to the layout, never rejected.",
+  "description": "The front matter keys the engine reads. Every key is optional; an unknown key is kept and passed to the layout, never rejected.",
   "type": "object",
   "additionalProperties": true,
   "properties": {

@@ -1,7 +1,7 @@
 import type { Output, OutputFile } from "../contracts/output.ts";
 
 /**
- * The files a site may own at the root of the output folder, sorted by code point (ADR 0022, rule 5). A site that has
+ * The files a site may own at the root of the output folder, sorted by code point. A site that has
  * one of them in its source keeps it byte for byte; the matching output's file is skipped, with no diagnostic.
  */
 export const SITE_FILE_PATHS = ["llms-full.txt", "llms.txt", "robots.txt", "sitemap.xml"] as const;

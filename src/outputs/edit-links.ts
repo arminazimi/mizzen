@@ -17,7 +17,7 @@ export interface EditLink {
   readonly editUrl: string;
 }
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -74,9 +74,9 @@ function editUrlOf(root: string, host: Host, branch: string, path: string): stri
  * App pages, asset pages, and a page with an empty source path have no edit link. `repository.dir` is already part of
  * `page.source.file` (the model names every source from the repository root), so this adds nothing to it. A
  * repository on another forge, or an unparseable URL, yields no links: the two shapes are the ones the config's
- * `repository` is for (ADR 0024), and guessing a third would produce a URL that 404s.
+ * `repository` is for, and guessing a third would produce a URL that 404s.
  *
- * Links come back sorted by page URL, then by source path, whatever order the model had (ADR 0022, rule 5).
+ * Links come back sorted by page URL, then by source path, whatever order the model had.
  */
 export function editLinksOf(site: Site): readonly EditLink[] {
   const repository = site.config.repository;

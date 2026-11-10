@@ -25,7 +25,7 @@ import type {
   ThemeConfig,
 } from "../contracts/index.ts";
 
-/** The site config file name (ADR 0025). */
+/** The site config file name. */
 export const CONFIG_FILE = "mizzen.yml";
 
 /** Result of loading a site's config. */
@@ -42,7 +42,7 @@ export interface LoadConfigOptions {
   readonly path?: string;
 }
 
-/** Primary language subtags that default to right-to-left (same list as the 0.2 theme). */
+/** Primary language subtags that default to right-to-left. */
 const RTL = new Set([
   "ar", "arc", "ckb", "dv", "fa", "he", "ks", "ku", "ps", "sd", "syr", "ug", "ur", "yi",
 ]);

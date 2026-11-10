@@ -3,7 +3,7 @@ import type { SourcePos } from "./source.ts";
 /** How serious a diagnostic is. An `error` fails the build; a `warning` is reported; `info` is for the reader's information only. */
 export type Severity = "error" | "warning" | "info";
 
-/** A safe, mechanical repair: replace the characters of one source span with `text`. See ADR 0027. */
+/** A safe, mechanical repair: replace the characters of one source span with `text`. */
 export interface DiagnosticFix {
   /** Path of the file to change, relative to the repository root, using `/` on every platform. */
   readonly file: string;

@@ -35,7 +35,7 @@ export interface VerifyProofOptions {
   readonly siteRoot?: string;
   /** Rerun the doctor and compare its level with the recorded one. Default: false. */
   readonly doctor?: boolean;
-  /** How to run the doctor; default: the sibling doctor package, else `mizzen` on the PATH. */
+  /** How to run the doctor; default: a local doctor checkout, else `mizzen` on the PATH. */
   readonly doctorCommand?: DoctorCommand;
   /** Environment for the doctor process. Default: this process's. */
   readonly env?: NodeJS.ProcessEnv;
@@ -95,10 +95,10 @@ class ProofReadError extends Error {
   }
 }
 
-/** The doctor entry point beside this package in the monorepo, when it is there. */
+/** A local doctor checkout beside this package, when there is one. */
 const SIBLING_DOCTOR = fileURLToPath(new URL("../../../doctor/bin/mizzen.ts", import.meta.url));
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -193,7 +193,7 @@ async function fileState(siteRoot: string, entry: ProofFileEntry): Promise<Verif
   return hashBytes(bytes) === entry.after ? "ok" : "changed";
 }
 
-/** The default doctor command: the sibling package when it exists, else the installed `mizzen`. */
+/** The default doctor command: a local doctor checkout when it exists, else the installed `mizzen`. */
 function defaultDoctorCommand(): DoctorCommand {
   if (existsSync(SIBLING_DOCTOR)) return { command: process.execPath, prefix: [SIBLING_DOCTOR] };
   return { command: "mizzen" };

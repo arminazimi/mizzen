@@ -32,7 +32,7 @@ import { estimateTokens } from "./tokens.ts";
 
 /** One top-level heading and the blocks under it, up to the next top-level heading. */
 export interface TrimSection {
-  /** The heading's block id, `<file>:<line>:<column>` (ADR 0026). Matches a `keep` entry. */
+  /** The heading's block id, `<file>:<line>:<column>`. Matches a `keep` entry. */
   readonly id: string;
   /** The heading's plain text. Matches a `keep` entry, exactly and case-sensitively. */
   readonly text: string;

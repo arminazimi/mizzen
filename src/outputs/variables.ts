@@ -5,7 +5,7 @@ import { placeholdersOf } from "../markdown/plugins/placeholders.ts";
  * `variables.json`: every `{{name}}` placeholder a doc page uses, with its declaration when the site has one and
  * every page that uses it.
  *
- * Declarations live in `_data/variables.yml`, because the site config schema is frozen ([ADR 0024]) and a data file is
+ * Declarations live in `_data/variables.yml`, because the site config schema is frozen and a data file is
  * the no-contract home. The file is a list of `{ name, default, type }`:
  *
  * ```yaml
@@ -25,7 +25,6 @@ import { placeholdersOf } from "../markdown/plugins/placeholders.ts";
  * No variable at all writes no file. Entries sort by name and pages by URL, both by code point, and the JSON uses two
  * spaces and a trailing line feed, so two builds of the same site write the same bytes.
  *
- * [ADR 0024]: ../../../../docs/adr/0024-site-config.md
  */
 
 /** One variable as `_data/variables.yml` declares it. `default` and `type` are optional. */
@@ -68,7 +67,7 @@ export interface Variables {
   readonly conflicts: readonly VariableConflict[];
 }
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

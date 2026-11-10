@@ -7,7 +7,7 @@
  * site is the repository), the SHA-256 of its bytes before and after, the doctor level (and,
  * optionally, a short projection of its findings), and a summary of the examples an edit re-ran.
  *
- * Two rules keep the record reproducible (ADR 0022, rule 5):
+ * Two rules keep the record reproducible:
  *
  * - **No wall clock.** The record has no timestamp unless the caller passes `date`, or
  *   `SOURCE_DATE_EPOCH` is set. `SOURCE_DATE_EPOCH` is the reproducible-build convention already
@@ -291,7 +291,7 @@ export const proofSchema: Record<string, unknown> = {
   },
 };
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

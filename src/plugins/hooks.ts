@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import type { Diagnostic, MaybePromise, OutputFile, Page, Plugin, PluginHooks, Site } from "../contracts/index.ts";
 
 /**
- * The site's code file, at the site root: plugins and nothing else (ADR 0024 rule 1, named by ADR 0025).
+ * The site's code file, at the site root: plugins and nothing else.
  * The settings of the site belong to `mizzen.yml`, so this file can never set one.
  */
 export const CODE_CONFIG_FILE = "mizzen.config.ts";
@@ -91,7 +91,7 @@ function pluginProblem(value: unknown): string | undefined {
  * Loads the site's code file (`mizzen.config.ts`) and returns the plugins it lists.
  *
  * A site without the file is an ordinary site, not a problem: no plugins and no diagnostics. The file default-exports
- * `{ plugins: [...] }` and sets no config key (ADR 0024 rule 1), so anything else it exports is read by nobody. A file
+ * `{ plugins: [...] }` and sets no config key, so anything else it exports is read by nobody. A file
  * Node cannot import and a default export that is not a code config each come back as one error that names the file,
  * with no plugins; an entry that is not a plugin comes back as an error and is dropped, and the sound entries still run.
  */
@@ -129,7 +129,7 @@ export async function loadCodeConfig(siteRoot: string, options: LoadCodeOptions 
           file,
           "plugin.invalid-code-config",
           `${file} must default-export the site's plugins.`,
-          "Default-export `{ plugins: [...] }` (ADR 0024 rule 1).",
+          "Default-export `{ plugins: [...] }`.",
         ),
       ],
     };

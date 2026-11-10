@@ -23,7 +23,7 @@ import { runShellExample } from "../pipeline/examples/run-shell.ts";
  * ## Machine dependence
  *
  * Running an example makes the build depend on the machine it runs on: the installed Node version, `PATH`, the
- * process limit, and whatever the example reads from the network. ADR 0022 rule 5 asks a build to be deterministic,
+ * process limit, and whatever the example reads from the network. A build has to be deterministic,
  * so `examples.json` itself never records a duration, a timestamp, a machine name, or a run order: only counts, in a
  * fixed key order, sorted by page URL. The counts are stable when the examples are, and a flaky example shows up as a
  * diff in `examples.json`. A site that wants no execution can switch the output off with
@@ -105,7 +105,7 @@ const SHELL_LANGS: ReadonlySet<string> = new Set(["bash", "sh"]);
 /** The bare meta token that marks an example, used as a cheap pre-filter before a page is parsed again. */
 const TEST_TOKEN = "test";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

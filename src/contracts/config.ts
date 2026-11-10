@@ -44,7 +44,7 @@ export interface SearchConfig {
 }
 
 /**
- * The site config, as ADR 0024 defines it: exactly the keys of the site config file, after the loader has checked them.
+ * The site config: exactly the keys of the site config file, after the loader has checked them.
  * Every key is optional in the file; the loader fills the defaults, so the keys marked required here are always present.
  */
 export interface SiteConfig {

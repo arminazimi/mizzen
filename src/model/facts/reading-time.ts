@@ -45,14 +45,14 @@ const CJK_ALL = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=
 /**
  * Unicode word boundaries (UAX #29). The locale only fixes the segmentation data; the boundaries are script-aware,
  * so Latin, Cyrillic, Arabic, and Persian text segment the same way. An explicit locale keeps the result independent
- * of the machine's default locale (ADR 0022, rule 5).
+ * of the machine's default locale.
  */
 const WORDS = new Intl.Segmenter("en", { granularity: "word" });
 
 /** Parses Markdown to the tree the counter walks, with the GFM and directive syntax a page may use. */
 const PARSER = unified().use(remarkParse).use(remarkGfm).use(remarkDirective);
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -142,7 +142,7 @@ export function readingTimeForPages(pages: readonly Page[], options?: ReadingTim
 
 /**
  * The `reading-time` fact: each doc page's word count and reading time, so a theme can read the same numbers during
- * render that the `reading-time` output writes. A site's `_data/reading-time.yml` wins over this value (ADR 0028).
+ * render that the `reading-time` output writes. A site's `_data/reading-time.yml` wins over this value.
  */
 export const readingTime: Fact = {
   name: "reading-time",

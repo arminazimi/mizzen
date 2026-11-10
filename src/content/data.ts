@@ -12,7 +12,7 @@ export interface DataResult {
   readonly diagnostics: readonly Diagnostic[];
 }
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -115,7 +115,7 @@ async function parseOne(abs: string, rel: string): Promise<{ value?: unknown; di
  * file name without extension; nested folders become nested keys, so `_data/guides/steps.yml` lands at
  * `data.guides.steps`. Other files under `_data` are ignored. A file that fails to parse is left out and every
  * other file still loads. A missing or empty `_data` folder is not an error. Paths are processed in code-point
- * order, so runs are deterministic (ADR 0022, rule 5).
+ * order, so runs are deterministic.
  */
 export async function loadData(source: string, files: readonly DiscoveredFile[]): Promise<DataResult> {
   const diagnostics: Diagnostic[] = [];

@@ -1,8 +1,8 @@
 # Engine contracts
 
-The TypeScript types every engine, output, and theme task codes against ([ADR 0022](../../../../docs/adr/0022-engine.md), [ADR 0023](../../../../docs/adr/0023-engine-theme-boundary.md), [ADR 0024](../../../../docs/adr/0024-site-config.md)). They are types only: nothing here runs.
+The TypeScript types every engine, output, and theme task codes against. They are types only: nothing here runs.
 
-**Changing a type here needs an ADR.** The contracts are frozen: a change names the type and the units it affects in a new or amended ADR (ADR 0023, rule 5). A task that needs a different type stops and asks for that ADR instead of editing these files.
+**Changing a type here needs a design note.** The contracts are frozen: a change names the type and the units it affects in its description. A task that needs a different type stops and asks for that change instead of editing these files.
 
 Import from `index.ts` inside the engine; the theme may `import type` from here and imports nothing else from the engine.
 
@@ -10,7 +10,7 @@ Import from `index.ts` inside the engine; the theme may `import type` from here 
 | --- | --- |
 | `source.ts` | `SourcePos` |
 | `diagnostic.ts` | `Diagnostic`, `Severity` |
-| `config.ts` | `SiteConfig` and its parts (ADR 0024) |
+| `config.ts` | `SiteConfig` and its parts |
 | `content.ts` | `Page`, `Heading`, `FrontMatter`, `Site` |
 | `nav.ts` | `NavItem`, `NavTree`, `Trail`, `Pager` |
 | `output.ts` | `Output`, `OutputFile`, `OutputContext` |

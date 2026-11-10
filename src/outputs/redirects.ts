@@ -2,7 +2,7 @@ import type { Page, Site } from "../contracts/content.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 import type { SourcePos } from "../contracts/source.ts";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -248,7 +248,7 @@ function redirectsTarget(target: string, base: string): string {
  * sets `url`, every target is absolute, and otherwise it is site-relative.
  *
  * A redirect that would overwrite a real page, and an old path claimed twice, are errors. The first claim wins: the
- * config before the front matter, and pages in model order. Files come back sorted by path (ADR 0022, rule 5).
+ * config before the front matter, and pages in model order. Files come back sorted by path.
  *
  * When at least one redirect is written, a root `_redirects` file carries the same entries as one
  * `<old-path> <target> 301` line each, for hosts that read a redirects file. Its paths are relative to the output

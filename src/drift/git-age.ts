@@ -6,7 +6,7 @@ import { posix, resolve } from "node:path";
  *
  * Git history is an input, not something this module observes on its own. For a fixed repository, the
  * same `root`, page, and references give the same result, because every date comes from a commit and
- * nothing reads the clock (ADR 0022, rule 5). The answer is `"unknown"` rather than an error when git,
+ * nothing reads the clock. The answer is `"unknown"` rather than an error when git,
  * a work tree, or a commit for the page is missing, which is what a shallow clone or an unpacked
  * tarball looks like.
  *

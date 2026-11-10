@@ -5,7 +5,7 @@ import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 /** The feed's file name, relative to the output folder. */
 const FILE = "changelog.xml";
 
-/** Compared by code point, never by locale (ADR 0022, rule 5). */
+/** Compared by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

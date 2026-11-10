@@ -49,7 +49,7 @@ function markdownFiles(root: string, dir = ""): string[] {
 
 test("the URL table of examples/product-docs matches the pretty-URL rules", () => {
   const root = fileURLToPath(new URL("../fixtures/product-docs", import.meta.url));
-  // Pretty-URL table for the product-docs pages (ADR 0024); 404 keeps its front matter permalink.
+  // Pretty-URL table for the product-docs pages; 404 keeps its front matter permalink.
   const expected: Record<string, string> = {
     "404.md": "/404.html",
     "ci.md": "/ci/",

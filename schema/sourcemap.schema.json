@@ -80,15 +80,15 @@
       "properties": {
         "column": {
           "$ref": "#/$defs/column",
-          "description": "1-based column where the heading starts. Absent at the level-0 and level-1 maps of ADR 0007."
+          "description": "1-based column where the heading starts. Absent at the level-0 and level-1 maps."
         },
         "endColumn": {
           "$ref": "#/$defs/column",
-          "description": "Column of the heading's last character (inclusive). Absent when the map has no end (ADR 0026)."
+          "description": "Column of the heading's last character (inclusive). Absent when the map has no end."
         },
         "endLine": {
           "$ref": "#/$defs/line",
-          "description": "1-based line where the heading ends; the same as `line` for a one-line heading. Absent when the map has no end (ADR 0026)."
+          "description": "1-based line where the heading ends; the same as `line` for a one-line heading. Absent when the map has no end."
         },
         "id": {
           "type": "string",
@@ -119,15 +119,15 @@
       "properties": {
         "column": {
           "$ref": "#/$defs/column",
-          "description": "1-based column where the link starts. Absent at the level-0 and level-1 maps of ADR 0007."
+          "description": "1-based column where the link starts. Absent at the level-0 and level-1 maps."
         },
         "endColumn": {
           "$ref": "#/$defs/column",
-          "description": "Column of the link's last character (inclusive). Absent when the map has no end (ADR 0026)."
+          "description": "Column of the link's last character (inclusive). Absent when the map has no end."
         },
         "endLine": {
           "$ref": "#/$defs/line",
-          "description": "1-based line where the link ends; the same as `line` for a one-line link. Absent when the map has no end (ADR 0026)."
+          "description": "1-based line where the link ends; the same as `line` for a one-line link. Absent when the map has no end."
         },
         "href": {
           "type": "string",

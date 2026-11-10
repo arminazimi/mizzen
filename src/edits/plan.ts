@@ -3,7 +3,7 @@
  *
  * A caller names a page by URL and a heading by its anchor id, and says what the heading should
  * read. The plan looks the heading up in the site model, where every source heading already carries
- * its span (ADR 0026), and returns the {@link Patch} that replaces exactly that span. The patch is
+ * its span, and returns the {@link Patch} that replaces exactly that span. The patch is
  * plain data: nothing here reads a file, and the caller supplies the source text it was computed
  * from.
  *
@@ -66,7 +66,7 @@ function usablePos(pos: SourcePos): boolean {
 }
 
 /**
- * The number of columns the line has, in code points (ADR 0026). A trailing `\r` is a line ending,
+ * The number of columns the line has, in code points. A trailing `\r` is a line ending,
  * not a column, so a CRLF file measures like the same file with LF endings.
  */
 function codePointColumns(line: string): number {

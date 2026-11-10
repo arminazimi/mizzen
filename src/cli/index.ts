@@ -1,4 +1,4 @@
-/** `mizzen build`, `mizzen check`, `mizzen dev`, `mizzen edit apply`, `mizzen edit verify`, `mizzen pack`, `mizzen verify`, and `mizzen watch`: build a site, report diagnostics, serve it while developing, apply or verify an agent patch, print a context pack, check a build, or rebuild on change (ADR 0025). */
+/** `mizzen build`, `mizzen check`, `mizzen dev`, `mizzen edit apply`, `mizzen edit verify`, `mizzen pack`, `mizzen verify`, and `mizzen watch`: build a site, report diagnostics, serve it while developing, apply or verify an agent patch, print a context pack, check a build, or rebuild on change. */
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
@@ -15,7 +15,7 @@ import { pack } from "./pack.ts";
 import { verify, verifyMessage } from "./verify.ts";
 import { DEFAULT_WATCH_OUT, watch as watchSite } from "./watch.ts";
 
-/** The command name on the PATH (ADR 0025). */
+/** The command name on the PATH. */
 export const NAME = "mizzen";
 
 const FORMATS = ["text", "json", "sarif"] as const;
@@ -24,7 +24,7 @@ type Format = (typeof FORMATS)[number];
 /** Layout used when a page names none and the site's defaults name none. */
 const DEFAULT_LAYOUT = "doc";
 
-/** Folder of the theme that ships beside this package in the monorepo (a sibling `lateen` checkout). */
+/** Folder of a `lateen` checkout beside this package, used when no theme is configured. */
 const SIBLING_THEME = fileURLToPath(new URL("../../../lateen", import.meta.url));
 
 export const usage = `Usage: ${NAME} <command> [dir] [options]
@@ -167,7 +167,7 @@ function resolvePackage(name: string, from: string): string | undefined {
 
 /**
  * Picks the theme root: `--theme`, then `theme.name` in the site config (path or package),
- * then the sibling `theme` folder beside this package when it exists.
+ * then a `lateen` checkout beside this package when it exists.
  */
 export async function resolveThemeRoot(siteRoot: string, themeFlag: string | undefined): Promise<string | undefined> {
   if (themeFlag !== undefined) return resolve(themeFlag);

@@ -4,7 +4,7 @@ import type { Output, OutputFile } from "../contracts/output.ts";
 /** Characters per token the estimator assumes, until a tokenizer is chosen. */
 const CHARS_PER_TOKEN = 4;
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -81,7 +81,7 @@ interface PageJson {
  * App pages are skipped, since they are programs rather than documents, and so is a doc page whose URL names a file
  * that is not HTML, because it has no `index.json` address. The site `base` is stripped from the path, as the HTML
  * output strips it, so a project site writes `guide/install/index.json` into the output folder. Files come back
- * sorted by path (ADR 0022, rule 5), whatever order the model had.
+ * sorted by path, whatever order the model had.
  */
 export const pageJson: Output = {
   name: "page-json",

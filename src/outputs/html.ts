@@ -1,7 +1,7 @@
 import type { Page, Site } from "../contracts/content.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -33,7 +33,7 @@ function indexPath(url: string): string {
  *
  * App pages are skipped: discovery marks a whole app folder one kind, so the model lists only the folder's root
  * page with `kind: "app"`, and its files pass through `copyAssets` untouched. Assets are files, not pages, and
- * never enter the model's page list. Files come back sorted by path (ADR 0022, rule 5), whatever order the model
+ * never enter the model's page list. Files come back sorted by path, whatever order the model
  * had.
  */
 export const html: Output = {

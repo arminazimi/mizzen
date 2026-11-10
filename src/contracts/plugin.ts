@@ -20,7 +20,7 @@ export interface Plugin extends PluginHooks {
   readonly name: string;
 }
 
-/** What the site's code file default-exports (ADR 0024, rule 1): plugins and nothing else. */
+/** What the site's code file default-exports: plugins and nothing else. */
 export interface CodeConfig {
   /** Plugins, applied in order. */
   readonly plugins: readonly Plugin[];

@@ -55,7 +55,7 @@ export interface BuildResult {
 /** The default folder of outputs: `src/outputs/` beside this file's folder. */
 const OUTPUTS_DIR = fileURLToPath(new URL("../outputs/", import.meta.url));
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

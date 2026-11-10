@@ -8,7 +8,7 @@ import { isAppPage } from "./app-pages.ts";
 /** Where the map lands, relative to the output folder. */
 const FILE = "sourcemap.json";
 
-/** One heading of a page, as the source map records it (spec/sourcemap/v0.md, ADR 0026). */
+/** One heading of a page, as the source map records it. */
 interface Section {
   /** The `id` the heading has in the built HTML. */
   readonly id: string;
@@ -90,7 +90,7 @@ function sourcePath(page: Page): string {
 }
 
 /**
- * Writes `sourcemap.json` (spec/sourcemap/v0.md, ADR 0007): one entry per document page, naming its source file and,
+ * Writes `sourcemap.json`: one entry per document page, naming its source file and,
  * for every heading and Markdown link, the 1-based line in the source that produced it.
  *
  * The positions are the ones the model kept. A page's headings already carry their source line, so sections read
@@ -99,7 +99,7 @@ function sourcePath(page: Page): string {
  * back relative to the whole file, front matter included.
  *
  * App pages are left out: they are programs, not documents, and the spec's source map is about content. Pages are
- * sorted by URL and each list stays in document order, so the same model gives the same bytes (ADR 0022, rule 5).
+ * sorted by URL and each list stays in document order, so the same model gives the same bytes.
  */
 export const sourcemap: Output = {
   name: "sourcemap",

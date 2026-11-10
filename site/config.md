@@ -8,7 +8,7 @@ author: Velella
 ---
 <!-- Generated from packages/engine/schema/config.schema.json by tools/config-ref/run.ts. Do not edit below this line. -->
 
-The site config file (ADR 0024). Every key is optional; an unknown key is an error.
+The site config file. Every key is optional; an unknown key is an error.
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |

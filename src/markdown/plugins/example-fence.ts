@@ -119,7 +119,7 @@ function expectedAfter(children: readonly Nodes[], index: number): Code | undefi
 }
 
 /**
- * The node's span, with remark's exclusive end turned into the engine's inclusive end (ADR 0026),
+ * The node's span, with remark's exclusive end turned into the engine's inclusive end,
  * or zeros when a hand-built node has no position. Only the numbers are used; the file comes from
  * `examplesOf`.
  */

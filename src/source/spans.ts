@@ -1,7 +1,7 @@
 import type { SourcePos } from "../contracts/source.ts";
 
 /**
- * Source spans (ADR 0026): every block element carries the exact place it came from, and a block's
+ * Source spans: every block element carries the exact place it came from, and a block's
  * ID is the start of its span, so one page's blocks can be found from their IDs.
  *
  * A span is written as `path:line:column-endLine:endColumn`. The end is inclusive and names the
@@ -60,7 +60,7 @@ export function spanFromPosition(file: string, position: NodePosition): SourcePo
   return { file, line, column, endLine, endColumn };
 }
 
-/** A block's ID: the start of its span, `path:line:column` (ADR 0026, decision 4). */
+/** A block's ID: the start of its span, `path:line:column`. */
 export function blockIdOf(span: SourcePos): string {
   return `${span.file}:${span.line}:${span.column}`;
 }
@@ -72,8 +72,8 @@ export function formatSpan(span: SourcePos): string {
 
 /**
  * Parses a `data-src` or source-map value. The full form is `path:line:column-endLine:endColumn`;
- * `path:line` and `path:line:column` are points, where the end equals the start (ADR 0026, decision
- * 2). A path containing a colon still parses: the numbers are taken from the right.
+ * `path:line` and `path:line:column` are points, where the end equals the start.
+ * A path containing a colon still parses: the numbers are taken from the right.
  */
 export function parseSpan(value: string): SourcePos | undefined {
   const full = FULL_SPAN.exec(value);
@@ -109,7 +109,7 @@ export function spansIn(html: string): SourcePos[] {
 
 /**
  * The span of the block whose ID is `blockId`, from the page's HTML, where every block carries its
- * span on `data-src` (ADR 0026, decision 3).
+ * span on `data-src`.
  *
  * A block's ID carries only its start, so the page is what supplies the end. Without it, a full
  * span string still parses, but a bare ID is a point: its end equals its start.

@@ -3,7 +3,7 @@
  * long ago it was reviewed.
  *
  * The model reads nothing on its own. It is a pure function of its argument, so the same input always
- * gives the same output, in the same reason order (ADR 0022, rule 5). The review age is passed in, never
+ * gives the same output, in the same reason order. The review age is passed in, never
  * read from the clock: the caller that has git history or a review date decides how many whole days old
  * it is, or passes `"unknown"` when it cannot tell.
  *

@@ -8,7 +8,7 @@ author: Velella
 ---
 <!-- Generated from packages/engine/schema/front-matter.schema.json by tools/front-matter-ref/run.ts. Do not edit below this line. -->
 
-The front matter keys the engine reads (ADR 0024, rule 3). Every key is optional; an unknown key is kept and passed to the layout, never rejected.
+The front matter keys the engine reads. Every key is optional; an unknown key is kept and passed to the layout, never rejected.
 
 Front matter is a YAML block between two `---` lines at the top of a `.md` or `.html` file. A page without front matter still builds: its title is its first `h1`, its URL comes from its file path, and its layout comes from `defaults` in `mizzen.yml` or from the theme.
 

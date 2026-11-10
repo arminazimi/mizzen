@@ -28,7 +28,7 @@ import { compareClaims } from "../drift/compare.ts";
  *
  * ## Where the findings come from
  *
- * 1. `site.data.drift`, the channel the theme's drift banner already reads (ADR 0028), in either the
+ * 1. `site.data.drift`, the channel the theme's drift banner already reads, in either the
  *    nested `{ pages: { "<url>": [ … ] } }` shape this output writes or the bare `{ "<url>": [ … ] }`
  *    shape. A finding there may name `kind` (or a diagnostic `id`), `reference` (or a `path`), and
  *    `severity`; a missing or unknown severity reads as `warning`. A data entry for a page wins over the
@@ -45,7 +45,7 @@ import { compareClaims } from "../drift/compare.ts";
  *
  * Page keys come in code-point order, and each page's findings are sorted by reference, then kind, then
  * severity. The JSON uses two-space indentation with a fixed key order and one trailing LF. For a fixed
- * site model, root, and file tree, two runs write the same bytes (ADR 0022, rule 5).
+ * site model, root, and file tree, two runs write the same bytes.
  */
 
 /** The environment variable that names the site root, since {@link OutputContext} carries none. */
@@ -69,7 +69,7 @@ export interface DriftReportOptions {
   readonly data?: unknown;
 }
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

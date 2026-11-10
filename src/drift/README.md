@@ -3,7 +3,7 @@
 Checks that compare what a page says with the code it points at. Each function is a deterministic transform of
 its arguments: no clock, network, or environment reads. `codeRefsOf` and `compareClaims` also read the site's
 files; neither writes. `git-age.ts` reads git history through git, which is an input like the arguments: the
-same repository gives the same answer (ADR 0022, rule 5).
+same repository gives the same answer.
 
 - `git-age.ts`: `gitAge(root, pageFile, refFiles)` compares the last commit of a page with the newest
   commit among the files it references and returns the whole days between them, or `"unknown"` when git,

@@ -18,7 +18,7 @@ export interface AgentInstructions {
   readonly notes?: string;
 }
 
-/** A page's front matter. The keys the engine reads are typed (ADR 0024, rule 3); every other key is kept and passed to the layout. */
+/** A page's front matter. The keys the engine reads are typed; every other key is kept and passed to the layout. */
 export interface FrontMatter {
   /** Page title. */
   readonly title?: string;

@@ -6,7 +6,7 @@ import { twinUrl } from "./twins.ts";
 /** Where the manifest lands, relative to the output folder. */
 const FILE = ".mizzen/manifest.json";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -64,7 +64,7 @@ interface ManifestPage {
  * changes the manifest. Hashing the files themselves is `output.build-hash`'s job (#1252), which runs once every
  * output has written.
  *
- * Pages are sorted by URL and output paths by code point, so the same model gives the same bytes (ADR 0022, rule 5).
+ * Pages are sorted by URL and output paths by code point, so the same model gives the same bytes.
  * App pages are left out: they are folders of files copied as assets, not pages the engine renders, and they write no
  * output of their own. A page lists the files its enabled outputs write: the HTML file and the Markdown twin, each
  * unless `outputs` turns that output off.

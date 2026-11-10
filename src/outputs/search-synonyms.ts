@@ -8,7 +8,7 @@ const DATA_KEY = "search-synonyms";
 /** The configuration file Pagefind looks for in the folder it runs from. */
 const FILE = "pagefind.yml";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -102,7 +102,7 @@ function themeSynonyms(site: Site): unknown {
 }
 
 /**
- * The `pagefind.yml` text for a synonym map. Keys and values are sorted by code point (ADR 0022, rule 5) and the
+ * The `pagefind.yml` text for a synonym map. Keys and values are sorted by code point and the
  * `yaml` package quotes anything that would otherwise change the meaning, so a term such as `cache: warm` or a
  * word with `#` survives a round trip.
  *

@@ -2,7 +2,7 @@ import type { Site } from "../contracts/index.ts";
 import type { Output, OutputFile } from "../contracts/output.ts";
 import { readingTimeForPages, type ReadingTimePage } from "../model/facts/reading-time.ts";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -43,7 +43,7 @@ function entriesOf(site: Site): readonly ReadingTimePage[] {
  * overridable through the module's options.
  *
  * App and asset pages are left out, since they are programs or files rather than prose. The site is free to override
- * the whole list in `_data/reading-time.yml` (ADR 0028). The file is one JSON array with a fixed key order and a
+ * the whole list in `_data/reading-time.yml`. The file is one JSON array with a fixed key order and a
  * trailing line feed, so two runs on the same site write the same bytes.
  */
 export const readingTime: Output = {

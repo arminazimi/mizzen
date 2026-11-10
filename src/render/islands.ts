@@ -5,10 +5,10 @@ import type { Island } from "../contracts/render.ts";
 
 /**
  * Client islands: a component's `client.ts` becomes a plain ES module, minified, and a page
- * loads only the islands of the components it uses (ADR 0022, rule 3).
+ * loads only the islands of the components it uses.
  *
- * Types are removed with Node's type stripping, so only erasable syntax is allowed (ADR 0022, rule 1).
- * Minifying needs no dependency: the engine's runtime dependencies stay as ADR 0022 lists them.
+ * Types are removed with Node's type stripping, so only erasable syntax is allowed.
+ * Minifying needs no dependency: the engine's runtime dependencies stay as they are listed in package.json.
  */
 
 type Kind = "word" | "number" | "string" | "template" | "regex" | "punct";

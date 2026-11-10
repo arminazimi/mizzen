@@ -232,7 +232,7 @@ function withDocument(markup: string, page: Page): string {
   });
 }
 
-/** Compares by code point (ADR 0022, rule 5). */
+/** Compares by code point. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

@@ -4,7 +4,7 @@ import type { Page, Site, SiteConfig } from "../contracts/index.ts";
  * The pages that can stand in for one another, and the order a missing language falls back in.
  *
  * The fallback chain lives in `_data/languages.yml`, never in `mizzen.yml`: the site config schema is frozen
- * (ADR 0024) and has no `fallback` key. The file holds a single mapping:
+ * and has no `fallback` key. The file holds a single mapping:
  *
  * ```yaml
  * fallback:
@@ -32,7 +32,7 @@ export interface LanguageResolution {
   readonly fallback: boolean;
 }
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

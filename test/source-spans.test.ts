@@ -20,7 +20,7 @@ const ctx: OutputContext = {
   report: () => {},
 };
 
-/** The block types `to-html.ts` puts `data-src` on (ADR 0026). */
+/** The block types `to-html.ts` puts `data-src` on. */
 const BLOCKS = new Set([
   "heading",
   "paragraph",

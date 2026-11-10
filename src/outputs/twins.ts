@@ -3,7 +3,7 @@ import type { LinkTag } from "../contracts/render.ts";
 import type { Output, OutputFile } from "../contracts/output.ts";
 import { isAppPage } from "./app-pages.ts";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -20,7 +20,7 @@ function underBase(url: string, base: string): string {
 }
 
 /**
- * The Markdown twin of a page URL (ADR 0006): the same address with `.md` in place of the HTML file, so a pretty URL
+ * The Markdown twin of a page URL: the same address with `.md` in place of the HTML file, so a pretty URL
  * (`/guide/install/`) gives `/guide/install/index.md`, the site root gives `/index.md`, and `/404.html` gives `/404.md`.
  * Mirrors the file the HTML output writes. Returns undefined for a URL that names a file other than HTML, which has
  * no twin.
@@ -33,7 +33,7 @@ export function twinUrl(url: string): string | undefined {
 }
 
 /**
- * The head link that advertises a page's Markdown twin (ADR 0006, decision 6): `rel=alternate type=text/markdown` at
+ * The head link that advertises a page's Markdown twin: `rel=alternate type=text/markdown` at
  * the twin's site-relative address, which already carries `base`. A page with no twin has no link: an app page, an
  * asset, or a doc page whose URL names a file other than HTML. A layout adds it to the `Head` data it prints.
  */
@@ -45,14 +45,14 @@ export function twinLink(page: Page): LinkTag | undefined {
 }
 
 /**
- * Writes each doc page's Markdown twin at `<url>/index.md` next to its HTML (ADR 0006): the page's source Markdown
+ * Writes each doc page's Markdown twin at `<url>/index.md` next to its HTML: the page's source Markdown
  * with the front matter removed and directives kept readable, the same text `llms-full.txt` carries for the page.
  * The site root becomes `index.md`, and a URL that already names an HTML file (`/404.html`) becomes its `.md` name.
  *
  * App pages are skipped, since a twin would copy a program rather than a document, and so is a doc page whose URL
  * names a file other than HTML, because that file has no Markdown twin. The site `base` is stripped from the path,
  * as the HTML output strips it, so a project site writes `guide/install/index.md` into the output folder. Files come
- * back sorted by path (ADR 0022, rule 5), whatever order the model had.
+ * back sorted by path, whatever order the model had.
  */
 export const twins: Output = {
   name: "twins",

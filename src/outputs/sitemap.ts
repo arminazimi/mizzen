@@ -4,7 +4,7 @@ import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 import { languageGroups, translationId } from "../content/lang-fallback.ts";
 import { isAppPage } from "./app-pages.ts";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -125,7 +125,7 @@ function alternatesOf(
  *
  * A page that has translations gets one `<xhtml:link rel="alternate">` per language of its group plus `x-default`,
  * and the document declares the XHTML namespace only when some page has alternates; a single-language site writes
- * exactly the bytes it wrote before. Entries come back sorted by URL (ADR 0022, rule 5). A site without a valid
+ * exactly the bytes it wrote before. Entries come back sorted by URL. A site without a valid
  * `url` gets no file and a warning, and `url` is what makes every `href` absolute, as the protocol requires.
  */
 export const sitemap: Output = {

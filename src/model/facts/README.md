@@ -19,7 +19,7 @@ export const words: Fact = {
 
 - `name` must equal the file name without `.ts`; a mismatch is an error naming the file, and the fact is skipped. The name is also the key in `Site.data`, so `_data/words.yml` is the site's own `words`.
 - `compute(ctx)` returns the value, or a promise of it. It receives `root` and `sourceDir` as absolute paths, the site `config`, the final sorted `pages`, and the `_data` record. Facts do not see each other's values; each one reads `_data` only.
-- The value must be deterministic: the same site gives the same value (ADR 0022, rule 5). Do not read the clock, the environment, or a random source.
+- The value must be deterministic: the same site gives the same value. Do not read the clock, the environment, or a random source.
 
 ## Precedence and diagnostics
 
@@ -27,4 +27,4 @@ A key the site already has in `_data` wins: the fact does not run, its value is 
 
 A file the loader cannot import, or that does not export exactly one fact with a matching name, is a `facts.load-failed` error and is left out. A fact that throws or returns `undefined` is a `facts.compute-failed` warning and is left out; the other facts still run. The key order of `Site.data` is sorted by code point, so two runs on the same input have the same order.
 
-A fact is not a second config file: it derives a value from the site, and a setting a site may choose belongs in `mizzen.yml` (ADR 0028).
+A fact is not a second config file: it derives a value from the site, and a setting a site may choose belongs in `mizzen.yml`.

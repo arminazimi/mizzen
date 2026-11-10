@@ -5,7 +5,7 @@ import { isAppPage } from "./app-pages.ts";
 /** The section that collects links placed directly in a navigation list, outside any group. */
 const PAGES_SECTION = "Pages";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -21,7 +21,7 @@ function linkText(text: string): string {
 }
 
 /**
- * The Markdown twin of a page URL (ADR 0006): the same address with `.md` in place of the HTML file, so a pretty URL
+ * The Markdown twin of a page URL: the same address with `.md` in place of the HTML file, so a pretty URL
  * (`/guide/install/`) gives `/guide/install/index.md`, the site root gives `/index.md`, and `/404.html` gives `/404.md`.
  * Mirrors the file the HTML output writes. Returns undefined for a URL that names a file other than HTML, which has
  * no twin.

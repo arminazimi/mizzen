@@ -4,7 +4,7 @@ import type { Page, Site } from "../contracts/content.ts";
 import type { Diagnostic } from "../contracts/diagnostic.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -119,7 +119,7 @@ function orderedAgent(block: AgentBlock): AgentBlock {
  * A page without the block writes no file, and so does an app or asset page, a page whose URL names a file of another
  * kind, and a block whose every key is unreadable. A block with errors still writes its readable keys, and the errors
  * are reported. The site `base` is stripped from the path, as the HTML output strips it, so a project site writes
- * `guide/install/agent.json` into the output folder. Files come back sorted by path (ADR 0022, rule 5), whatever
+ * `guide/install/agent.json` into the output folder. Files come back sorted by path, whatever
  * order the model had.
  */
 export const pageAgent: Output = {

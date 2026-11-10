@@ -50,7 +50,7 @@ const MARKDOWN_EXTENSION = /\.(?:md|markdown|mdx)$/i;
 /** Everything a URL-safe slug keeps: letters, marks, numbers, and the three separators. */
 const SLUG_UNSAFE = /[^\p{L}\p{M}\p{N}._-]+/gu;
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -158,7 +158,7 @@ function isEmpty(diff: ReturnType<typeof diffMarkdown>): boolean {
  * A page's output path is slugged segment by segment, so a folder name cannot be empty, `.`, or `..`, and a
  * path only uses `/` between segments. Generated files live under `diff/`. A site's own folder named `diff/`
  * keeps precedence at the same paths: the site's copy is written and the generated file is skipped, as it is
- * for every output (ADR 0023; see `outputs/README.md`).
+ * for every output.
  */
 export const versionDiff: Output = {
   name: "version-diff",

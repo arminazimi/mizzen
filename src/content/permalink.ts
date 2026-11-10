@@ -4,7 +4,7 @@ export interface PermalinkOptions {
   readonly permalink?: string;
   /**
    * Site `base` from config: a path starting with `/` and without a trailing slash, or `""` at a
-   * domain root. Every URL the engine writes carries it (ADR 0024).
+   * domain root. Every URL the engine writes carries it.
    */
   readonly base?: string;
 }

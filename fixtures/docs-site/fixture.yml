@@ -1,4 +1,4 @@
-# Fixture config: one file, every path relative to this folder (ADR 0024).
+# Fixture config: one file, every path relative to this folder.
 title: Beacon
 description: "Documentation for the Beacon deploy CLI, shaped like Evergreen's site: about 600 pages, mostly generated."
 url: https://example.com

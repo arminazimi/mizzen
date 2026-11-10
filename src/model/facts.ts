@@ -59,7 +59,7 @@ export interface ApplyFactsResult {
 /** The default folder of facts: `facts/` beside this file. */
 const FACTS_DIR = fileURLToPath(new URL("./facts/", import.meta.url));
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -167,7 +167,7 @@ export async function loadFacts(dir?: string): Promise<LoadFactsResult> {
  * Runs every fact of `dir` in file-name order and merges each value into `Site.data` under its name. A key the site
  * already has in `_data` wins: the fact does not run and nothing is reported. A fact that throws, or returns
  * `undefined`, is left out with a `facts.compute-failed` warning and the other facts still run. The returned data has
- * its keys sorted by code point, so two runs on one input have the same key order (ADR 0022, rule 5). Facts do not
+ * its keys sorted by code point, so two runs on one input have the same key order. Facts do not
  * see each other's values: each receives the `_data` record.
  */
 export async function applyFacts(options: ApplyFactsOptions): Promise<ApplyFactsResult> {

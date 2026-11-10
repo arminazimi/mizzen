@@ -11,7 +11,7 @@ import { formatSpan, spanFromPosition } from "../source/spans.ts";
  *
  * Each block element (heading, paragraph, list, table, code block, blockquote, and directive
  * component) gets `data-src="<path>:<line>:<column>-<endLine>:<endColumn>"`, the block's full span
- * from the first character to the last (ADR 0026). That attribute is the base of source maps and
+ * from the first character to the last. That attribute is the base of source maps and
  * edit prompts, and its start is the block's ID. Raw HTML in the Markdown is passed through
  * unchanged (`allowDangerousHtml`).
  *

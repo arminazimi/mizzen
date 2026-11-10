@@ -10,7 +10,7 @@ const FILE = "changes.xml";
 /** How many of the most recently changed pages the feed carries. */
 const LIMIT = 30;
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

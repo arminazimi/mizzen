@@ -1,7 +1,7 @@
 /**
  * Span-based patching of a Markdown source file.
  *
- * A patch names one span with the units of ADR 0026 and ADR 0027: 1-based lines and columns,
+ * A patch names one span with the units of the source spans: 1-based lines and columns,
  * columns count Unicode code points (an astral character is one column, even though it is two
  * UTF-16 code units), and the end is inclusive. Applying a patch replaces exactly that span and
  * leaves every other byte alone, line endings included.

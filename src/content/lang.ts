@@ -19,7 +19,7 @@ export interface PageLangOptions {
   readonly frontMatter?: FrontMatter;
 }
 
-/** Primary language subtags that default to right-to-left (same list as the config loader and the 0.2 theme). */
+/** Primary language subtags that default to right-to-left (same list as the config loader). */
 const RTL = new Set([
   "ar", "arc", "ckb", "dv", "fa", "he", "ks", "ku", "ps", "sd", "syr", "ug", "ur", "yi",
 ]);

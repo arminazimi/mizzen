@@ -39,7 +39,7 @@ const THEME_OUT = "assets/theme";
 /** Length of the hash in a file name: 16 hex characters is far beyond collision range for a site. */
 const HASH_LENGTH = 16;
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }

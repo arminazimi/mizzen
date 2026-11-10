@@ -4,7 +4,7 @@ import type { Diagnostic, NavGroup, NavItem, NavLink, NavTree, SourcePos } from 
 
 import { createDiagnostics, type Diagnostics } from "../pipeline/diagnostics.ts";
 
-/** A list name the file may use: `main` and `docs`, or either with a language suffix such as `docs_fa` (the 0.2 shape). */
+/** A list name the file may use: `main` and `docs`, or either with a language suffix such as `docs_fa`. */
 const LIST_KEY = /^(main|docs)(_[a-z]{2,3})?$/;
 
 /** A path on this site, or an https link (the same rule as `schema/navigation.schema.json`). */
@@ -44,7 +44,7 @@ export interface NavFromYamlOptions {
   readonly pages?: ReadonlySet<string>;
   /**
    * Site `base` from config: a path starting with `/` and without a trailing slash, or `""` at a domain root.
-   * Navigation URLs are written without it and the engine adds it (ADR 0024).
+   * Navigation URLs are written without it and the engine adds it.
    */
   readonly base?: string;
 }
@@ -206,7 +206,7 @@ function entry(ctx: Context, node: Node): NavItem | undefined {
 }
 
 /**
- * Reads a navigation file (`_data/navigation.yml`, the 0.2 shape) into lists by name. `main` is the header menu and `docs`
+ * Reads a navigation file (`_data/navigation.yml`) into lists by name. `main` is the header menu and `docs`
  * the sidebar, in reading order; `main_<lang>` and `docs_<lang>` hold a language's own lists. A list entry is a link
  * (`title`, `url`, optional `match` and `tab`) or a group (`title`, one level of `children`, and optional `tab`).
  *
@@ -215,7 +215,7 @@ function entry(ctx: Context, node: Node): NavItem | undefined {
  *
  * Every problem carries the YAML line it is on. A malformed URL, an unknown key, an unknown list, or an invalid entry is an
  * error and that entry is left out; the rest of the file still loads. A site-local URL that is not in `options.pages` is a
- * warning. Site-local URLs and `match` prefixes are returned with `options.base` in front (ADR 0024). `file` names the
+ * warning. Site-local URLs and `match` prefixes are returned with `options.base` in front. `file` names the
  * file in diagnostic positions.
  */
 export function navFromYaml(text: string, file: string, options: NavFromYamlOptions = {}): NavFromYamlResult {

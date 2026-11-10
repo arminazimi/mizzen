@@ -20,7 +20,7 @@ import type { Page } from "../contracts/index.ts";
  * The segment counts as a version only when it matches `/^v\d+(?:\.\d+){0,2}$/` (`v1`, `v1.2`, `v1.2.3`),
  * or when `options.versions` supplies the folder names. A supplied list is also the order versions are
  * sorted in, and it restricts detection to those names; names are matched exactly. An empty list is treated
- * as missing. The site config schema is frozen (ADR 0024), so a caller that keeps the list in config passes
+ * as missing. The site config schema is frozen, so a caller that keeps the list in config passes
  * it here as an option rather than changing the schema.
  *
  * A page outside every version gets `version: null` and keeps its whole source path. It is returned, not
@@ -98,7 +98,7 @@ export interface VersionedPage<P extends VersionPage = Page> {
 /** The `vN` naming rule: one, two, or three numeric parts. */
 const VERSION_NAME = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$/;
 
-/** Compares by code point, never by locale (ADR 0022, rule 5). */
+/** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
