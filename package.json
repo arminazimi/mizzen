@@ -27,7 +27,7 @@
     "node": ">=24"
   },
   "bin": {
-    "mizzen": "./bin/mizzen.js"
+    "mizzen": "bin/mizzen.js"
   },
   "exports": {
     ".": {
