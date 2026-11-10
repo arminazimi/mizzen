@@ -38,3 +38,52 @@ jobs:
       - name: Type check
         run: npm run typecheck
         working-directory: mizzen
+
+  # Measures line coverage and publishes it for the README badge. It runs on main only and holds the
+  # only write permission in this workflow: it can push the `badges` branch and nothing else. The badge
+  # is a shields.io endpoint badge reading coverage.json from that branch, so the number follows main.
+  coverage:
+    name: coverage
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: mizzen
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: arminazimi/lateen
+          path: lateen
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install both repositories
+        run: |
+          set -euo pipefail
+          (cd mizzen && npm install --no-audit --no-fund)
+          (cd lateen && npm install --no-audit --no-fund --no-save ../mizzen)
+      - name: Measure coverage
+        working-directory: mizzen
+        run: |
+          npm run test:coverage
+          npm run coverage:badge
+          echo "line coverage: $(node -p "require('./coverage/coverage.json').message")" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the badge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP"
+          rm -rf badges
+          git init --quiet badges
+          cd badges
+          git checkout --quiet -b badges
+          cp "$GITHUB_WORKSPACE/mizzen/coverage/coverage.json" coverage.json
+          git add coverage.json
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "chore(badges): coverage for ${GITHUB_SHA}"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges

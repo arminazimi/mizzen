@@ -36,6 +36,8 @@
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.ts\"",
+    "test:coverage": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-exclude=\"test/**\" --test-coverage-exclude=\"scripts/**\" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \"test/**/*.test.ts\"",
+    "coverage:badge": "node scripts/coverage-badge.ts coverage/lcov.info coverage/coverage.json",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

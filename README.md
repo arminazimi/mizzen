@@ -13,9 +13,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/arminazimi/mizzen/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/arminazimi/mizzen/ci.yml?branch=main&label=CI&logo=github&logoColor=white&labelColor=1F1F28&color=3F6E66&style=flat"></a>
-  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-3F6E66?labelColor=1F1F28&style=flat"></a>
-  <a href="https://arminazimi.github.io/mizzen/"><img alt="docs" src="https://img.shields.io/badge/docs-mizzen-3F6E66?labelColor=1F1F28&style=flat"></a>
+  <a href="https://github.com/arminazimi/mizzen/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/arminazimi/mizzen/ci.yml?branch=main&label=CI&logo=github&logoColor=white&labelColor=1F1F28&color=8A6220&style=flat"></a>
+  <a href="https://www.npmjs.com/package/@velella/mizzen"><img alt="npm" src="https://img.shields.io/npm/v/@velella/mizzen?label=npm&logo=npm&logoColor=white&labelColor=1F1F28&color=8A6220&style=flat"></a>
+  <a href="https://github.com/arminazimi/mizzen/actions/workflows/ci.yml"><img alt="coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Farminazimi%2Fmizzen%2Fbadges%2Fcoverage.json&labelColor=1F1F28&style=flat"></a>
 </p>
 
 <p align="center">
