@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Island } from "../src/contracts/index.ts";
-import { buildIsland, islandScript, minifyJs, stripTypes } from "../src/render/islands.ts";
+import { buildIsland, buildIslandModules, islandScript, islandUrl, minifyJs, stripTypes } from "../src/render/islands.ts";
 
 /** Runs a function body and returns its result, so a minified body can be compared with the original. */
 function evaluate(body: string): unknown {
@@ -178,4 +179,53 @@ test("buildIsland names the file when it cannot strip the types", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("buildIslandModules builds each client and every relative file it imports, once, with .js specifiers", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mizzen-islands-"));
+  try {
+    mkdirSync(join(root, "chrome", "a"), { recursive: true });
+    mkdirSync(join(root, "chrome", "b"), { recursive: true });
+    writeFileSync(join(root, "chrome", "a", "client.ts"), 'import { KEY } from "./key.ts";\nimport type { T } from "./types.ts";\nexport const a: T = KEY;\n');
+    writeFileSync(join(root, "chrome", "a", "key.ts"), 'export const KEY = "k";\n');
+    writeFileSync(join(root, "chrome", "a", "types.ts"), "export type T = string;\n");
+    writeFileSync(join(root, "chrome", "b", "client.ts"), 'import { KEY } from "../a/key.ts";\nexport const b = KEY;\n');
+    const modules = await buildIslandModules(root, ["chrome/a/client.ts", "chrome/b/client.ts"]);
+    assert.deepEqual([...modules.keys()], [
+      "assets/theme/islands/chrome/a/client.js",
+      "assets/theme/islands/chrome/a/key.js",
+      "assets/theme/islands/chrome/b/client.js",
+    ]);
+    assert.match(modules.get("assets/theme/islands/chrome/a/client.js")!, /from"\.\/key\.js"/);
+    assert.match(modules.get("assets/theme/islands/chrome/b/client.js")!, /from"\.\.\/a\/key\.js"/);
+    assert.doesNotMatch(modules.get("assets/theme/islands/chrome/a/client.js")!, /types/);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("buildIslandModules rejects a package import, which a browser cannot resolve", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mizzen-islands-"));
+  try {
+    mkdirSync(join(root, "chrome", "a"), { recursive: true });
+    writeFileSync(join(root, "chrome", "a", "client.ts"), 'import { h } from "preact";\nexport const a = h;\n');
+    await assert.rejects(buildIslandModules(root, ["chrome/a/client.ts"]), /imports "preact"/);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("islandUrl puts the module under the site's base", () => {
+  assert.equal(islandUrl("/slipway", "chrome/drawer/client.ts"), "/slipway/assets/theme/islands/chrome/drawer/client.js");
+  assert.equal(islandUrl("", "chrome/drawer/client.ts"), "/assets/theme/islands/chrome/drawer/client.js");
+});
+
+test("optionalFonts lists the woff2 files of faces declared font-display: optional, once each", async () => {
+  const { optionalFonts } = await import("../src/pipeline/build.ts");
+  const css =
+    '@font-face{font-family:A;font-display:optional;src:url(/f/a.woff2)format("woff2")}' +
+    '@font-face{font-family:B;font-display:swap;src:url(/f/b.woff2)format("woff2")}' +
+    '@font-face{font-family:A;font-display: optional;src:url("/f/a.woff2") format("woff2")}';
+  assert.deepEqual(optionalFonts(css), ["/f/a.woff2"]);
+  assert.deepEqual(optionalFonts("body{color:red}"), []);
 });

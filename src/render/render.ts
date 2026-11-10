@@ -25,6 +25,8 @@ export interface RenderOptions {
   readonly layout: Layout;
   /** Theme components keyed by the name written on `<sl-component name=…>`. */
   readonly components: Readonly<Record<string, ThemeComponent>>;
+  /** Islands of chrome parts, loaded on every page before the islands of the components the page used. */
+  readonly chromeIslands?: readonly Island[];
   readonly trail: Trail;
   readonly pager: Pager;
   readonly head: Head;
@@ -246,7 +248,7 @@ export function renderPage(options: RenderOptions): RenderResult {
   const { site, page, layout, components, trail, pager, head } = options;
   const resolved = resolveComponents(page.html, page, site, components);
   const uniqueNames = [...new Set(resolved.used)].sort(byCodePoint);
-  const islands: Island[] = [];
+  const islands: Island[] = [...(options.chromeIslands ?? [])];
   const css: string[] = [];
   for (const name of uniqueNames) {
     const entry = components[name];

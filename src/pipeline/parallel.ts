@@ -21,6 +21,8 @@ import { hreflangLinks } from "../outputs/hreflang.ts";
 import { opensearchLink } from "../outputs/opensearch.ts";
 import { loadRegistry, type ThemeRegistry } from "../render/registry.ts";
 import { renderPage, type ThemeComponent } from "../render/render.ts";
+import { islandUrl } from "../render/islands.ts";
+import type { Island } from "../contracts/render.ts";
 
 /** One page after rendering: its HTML document and what rendering found. */
 export interface RenderedPage {
@@ -30,6 +32,8 @@ export interface RenderedPage {
   readonly html: string;
   /** Theme-relative CSS files the page needs besides the shared ones: its layout's and its components'. */
   readonly css: readonly string[];
+  /** Islands the page loads: the chrome parts' and those of the components it used. Absent when the page could not be laid out. */
+  readonly islands?: readonly Island[];
   /** Findings from rendering the page; an empty list when it rendered cleanly. */
   readonly diagnostics: readonly Diagnostic[];
 }
@@ -66,13 +70,30 @@ function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** The theme's components by name, as the render host takes them. Islands are not wired yet. */
-function componentsOf(registry: ThemeRegistry): Record<string, ThemeComponent> {
+/** The theme's components by name, as the render host takes them, each with the island its `client.ts` makes. */
+function componentsOf(registry: ThemeRegistry, base: string): Record<string, ThemeComponent> {
   const out: Record<string, ThemeComponent> = {};
   for (const [name, unit] of Object.entries(registry.components)) {
-    out[name] = unit.css === undefined ? { component: unit.component } : { component: unit.component, css: unit.css };
+    out[name] = {
+      component: unit.component,
+      ...(unit.css === undefined ? {} : { css: unit.css }),
+      ...(unit.client === undefined ? {} : { island: { name, src: islandUrl(base, unit.client) } }),
+    };
   }
   return out;
+}
+
+/**
+ * The islands of the chrome parts, in name order. A page loads all of them: the engine cannot tell which parts a
+ * layout drew, and an island does nothing on a page without its markup.
+ */
+export function chromeIslandsOf(registry: ThemeRegistry, base: string): Island[] {
+  return Object.keys(registry.chrome)
+    .sort(byCodePoint)
+    .flatMap((name) => {
+      const client = registry.chrome[name]!.client;
+      return client === undefined ? [] : [{ name, src: islandUrl(base, client) }];
+    });
 }
 
 /** The navigation list the page sits in, with its breadcrumb and pager. Lists are tried in name order. */
@@ -157,13 +178,14 @@ export function renderOnePage(
     site,
     page,
     layout: registered.layout,
-    components: componentsOf(registry),
+    components: componentsOf(registry, site.config.base),
+    chromeIslands: chromeIslandsOf(registry, site.config.base),
     trail,
     pager,
     head: headOf(site, page),
   });
   const css = registered.css === undefined ? result.css : [registered.css, ...result.css];
-  return { url: page.url, html: result.html, css, diagnostics: result.diagnostics };
+  return { url: page.url, html: result.html, css, islands: result.islands, diagnostics: result.diagnostics };
 }
 
 /** The message of a thrown value, for a diagnostic. */
@@ -411,7 +433,7 @@ class WorkerPool implements RenderPool {
       message: `Page ${page.url} could not be rendered in a worker thread (${reason}); it was rendered in the main thread.`,
       pos: page.source,
     };
-    return { url: rendered.url, html: rendered.html, css: rendered.css, diagnostics: [diagnostic, ...rendered.diagnostics] };
+    return { url: rendered.url, html: rendered.html, css: rendered.css, ...(rendered.islands === undefined ? {} : { islands: rendered.islands }), diagnostics: [diagnostic, ...rendered.diagnostics] };
   }
 
   #resolve(entry: Entry, result: RenderedPage): void {

@@ -1,4 +1,4 @@
-# Mizzen's documentation site, built by Mizzen with the Lateen theme.
+# Documentation site for mizzen, read by Mizzen.
 title: Mizzen
 description: A deterministic docs engine with exact source positions.
 lang: en
@@ -10,6 +10,13 @@ repository:
   dir: site
 theme:
   options:
+    logo:
+      light: /brand/mark-light.svg
+      dark: /brand/mark-dark.svg
+    favicon:
+      svg: /brand/favicon.svg
+      ico: /brand/favicon.ico
+      apple: /brand/apple-touch-icon.png
     footer:
       copyright: "© Velella"
       license: "Apache-2.0 license"
@@ -18,6 +25,10 @@ theme:
           url: https://github.com/arminazimi/mizzen
         - title: Lateen
           url: https://arminazimi.github.io/lateen/
+        - title: Install
+          url: /install/
+        - title: Accessibility
+          url: /accessibility/
 # Pages removed from the docs site; their old addresses lead to the home page.
 redirects:
   "/audio/": "/"

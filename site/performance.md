@@ -16,8 +16,8 @@ Slipway's speed is enforced, not claimed. Four gates in `npm run check` build th
 
 | Fixture | Pages | Largest page | Compressed bytes |
 | --- | --- | --- | --- |
-| `docs-site` | 594 | `404.html` | 150 |
-| `rtl-site` | 6 | `commands/index.html` | 150 |
+| `docs-site` | 594 | `404.html` | 10,969 |
+| `rtl-site` | 6 | `commands/index.html` | 10,969 |
 
 [The JavaScript gate](https://github.com/arminazimi/slipway/blob/main/tools/js-budget-engine/run.ts) fails a page over the budget.
 
@@ -27,8 +27,8 @@ Slipway's speed is enforced, not claimed. Four gates in `npm run check` build th
 
 | Fixture | Stylesheets | Compressed bytes |
 | --- | --- | --- |
-| `docs-site` | 4 | 9,625 |
-| `rtl-site` | 3 | 9,562 |
+| `docs-site` | 7 | 19,030 |
+| `rtl-site` | 5 | 17,643 |
 
 [The CSS gate](https://github.com/arminazimi/slipway/blob/main/tools/css-budget-engine/run.ts) fails a build over the budget.
 

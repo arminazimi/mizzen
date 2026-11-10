@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { dirname, relative, resolve, sep } from "node:path";
 import { stripTypeScriptTypes } from "node:module";
 import type { Island } from "../contracts/render.ts";
 
@@ -345,4 +346,52 @@ export function islandScript(islands: readonly Island[], nonce?: string): string
   const imports = srcs.map((src) => `import ${scriptString(src)};`).join("");
   const nonceAttr = nonce === undefined ? "" : ` nonce="${attrValue(nonce)}"`;
   return `<script type="module"${nonceAttr}>${imports}</script>`;
+}
+
+/** Folder under the output that island modules go to. */
+export const ISLAND_DIR = "assets/theme/islands";
+
+/** A relative `from "./x.ts"`, `import "./x.ts"`, or `import("./x.ts")` specifier in stripped source. */
+const RELATIVE_SPECIFIER = /((?:\bfrom|\bimport)\s*\(?\s*)(["'])(\.{1,2}\/[^"']+)\2/g;
+
+/** Where the browser module for the theme file `rel` (relative to the theme root) is written, relative to the output. */
+export function islandPath(rel: string): string {
+  return `${ISLAND_DIR}/${rel.split(sep).join("/").replace(/\.ts$/, ".js")}`;
+}
+
+/** The URL of an island's entry module under `base` (the site's base path, `""` or `/slipway`). */
+export function islandUrl(base: string, clientRel: string): string {
+  return `${base}/${islandPath(clientRel)}`;
+}
+
+/**
+ * Builds the browser modules for the given client files, and every theme file they import with a relative path.
+ * Each file becomes its own module (types stripped, `.ts` specifiers pointing at `.js`, minified), written where
+ * {@link islandPath} says, so a file two islands share is built once and the browser caches it. Returns output path to
+ * source text. A bare specifier (a package) is an error: the browser could not resolve it.
+ */
+export async function buildIslandModules(themeRoot: string, clients: readonly string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const queue = clients.map((rel) => resolve(themeRoot, rel));
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const file = queue.shift()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const rel = relative(themeRoot, file);
+    if (rel.startsWith("..")) throw new Error(`Island file "${file}" is outside the theme folder.`);
+    const stripped = stripTypes(await readFile(file, "utf8"), file);
+    const rewritten = stripped.replace(RELATIVE_SPECIFIER, (_all, head: string, quote: string, spec: string) => {
+      queue.push(resolve(dirname(file), spec));
+      return `${head}${quote}${spec.replace(/\.ts$/, ".js")}${quote}`;
+    });
+    const bare = /(?:\bfrom|^\s*import)\s*["']([^."'/][^"']*)["']/m.exec(rewritten);
+    if (bare) throw new Error(`Island "${rel}" imports "${bare[1]}", which a browser cannot resolve; import a relative file instead.`);
+    try {
+      out.set(islandPath(rel), minifyJs(rewritten));
+    } catch (err) {
+      throw new Error(`Cannot minify "${rel}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return new Map([...out].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }

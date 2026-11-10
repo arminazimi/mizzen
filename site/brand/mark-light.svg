@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+<title id="title">Slipway mark (light surface)</title>
+<defs><clipPath id="m-above"><polygon points="-112.6,-51.4 378.9,292.7 545.8,54.3 54.3,-289.8"/></clipPath><clipPath id="m-below"><polygon points="-122.9,-36.7 368.6,307.4 201.7,545.8 -289.8,201.7"/></clipPath></defs><g fill="none" stroke-width="16"><g clip-path="url(#m-above)" stroke="#1F1F28"><circle cx="128" cy="128" r="88"/><circle cx="128" cy="128" r="58"/></g><g clip-path="url(#m-below)" stroke="#5E81AC"><circle cx="128" cy="128" r="88"/><circle cx="128" cy="128" r="58"/></g></g>
+</svg>
