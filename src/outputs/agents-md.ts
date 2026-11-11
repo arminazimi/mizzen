@@ -191,7 +191,7 @@ function render(site: Site, ctx: OutputContext): string {
     `## How to check a change`,
     ``,
     `1. Build the site.`,
-    `2. Check the source and the build: \`npx mizzen doctor . --build <build folder>\`.`,
+    `2. Check the site: \`npx mizzen doctor\`.`,
     `3. Read every finding. Each one names a file and often a line. Fix it in the source, build again, and repeat until the check is clean.`,
     ``,
     `## Generated files`,

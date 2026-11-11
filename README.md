@@ -60,6 +60,7 @@ Commands:
   build [dir]               Build the site into --out (default: dist)
   check [dir]               Build to a temp folder and print diagnostics only
   dev [dir]                 Serve the site, rebuild on change, and reload the browser
+  doctor [dir]              Check the config, content, output paths, runtime, and toolchain
   edit apply <patch.json> [dir]
                             Apply a span patch to its source file and record a proof
   edit verify <proof.json>  Check an edit proof against the site and rerun the doctor
@@ -70,7 +71,7 @@ Commands:
 Options:
   --out <path>         Output folder: build (default: dist), dev (default: .mizzen/dev), watch (default: .mizzen/watch); pack writes a file here instead of stdout
   --theme <dir>        Theme root folder (layouts/, chrome/, components/)
-  --format <format>    text, json, or sarif (check only; default: text)
+  --format <format>    text, json, or sarif (check and doctor; default: text)
   --hash <hex>         Expected build hash for verify (default: the manifest's)
   --site <dir>         Site root for edit verify (default: .)
   --doctor             Rerun the doctor for edit verify

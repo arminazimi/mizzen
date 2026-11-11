@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CONFIG_FILE } from "../src/config/load.ts";
+import { COMMANDS, parseArgs } from "../src/cli/index.ts";
 import type { Diagnostic, Page, Site } from "../src/contracts/index.ts";
 import { agentsMd } from "../src/outputs/agents-md.ts";
 import { buildModel } from "../src/model/build.ts";
@@ -200,7 +201,7 @@ const GOLDEN = [
   "## How to check a change",
   "",
   "1. Build the site.",
-  "2. Check the source and the build: `npx mizzen doctor . --build <build folder>`.",
+  "2. Check the site: `npx mizzen doctor`.",
   "3. Read every finding. Each one names a file and often a line. Fix it in the source, build again, and repeat until the check is clean.",
   "",
   "## Generated files",
@@ -219,6 +220,19 @@ const GOLDEN = [
 
 test("without page rules the file is byte for byte the file it was before", async () => {
   assert.equal(await textOf(site({}, [page("/guide/install/")])), GOLDEN);
+});
+
+test("the guidance names only commands the CLI registers", async () => {
+  const text = await textOf(site({}, [page("/guide/install/")]));
+  const named = [...text.matchAll(/`(?:npx )?mizzen ([a-z][a-z-]*)/g)].map((match) => match[1]!);
+  assert.ok(named.length > 0, "the guidance names at least one command");
+  for (const command of new Set(named)) {
+    assert.ok(
+      (COMMANDS as readonly string[]).includes(command),
+      `AGENTS.md names \`mizzen ${command}\`, which the CLI does not register`,
+    );
+    assert.deepEqual(parseArgs([command, "--help"]), { help: true }, `\`mizzen ${command}\` is registered`);
+  }
 });
 
 test("a page with notes but no rules adds nothing", async () => {
