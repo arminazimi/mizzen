@@ -3,8 +3,8 @@
  *
  * A node is a file the build reads (page, include, data, navigation, asset) or an output it derives from them. An
  * edge points from the dependent to what it depends on: a page to its includes, an include to its nested includes,
- * a page to a site asset its front matter names, and every page output to its page, the navigation, and `_data`.
- * One node exists per file, so a snippet that is also a page is one unit rather than two.
+ * a page or include to a site asset its front matter or Markdown body names, and every page output to its page, the
+ * navigation, and `_data`. One node exists per file, so a snippet that is also a page is one unit rather than two.
  *
  * The graph is a superset of the truth where the engine cannot narrow it: a layout may read any `_data` value, so
  * every output depends on every data file. That is deliberate; a narrower edge would make invalidation wrong.
@@ -14,7 +14,10 @@
  */
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
+import type { Definition, Nodes, Root } from "mdast";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
 import { discover, type DiscoveredFile } from "../content/discover.ts";
 import { parseFrontMatter } from "../content/frontmatter.ts";
 import { expandIncludes } from "../content/includes.ts";
@@ -156,6 +159,70 @@ function localPath(url: string, base: string): string | undefined {
   return path;
 }
 
+/** A scheme (`https:`, `mailto:`) or protocol-relative URL, which names no file in the source folder. */
+const EXTERNAL = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i;
+
+/**
+ * The source-relative path an image URL names from `from`: a root URL goes through {@link localPath}, a relative
+ * one resolves from the file that holds it. `undefined` for an external URL or one that leaves the source folder.
+ */
+function referencePath(url: string, base: string, from: string): string | undefined {
+  if (url === "" || url.startsWith("#") || EXTERNAL.test(url)) return undefined;
+  const clean = url.split(/[?#]/, 1)[0] ?? "";
+  if (clean === "") return undefined;
+  if (clean.startsWith("/")) return localPath(clean, base);
+  const path = posix.normalize(posix.join(posix.dirname(normalize(from)), clean));
+  if (path === "" || path === "." || path === ".." || path.startsWith("../")) return undefined;
+  return path;
+}
+
+/** An image reference found in a Markdown body: its URL and where it starts. */
+interface AssetReference {
+  readonly url: string;
+  readonly line: number;
+  readonly column: number;
+  readonly endLine: number;
+  readonly endColumn: number;
+}
+
+/** True when a Markdown body is worth parsing for image references. */
+const MAY_HAVE_IMAGE = /!\[/;
+
+function walkMdast(node: Nodes, visit: (node: Nodes) => void): void {
+  visit(node);
+  if ("children" in node) for (const child of node.children) walkMdast(child, visit);
+}
+
+/**
+ * Every image reference in one Markdown body, with the line and column where it starts (1-based within `body`).
+ * Reference-style images resolve through their definitions, and unused definitions are ignored.
+ */
+function assetReferencesOf(body: string): AssetReference[] {
+  if (!MAY_HAVE_IMAGE.test(body)) return [];
+  const tree = unified().use(remarkParse).parse(body) as Root;
+  const definitions = new Map<string, Definition>();
+  walkMdast(tree, (node) => {
+    if (node.type === "definition") definitions.set(node.identifier, node);
+  });
+
+  const found: AssetReference[] = [];
+  const add = (url: string, at: Nodes["position"]): void => {
+    if (url === "" || url.startsWith("#") || EXTERNAL.test(url)) return;
+    const start = at?.start;
+    const end = at?.end;
+    if (start === undefined || end === undefined) return;
+    found.push({ url, line: start.line, column: start.column, endLine: end.line, endColumn: end.column });
+  };
+  walkMdast(tree, (node) => {
+    if (node.type === "image") add(node.url, node.position);
+    else if (node.type === "imageReference") {
+      const definition = definitions.get(node.identifier);
+      if (definition !== undefined) add(definition.url, node.position);
+    }
+  });
+  return found;
+}
+
 /** The source path of the page whose source file is `page.source.file`; the longest matching discovery path wins. */
 function sourcePathOf(file: string, paths: readonly string[]): string | undefined {
   let best: string | undefined;
@@ -279,17 +346,33 @@ export async function buildDependencyGraph(options: DependencyGraphOptions): Pro
     if (path !== undefined) pageByPath.set(path, page);
   }
 
-  const addAssetEdge = (pagePath: string, image: string): void => {
-    const path = localPath(image, config.base);
+  const addAssetEdge = (from: string, image: string, pos?: SourcePos): void => {
+    const path = referencePath(image, config.base, from);
     if (path === undefined) return;
     if (!filePaths.has(path)) addNode({ id: fileNodeId(path), kind: "asset", path, missing: true });
-    addEdge(fileNodeId(pagePath), fileNodeId(path), atFile(pagePath));
+    addEdge(fileNodeId(from), fileNodeId(path), pos ?? atFile(from));
   };
+
+  /** Adds an edge for every image `body` names, with its line inside the source file that holds the body. */
+  const addBodyAssetEdges = (path: string, body: string, bodyLine: number): void => {
+    for (const reference of assetReferencesOf(body)) {
+      addAssetEdge(path, reference.url, {
+        file: path,
+        line: bodyLine + reference.line - 1,
+        column: reference.column,
+        endLine: bodyLine + reference.endLine - 1,
+        endColumn: reference.endColumn,
+      });
+    }
+  };
+
+  const includePaths = new Set<string>();
 
   for (const path of pagePaths) {
     const source = await readFile(resolve(sourceDir, path), "utf8");
     const front = parseFrontMatter(source, path);
     if (typeof front.data.image === "string") addAssetEdge(path, front.data.image);
+    addBodyAssetEdges(path, front.body, front.bodyLine);
 
     const included = await expandIncludes({
       body: front.body,
@@ -311,7 +394,21 @@ export async function buildDependencyGraph(options: DependencyGraphOptions): Pro
       });
       addNode({ id: fileNodeId(dependency.from), kind: "include", path: dependency.from });
       addEdge(fileNodeId(dependency.from), fileNodeId(dependency.path), dependency.pos);
+      if (!dependency.missing) includePaths.add(dependency.path);
     }
+  }
+
+  // A snippet's own images are the snippet's dependencies; the pages that include it inherit them transitively.
+  // Included files are not discovered (their folder starts with `_`), so the expander's list is the source of truth.
+  for (const path of [...includePaths].sort(byCodePoint)) {
+    let source: string;
+    try {
+      source = await readFile(resolve(sourceDir, path), "utf8");
+    } catch {
+      continue; // An unreadable snippet is already the expander's diagnostic; it has no body to read here.
+    }
+    const front = parseFrontMatter(source, path);
+    addBodyAssetEdges(path, front.body, front.bodyLine);
   }
 
   for (const [path, page] of pageByPath) {
