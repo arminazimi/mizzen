@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/velella-sh/mizzen/schema/diagnostics.schema.json",
+  "title": "Mizzen diagnostics",
+  "description": "The `mizzen check --format json` envelope: version 1 and the build's findings in stable order. A position is an inclusive source span in Unicode code points; a fix is a replacement a tool can apply without reading prose.",
+  "type": "object",
+  "required": [
+    "version",
+    "diagnostics"
+  ],
+  "properties": {
+    "diagnostics": {
+      "type": "array",
+      "description": "Findings sorted by file, line, column, then id; findings without a position come last.",
+      "items": {
+        "$ref": "#/$defs/diagnostic"
+      }
+    },
+    "version": {
+      "const": 1,
+      "description": "The format version. Only 1 exists."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "column": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based column in the source file, counting Unicode code points; a tab is one column."
+    },
+    "diagnostic": {
+      "type": "object",
+      "description": "One finding with the place and the repair that are known for it.",
+      "required": [
+        "id",
+        "severity",
+        "message"
+      ],
+      "properties": {
+        "fix": {
+          "$ref": "#/$defs/diagnosticFix",
+          "description": "A safe, mechanical repair on one source span, when there is one."
+        },
+        "help": {
+          "type": "string",
+          "description": "How to fix the problem, when the repair is known but is not mechanical."
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The stable check ID, such as `config.unknown-key`; an ID is never reused for another meaning."
+        },
+        "message": {
+          "type": "string",
+          "description": "What is wrong, in one sentence."
+        },
+        "pos": {
+          "$ref": "#/$defs/sourcePos",
+          "description": "Where in the source the problem is, when it has a place."
+        },
+        "severity": {
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ],
+          "description": "An error fails the build; a warning is reported; info is for the reader only."
+        }
+      },
+      "additionalProperties": false
+    },
+    "diagnosticFix": {
+      "type": "object",
+      "description": "Replace the characters of one source span with `text`; an empty `text` deletes the span.",
+      "required": [
+        "file",
+        "line",
+        "column",
+        "endLine",
+        "endColumn",
+        "text"
+      ],
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/column",
+          "description": "Column where the replaced span starts."
+        },
+        "description": {
+          "type": "string",
+          "description": "A short phrase for people, such as `Add a trailing slash`."
+        },
+        "endColumn": {
+          "$ref": "#/$defs/column",
+          "description": "Column of the replaced span's last character (inclusive)."
+        },
+        "endLine": {
+          "$ref": "#/$defs/line",
+          "description": "Line where the replaced span ends; the same as `line` for a one-line span."
+        },
+        "file": {
+          "$ref": "#/$defs/path",
+          "description": "The file to change."
+        },
+        "line": {
+          "$ref": "#/$defs/line",
+          "description": "Line where the replaced span starts."
+        },
+        "text": {
+          "type": "string",
+          "description": "What replaces the span; the empty string deletes it."
+        }
+      },
+      "additionalProperties": false
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based line in the source file, front matter included."
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A path relative to the repository root, with forward slashes.",
+      "not": {
+        "pattern": "^([a-zA-Z]:)?[\\\\/]|(^|/)\\.\\.?(/|$)|\\\\"
+      }
+    },
+    "sourcePos": {
+      "type": "object",
+      "description": "A span from its first character to its last. The end is inclusive, so it names the last character, and it is never before the start; JSON Schema cannot compare the four numbers, so the engine guarantees the order.",
+      "required": [
+        "file",
+        "line",
+        "column",
+        "endLine",
+        "endColumn"
+      ],
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/column",
+          "description": "Column where the span starts."
+        },
+        "endColumn": {
+          "$ref": "#/$defs/column",
+          "description": "Column of the span's last character (inclusive)."
+        },
+        "endLine": {
+          "$ref": "#/$defs/line",
+          "description": "Line where the span ends; the same as `line` for a one-line span."
+        },
+        "file": {
+          "$ref": "#/$defs/path",
+          "description": "The source file."
+        },
+        "line": {
+          "$ref": "#/$defs/line",
+          "description": "Line where the span starts."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

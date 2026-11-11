@@ -113,7 +113,7 @@ test("SARIF: levels, rules, regions, encoded URIs, and help", () => {
   assert.equal(first["ruleIndex"], 1);
   assert.deepEqual(first["locations"][0].physicalLocation, {
     artifactLocation: { uri: "docs/guide/install.md", uriBaseId: "%SRCROOT%" },
-    region: { startLine: 3, startColumn: 5, endLine: 4 },
+    region: { startLine: 3, startColumn: 5, endLine: 4, endColumn: 6 },
   });
   assert.equal(run.results[1]!["properties"].help, "Fix the link.");
   assert.equal(run.results[2]!["locations"][0].physicalLocation.artifactLocation.uri, "docs/%D9%81%D8%A7%D8%B1%D8%B3%DB%8C/%D9%86%D8%B5%D8%A8%201.md");

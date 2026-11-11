@@ -138,8 +138,24 @@ export interface SarifOptions {
 
 const SARIF_LEVEL: Record<Severity, "error" | "warning" | "note"> = { error: "error", warning: "warning", info: "note" };
 
+/** Most severe first, so a rule's default level is the one its worst finding deserves. */
+const SEVERITY_RANK: Record<Severity, number> = { info: 0, warning: 1, error: 2 };
+
 /** Percent-encodes a repository-relative path for a SARIF URI, keeping the `/` separators. */
 const sarifUri = (file: string): string => file.split("/").map(encodeURIComponent).join("/");
+
+/**
+ * One rule's metadata, derived only from the findings that share its id and in sorted order, so the same
+ * findings always produce the same rule. `help` falls back to the message when the finding names no repair.
+ */
+function sarifRule(id: string, found: readonly Diagnostic[]) {
+  const worst = found.reduce((a, b) => (SEVERITY_RANK[b.severity] > SEVERITY_RANK[a.severity] ? b : a));
+  return {
+    id,
+    defaultConfiguration: { level: SARIF_LEVEL[worst.severity] },
+    help: { text: found.find((d) => d.help)?.help ?? found[0]!.message },
+  };
+}
 
 /** A SARIF `fix`: one replacement. SARIF's `endColumn` is exclusive, ours is inclusive. */
 function sarifFix(fix: DiagnosticFix) {
@@ -159,19 +175,27 @@ function sarifFix(fix: DiagnosticFix) {
   };
 }
 
-/** Prints SARIF 2.1.0, one run, one rule per id, `help` kept in each result's `properties`, a `fix` as SARIF `fixes`. */
+/**
+ * Prints SARIF 2.1.0, one run, one rule per id with the level and help its findings agree on, `help` kept in each
+ * result's `properties`, a `fix` as SARIF `fixes`. A region's end is exclusive in SARIF, so it is one column past
+ * the inclusive `SourcePos` end; columns count Unicode code points, and `columnKind` says so whenever a region or
+ * a fix is present.
+ */
 export function formatSarif(diagnostics: readonly Diagnostic[], options: SarifOptions = {}): string {
   const sorted = sortDiagnostics(diagnostics);
-  const ids = [...new Set(sorted.map((d) => d.id))].sort();
+  const byId = new Map<string, Diagnostic[]>();
+  for (const d of sorted) byId.set(d.id, [...(byId.get(d.id) ?? []), d]);
+  const ids = [...byId.keys()].sort();
+  const indexOf = new Map(ids.map((id, index) => [id, index]));
   const driver = {
     name: options.tool?.name ?? "mizzen",
     ...(options.tool?.version === undefined ? {} : { version: options.tool.version }),
     ...(options.tool?.informationUri === undefined ? {} : { informationUri: options.tool.informationUri }),
-    rules: ids.map((id) => ({ id })),
+    rules: ids.map((id) => sarifRule(id, byId.get(id)!)),
   };
   const results = sorted.map((d) => ({
     ruleId: d.id,
-    ruleIndex: ids.indexOf(d.id),
+    ruleIndex: indexOf.get(d.id),
     level: SARIF_LEVEL[d.severity],
     message: { text: d.message },
     ...(d.pos
@@ -180,7 +204,12 @@ export function formatSarif(diagnostics: readonly Diagnostic[], options: SarifOp
             {
               physicalLocation: {
                 artifactLocation: { uri: sarifUri(d.pos.file), uriBaseId: "%SRCROOT%" },
-                region: { startLine: d.pos.line, startColumn: d.pos.column, endLine: d.pos.endLine },
+                region: {
+                  startLine: d.pos.line,
+                  startColumn: d.pos.column,
+                  endLine: d.pos.endLine,
+                  endColumn: d.pos.endColumn + 1,
+                },
               },
             },
           ],
@@ -189,10 +218,11 @@ export function formatSarif(diagnostics: readonly Diagnostic[], options: SarifOp
     ...(d.help ? { properties: { help: d.help } } : {}),
     ...(d.fix ? { fixes: [sarifFix(d.fix)] } : {}),
   }));
+  const codePointColumns = sorted.some((d) => d.pos !== undefined || d.fix !== undefined);
   const log = {
     $schema: "https://json.schemastore.org/sarif-2.1.0.json",
     version: "2.1.0",
-    runs: [{ tool: { driver }, ...(sorted.some((d) => d.fix) ? { columnKind: "unicodeCodePoints" } : {}), results }],
+    runs: [{ tool: { driver }, ...(codePointColumns ? { columnKind: "unicodeCodePoints" } : {}), results }],
   };
   return `${JSON.stringify(log, null, 2)}\n`;
 }
