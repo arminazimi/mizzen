@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { reviewers, UNKNOWN, type Review } from "../src/model/reviewers.ts";
+import { reviewCoverage, reviewers, UNKNOWN, type Review } from "../src/model/reviewers.ts";
 
 const hasGit = !spawnSync("git", ["--version"]).error;
 
@@ -181,4 +181,59 @@ test("the answer is the same on every call for a fixed repository", { skip: hasG
     const first = reviewers(root, "guide/install.md") as Review;
     assert.deepEqual(reviewers(root, "guide/install.md"), first);
   });
+});
+
+test("coverage separates a recorded review from an untracked file", { skip: hasGit ? false : "git is not installed" }, async () => {
+  await withRepository([{ path: "guide/install.md", date: "2026-10-05T12:00:00Z" }], (root) => {
+    assert.equal(reviewCoverage(root, "guide/install.md"), "recorded");
+    assert.notEqual(reviewers(root, "guide/install.md"), UNKNOWN);
+
+    writeFileSync(join(root, "guide/new.md"), "# New\n");
+    assert.equal(reviewCoverage(root, "guide/new.md"), "untracked");
+    assert.equal(reviewers(root, "guide/new.md"), UNKNOWN);
+  });
+});
+
+test("coverage is unavailable when git log fails after the work-tree check", { skip: process.platform === "win32" ? "a POSIX shell is required" : false }, () => {
+  const root = mkdtempSync(join(tmpdir(), "reviewers-log-fails-"));
+  const bin = mkdtempSync(join(tmpdir(), "reviewers-log-fails-bin-"));
+  const git = join(bin, "git");
+  const originalPath = process.env.PATH;
+  try {
+    writeFileSync(join(root, "page.md"), "# Page\n");
+    // The work-tree check succeeds; the whole-root log that follows fails, as a broken repository or a killed process would.
+    writeFileSync(
+      git,
+      ['#!/bin/sh', 'if [ "$1" = "rev-parse" ]; then printf "true\\n"; exit 0; fi', 'exit 128', ""].join("\n"),
+    );
+    chmodSync(git, 0o755);
+    process.env.PATH = `${bin}:${originalPath ?? ""}`;
+
+    assert.equal(reviewCoverage(root, "page.md"), "unavailable", "a failed git log must not read as an untracked file");
+    assert.equal(reviewers(root, "page.md"), UNKNOWN);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("coverage is unavailable without git, and for paths the lookup refuses", { skip: hasGit ? false : "git is not installed" }, async () => {
+  await withRepository([{ path: "escape.md", date: "2026-10-05T12:00:00Z" }], (root) => {
+    const site = join(root, "site");
+    mkdirSync(site, { recursive: true });
+    assert.equal(reviewCoverage(site, "../escape.md"), "unavailable");
+    assert.equal(reviewCoverage(root, ""), "unavailable");
+    assert.equal(reviewCoverage(root, "."), "unavailable");
+  });
+
+  const plain = mkdtempSync(join(tmpdir(), "reviewers-plain-"));
+  try {
+    writeFileSync(join(plain, "page.md"), "# Page\n");
+    assert.equal(reviewCoverage(plain, "page.md"), "unavailable");
+    assert.equal(reviewers(plain, "page.md"), UNKNOWN);
+  } finally {
+    rmSync(plain, { recursive: true, force: true });
+  }
 });
