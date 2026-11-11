@@ -61,8 +61,12 @@ function site(): string {
   return mkdtempSync(join(tmpdir(), "readme-site-"));
 }
 
-test("the CLI help in the README is the command's own help", () => {
-  assert.ok(README.includes(usage), "the CLI section quotes the usage string exactly");
+test("every quoted CLI help is the command's own help", () => {
+  const quoted = DOCUMENTS.filter(([, text]) => text.includes("Usage: mizzen"));
+  assert.ok(quoted.some(([file]) => file === "README.md"), "README.md quotes the CLI help");
+  for (const [file, text] of quoted) {
+    assert.ok(text.includes(usage), `${file} quotes the usage string exactly`);
+  }
 });
 
 test("the documents name test files that exist", () => {
