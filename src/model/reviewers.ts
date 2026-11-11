@@ -104,6 +104,26 @@ function readReviews(root: string): Map<string, Review> {
 }
 
 /**
+ * How much review history a page has: `recorded` when git names a commit for it, `untracked` when the root is a
+ * work tree but no commit names it, and `unavailable` when git, a work tree, or a path inside the root is missing.
+ * The three are kept apart so a consumer can tell "never committed" from "git cannot be asked".
+ */
+export type ReviewCoverage = "recorded" | "untracked" | "unavailable";
+
+/** The path and history to ask about, or `undefined` when the path is unanswered or the root is not a work tree. */
+function historyOf(
+  root: string,
+  pageFile: string,
+): { readonly base: string; readonly history: History; readonly path: string } | undefined {
+  const base = resolve(root);
+  const path = gitPathOf(base, pageFile);
+  if (path === undefined) return undefined;
+
+  const history = historyAt(base);
+  return history.available ? { base, history, path } : undefined;
+}
+
+/**
  * The last commit that touched `pageFile`, as its committer date and author name, for the "last reviewed by" line.
  * `pageFile` is relative to `root` (or absolute inside it); a path outside the root is {@link UNKNOWN}, never another
  * file's history.
@@ -119,13 +139,22 @@ function readReviews(root: string): Map<string, Review> {
  * does too.
  */
 export function reviewers(root: string, pageFile: string): ReviewLookup {
-  const base = resolve(root);
-  const path = gitPathOf(base, pageFile);
-  if (path === undefined) return UNKNOWN;
+  const found = historyOf(root, pageFile);
+  if (found === undefined) return UNKNOWN;
 
-  const history = historyAt(base);
-  if (!history.available) return UNKNOWN;
+  found.history.reviews ??= readReviews(found.base);
+  return found.history.reviews.get(found.path) ?? UNKNOWN;
+}
 
-  history.reviews ??= readReviews(base);
-  return history.reviews.get(path) ?? UNKNOWN;
+/**
+ * What git knows about `pageFile`, without inventing a review: see {@link ReviewCoverage}. The path rules and the
+ * per-root cache are the ones {@link reviewers} uses, so asking both costs one `git log` and the two answers agree.
+ * A path outside the root is `unavailable`, because no history for it may be read.
+ */
+export function reviewCoverage(root: string, pageFile: string): ReviewCoverage {
+  const found = historyOf(root, pageFile);
+  if (found === undefined) return "unavailable";
+
+  found.history.reviews ??= readReviews(found.base);
+  return found.history.reviews.has(found.path) ? "recorded" : "untracked";
 }

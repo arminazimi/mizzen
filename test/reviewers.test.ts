@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { reviewers, UNKNOWN, type Review } from "../src/model/reviewers.ts";
+import { reviewCoverage, reviewers, UNKNOWN, type Review } from "../src/model/reviewers.ts";
 
 const hasGit = !spawnSync("git", ["--version"]).error;
 
@@ -181,4 +181,34 @@ test("the answer is the same on every call for a fixed repository", { skip: hasG
     const first = reviewers(root, "guide/install.md") as Review;
     assert.deepEqual(reviewers(root, "guide/install.md"), first);
   });
+});
+
+test("coverage separates a recorded review from an untracked file", { skip: hasGit ? false : "git is not installed" }, async () => {
+  await withRepository([{ path: "guide/install.md", date: "2026-10-05T12:00:00Z" }], (root) => {
+    assert.equal(reviewCoverage(root, "guide/install.md"), "recorded");
+    assert.notEqual(reviewers(root, "guide/install.md"), UNKNOWN);
+
+    writeFileSync(join(root, "guide/new.md"), "# New\n");
+    assert.equal(reviewCoverage(root, "guide/new.md"), "untracked");
+    assert.equal(reviewers(root, "guide/new.md"), UNKNOWN);
+  });
+});
+
+test("coverage is unavailable without git, and for paths the lookup refuses", { skip: hasGit ? false : "git is not installed" }, async () => {
+  await withRepository([{ path: "escape.md", date: "2026-10-05T12:00:00Z" }], (root) => {
+    const site = join(root, "site");
+    mkdirSync(site, { recursive: true });
+    assert.equal(reviewCoverage(site, "../escape.md"), "unavailable");
+    assert.equal(reviewCoverage(root, ""), "unavailable");
+    assert.equal(reviewCoverage(root, "."), "unavailable");
+  });
+
+  const plain = mkdtempSync(join(tmpdir(), "reviewers-plain-"));
+  try {
+    writeFileSync(join(plain, "page.md"), "# Page\n");
+    assert.equal(reviewCoverage(plain, "page.md"), "unavailable");
+    assert.equal(reviewers(plain, "page.md"), UNKNOWN);
+  } finally {
+    rmSync(plain, { recursive: true, force: true });
+  }
 });

@@ -139,9 +139,9 @@ test("counts and ages are read as whole, non-negative numbers", () => {
   assert.equal(score.reasons[1]!.message, "No drift findings.");
   assert.equal(score.reasons[2]!.message, "Last reviewed 1 day ago, within the 180-day limit.");
 
-  // A negative age counts as zero, so it is fresh rather than unknown.
-  assert.equal(trustScore({ examples: CLEAN_EXAMPLES, drift: 0, reviewAgeDays: -5 }).level, "verified");
-  assert.equal(codesOf({ examples: CLEAN_EXAMPLES, drift: 0, reviewAgeDays: -5 })[2], "review.recent");
+  // A negative age is a review dated after the measured instant: it cannot be confirmed, so it is a conflict.
+  assert.equal(trustScore({ examples: CLEAN_EXAMPLES, drift: 0, reviewAgeDays: -5 }).level, "review-due");
+  assert.equal(codesOf({ examples: CLEAN_EXAMPLES, drift: 0, reviewAgeDays: -5 })[2], "review.conflict");
 });
 
 test("the result is deterministic, and the reason order never depends on the input shape", () => {
@@ -166,5 +166,106 @@ test("the result is deterministic, and the reason order never depends on the inp
     "review.overdue",
   ]);
   assert.equal(trustScore({ examples: CLEAN_EXAMPLES, drift: 1, reviewAgeDays: 400 }).level, "at-risk");
+});
+
+test("every reason has a machine-readable factor with the same code, in the same fixed order", () => {
+  const score = trustScore(VERIFIED);
+  assert.deepEqual(score.factors, [
+    { signal: "examples", code: "examples.passed", state: "positive", value: 0 },
+    { signal: "drift", code: "drift.clean", state: "positive", value: 0 },
+    { signal: "review", code: "review.recent", state: "positive", value: 10 },
+  ]);
+  assert.equal(score.reviewCoverage, "recorded");
+  for (const factor of score.factors) assert.equal("message" in factor, false, "a factor carries no wording");
+});
+
+test("missing evidence is a missing factor, never a healthy one", () => {
+  const score = trustScore({});
+  assert.equal(score.level, "at-risk");
+  assert.deepEqual(score.factors, [
+    { signal: "examples", code: "examples.none", state: "neutral", value: "unknown" },
+    { signal: "drift", code: "drift.unknown", state: "missing", value: "unknown" },
+    { signal: "review", code: "review.unknown", state: "missing", value: "unknown" },
+  ]);
+  assert.equal(score.reviewCoverage, "unknown");
+
+  // Naming a coverage that claims a record exists cannot upgrade an unknown age.
+  const recorded = trustScore({ drift: 0, reviewAgeDays: "unknown", reviewCoverage: "recorded" });
+  assert.equal(recorded.level, "review-due");
+  assert.equal(recorded.factors[2]!.state, "missing");
+});
+
+test("example counts that disagree are a conflict, not a pass", () => {
+  const conflicting: readonly { total: number; passed: number; failed: number }[] = [
+    { total: 1, passed: 2, failed: 0 },
+    { total: 2, passed: 1, failed: 2 },
+    { total: 0, passed: 0, failed: 1 },
+  ];
+  for (const examples of conflicting) {
+    const score = trustScore({ examples, drift: 0, reviewAgeDays: 1 }, { thresholds: { reviewDueDays: 10_000 } });
+    assert.equal(score.level, "at-risk", JSON.stringify(examples));
+    assert.deepEqual(score.factors[0], {
+      signal: "examples",
+      code: "examples.conflict",
+      state: "conflict",
+      value: examples.failed,
+    });
+  }
+});
+
+test("a review age that its coverage denies is a conflict, never verified", () => {
+  for (const reviewCoverage of ["untracked", "unavailable"] as const) {
+    const score = trustScore({ examples: CLEAN_EXAMPLES, drift: 0, reviewAgeDays: 1, reviewCoverage });
+    assert.equal(score.level, "review-due", reviewCoverage);
+    assert.deepEqual(score.factors[2], {
+      signal: "review",
+      code: "review.conflict",
+      state: "conflict",
+      value: 1,
+    });
+    assert.equal(score.reviewCoverage, reviewCoverage);
+  }
+});
+
+test("a review dated after the measured instant is a conflict, not a fresh review", () => {
+  const score = trustScore({ examples: CLEAN_EXAMPLES, drift: 0, reviewAgeDays: -1 });
+  assert.equal(score.level, "review-due");
+  assert.equal(score.factors[2]!.code, "review.conflict");
+  assert.equal(score.factors[2]!.value, -1);
+});
+
+test("coverage is derived from the age when the caller gives none, and never inflates it", () => {
+  assert.equal(trustScore({ reviewAgeDays: 0 }).reviewCoverage, "recorded");
+  assert.equal(trustScore({ reviewAgeDays: "unknown" }).reviewCoverage, "unknown");
+  assert.equal(trustScore({}).reviewCoverage, "unknown");
+  assert.equal(trustScore({ reviewAgeDays: 0, reviewCoverage: "recorded" }).reviewCoverage, "recorded");
+  assert.equal(trustScore({ reviewAgeDays: 1, reviewCoverage: "untracked" }).reviewCoverage, "untracked");
+
+  // An unrecognized coverage at run time is ignored instead of trusted.
+  const bogus = { reviewAgeDays: 0, reviewCoverage: "bogus" } as unknown as TrustScoreInput;
+  assert.equal(trustScore(bogus).reviewCoverage, "recorded");
+});
+
+test("the newest allowed review age stays verified, and one more day is due", () => {
+  const options = { thresholds: { reviewDueDays: 30 } } as const;
+  const atLimit = trustScore({ examples: CLEAN_EXAMPLES, drift: 0, reviewAgeDays: 30, reviewCoverage: "recorded" }, options);
+  assert.equal(atLimit.level, "verified");
+  assert.equal(atLimit.factors[2]!.value, 30);
+
+  const past = trustScore({ examples: CLEAN_EXAMPLES, drift: 0, reviewAgeDays: 31, reviewCoverage: "recorded" }, options);
+  assert.equal(past.level, "review-due");
+  assert.equal(past.factors[2]!.state, "negative");
+});
+
+test("the score serializes deterministically, with a fixed key order", () => {
+  const first = trustScore({ examples: CLEAN_EXAMPLES, drift: 2, reviewAgeDays: 10, reviewCoverage: "recorded" });
+  const reordered = trustScore({ reviewCoverage: "recorded", reviewAgeDays: 10, drift: 2, examples: CLEAN_EXAMPLES });
+  assert.deepEqual(reordered, first);
+  assert.deepEqual(Object.keys(first), ["level", "reasons", "factors", "reviewCoverage"]);
+
+  const parsed = JSON.parse(JSON.stringify(first)) as { level: string; reviewCoverage: string; factors: unknown[] };
+  assert.equal(parsed.level, "at-risk");
+  assert.equal(parsed.reviewCoverage, "recorded");
+  assert.equal(parsed.factors.length, 3);
 });
 
