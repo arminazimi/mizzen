@@ -1,4 +1,5 @@
-import { access, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Diagnostic } from "../contracts/diagnostic.ts";
@@ -78,6 +79,22 @@ function fileUrl(path: string): string {
   return pathToFileURL(path).href;
 }
 
+/**
+ * The entry module's URL, keyed by its current bytes.
+ *
+ * Node keeps a module for the life of the process, so a plain file URL would hand a watch rebuild the layout it
+ * imported first. The `?v=<sha256>` the site plugin loader (`src/plugins/hooks.ts`) already uses makes changed bytes
+ * a new module, while unchanged bytes resolve to the same URL and so reuse the module already imported.
+ *
+ * The boundary is the entry file: manifest, layout, chrome, and component modules. A re-imported entry still resolves
+ * its own imports by their plain specifiers, so an edit only to one of those transitive modules is not reloaded here,
+ * and building a general transitive resolver is outside issue #97.
+ */
+async function entryUrl(abs: string): Promise<string> {
+  const digest = createHash("sha256").update(await readFile(abs)).digest("hex");
+  return `${fileUrl(abs)}?v=${digest}`;
+}
+
 function diagnostic(id: string, message: string, help?: string): Diagnostic {
   return help === undefined
     ? { id, severity: "error", message }
@@ -91,7 +108,7 @@ function isFunction(value: unknown): value is (...args: never[]) => unknown {
 /** Loads a theme unit module by absolute path; returns the module or a diagnostic. */
 async function importUnit(abs: string, rel: string): Promise<{ mod: Record<string, unknown> } | { diagnostic: Diagnostic }> {
   try {
-    const mod = (await import(fileUrl(abs))) as Record<string, unknown>;
+    const mod = (await import(await entryUrl(abs))) as Record<string, unknown>;
     return { mod };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
