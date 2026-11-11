@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { main, parseArgs, usage } from "../src/cli/index.ts";
-import { verifyProof, verifyProofMessage } from "../src/cli/edit-verify.ts";
+import {
+  formatVerifyProofJson,
+  verifyProof,
+  verifyProofMessage,
+  type VerifyProofReport,
+} from "../src/cli/edit-verify.ts";
 import { writeProof, type ProofLevel } from "../src/edits/proof.ts";
 
 /** A temporary folder holding `files`. */
@@ -61,21 +66,32 @@ function capture() {
   };
 }
 
-test("parseArgs: edit verify takes a proof, a site root, and --doctor", () => {
+/** The one machine-readable document a `--format json` run printed to stdout. */
+function report(logs: readonly string[]): VerifyProofReport {
+  assert.equal(logs.length, 1, logs.join("\n"));
+  return JSON.parse(logs[0]!) as VerifyProofReport;
+}
+
+test("parseArgs: edit verify takes a proof, a site root, --doctor, and --format", () => {
   assert.deepEqual(parseArgs(["edit", "verify", "proof.json"]), {
-    options: { command: "edit-verify", proof: "proof.json", site: ".", doctor: false },
+    options: { command: "edit-verify", proof: "proof.json", site: ".", doctor: false, format: "text" },
   });
   assert.deepEqual(parseArgs(["edit", "verify", "proof.json", "--site", "site", "--doctor"]), {
-    options: { command: "edit-verify", proof: "proof.json", site: "site", doctor: true },
+    options: { command: "edit-verify", proof: "proof.json", site: "site", doctor: true, format: "text" },
+  });
+  assert.deepEqual(parseArgs(["edit", "verify", "proof.json", "--format", "json"]), {
+    options: { command: "edit-verify", proof: "proof.json", site: ".", doctor: false, format: "json" },
   });
   assert.deepEqual(parseArgs(["edit", "--help"]), { help: true });
   assert.equal("error" in parseArgs(["edit"]), true);
   assert.equal("error" in parseArgs(["edit", "nope"]), true);
   assert.equal("error" in parseArgs(["edit", "verify"]), true);
   assert.equal("error" in parseArgs(["edit", "verify", "proof.json", "--out", "x"]), true);
+  assert.equal("error" in parseArgs(["edit", "verify", "proof.json", "--format", "sarif"]), true);
   assert.equal("error" in parseArgs(["edit", "verify", "a", "b"]), true);
   assert.match(usage, /edit verify <proof\.json>/);
   assert.match(usage, /--doctor/);
+  assert.match(usage, /text or json for edit apply and edit verify/);
 });
 
 test("an untouched edit exits 0 and names no file", async () => {
@@ -249,5 +265,122 @@ test("a matching proof reports the files it checked", async () => {
     assert.equal(result.doctor, "not-recorded");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--format json reports a matching proof as ok with no diagnostics", async () => {
+  const root = tree({ "docs/a.md": "alpha\n", "docs/b.md": "beta\n" });
+  try {
+    const proof = await record(root, [
+      { path: "docs/a.md", after: "alpha\n" },
+      { path: "docs/b.md", after: "beta\n" },
+    ]);
+    const { logs, errors, io } = capture();
+    assert.equal(await main(["edit", "verify", proof, "--site", root, "--format", "json"], io), 0);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(report(logs), {
+      version: 1,
+      command: "edit.verify",
+      status: "ok",
+      ok: true,
+      exitCode: 0,
+      proof,
+      siteRoot: root,
+      files: 2,
+      doctor: "not-recorded",
+      diagnostics: [],
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--format json names the failed check and path when a file changed", async () => {
+  const root = tree({ "docs/a.md": "alpha\n" });
+  try {
+    const proof = await record(root, [{ path: "docs/a.md", after: "alpha\n" }]);
+    writeFileSync(join(root, "docs/a.md"), "changed\n");
+    const { logs, errors, io } = capture();
+    assert.equal(await main(["edit", "verify", proof, "--site", root, "--format", "json"], io), 1);
+    // A failure is still a document on stdout, so an agent always has something to parse.
+    assert.deepEqual(errors, []);
+    const out = report(logs);
+    assert.equal(out.status, "failed");
+    assert.equal(out.ok, false);
+    assert.equal(out.exitCode, 1);
+    assert.deepEqual(out.diagnostics, [
+      {
+        code: "verify.file.changed",
+        check: "hash",
+        message: '"docs/a.md" changed after the proof.',
+        path: "docs/a.md",
+        expected: null,
+        actual: null,
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--format json reports an unreadable proof as invalid and names the proof file", async () => {
+  const root = tree({ "a.md": "one\n" });
+  try {
+    const proof = join(root, "no-proof.json");
+    const { logs, errors, io } = capture();
+    assert.equal(await main(["edit", "verify", proof, "--site", root, "--format", "json"], io), 2);
+    assert.deepEqual(errors, []);
+    const out = report(logs);
+    assert.equal(out.status, "invalid");
+    assert.equal(out.exitCode, 2);
+    assert.equal(out.ok, false);
+    assert.equal(out.diagnostics[0]?.code, "verify.proof-invalid");
+    assert.equal(out.diagnostics[0]?.check, "proof");
+    assert.equal(out.diagnostics[0]?.path, proof);
+    assert.match(out.diagnostics[0]?.message ?? "", /it does not exist/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("formatVerifyProofJson names a doctor mismatch's two levels and the failed check", async () => {
+  const root = tree({ "a.md": "one\n" });
+  const scratch = mkdtempSync(join(tmpdir(), "edit-verify-doctor-json-"));
+  try {
+    const proof = await record(root, [{ path: "a.md", after: "one\n" }], "L2");
+    const fake = join(scratch, "fake-doctor.ts");
+    writeFileSync(fake, 'process.stdout.write(JSON.stringify({ level: "L1" }));\n');
+    const result = await verifyProof({
+      proof,
+      siteRoot: root,
+      doctor: true,
+      doctorCommand: { command: process.execPath, prefix: [fake] },
+    });
+    const out = JSON.parse(formatVerifyProofJson(result, 1)) as VerifyProofReport;
+    assert.equal(out.status, "failed");
+    assert.deepEqual(out.diagnostics, [
+      {
+        code: "verify.doctor.mismatch",
+        check: "doctor",
+        message: "the doctor level is L1, not the recorded L2.",
+        path: null,
+        expected: "L2",
+        actual: "L1",
+      },
+    ]);
+
+    const unavailable = await verifyProof({
+      proof,
+      siteRoot: root,
+      doctor: true,
+      doctorCommand: { command: join(root, "does-not-exist") },
+    });
+    const invalid = JSON.parse(formatVerifyProofJson(unavailable, 2)) as VerifyProofReport;
+    assert.equal(invalid.status, "invalid");
+    assert.equal(invalid.diagnostics[0]?.code, "verify.doctor.unavailable");
+    assert.equal(invalid.diagnostics[0]?.check, "doctor");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
   }
 });

@@ -8,7 +8,8 @@
  * The doctor is a separate package, so it runs as a command and never as an import: `mizzen doctor <dir> --format
  * json`, whose `level` is compared with the one the proof recorded. Without `--doctor` the hashes are still checked
  * and the command says that the doctor check did not run. A matching proof exits 0, a mismatching file or doctor
- * level exits 1, and a proof that cannot be read is a usage error and exits 2.
+ * level exits 1, and a proof that cannot be read is a usage error and exits 2. `--format json` prints the same
+ * outcome as one {@link VerifyProofReport}, naming the failed check and its location.
  *
  */
 import { spawnSync } from "node:child_process";
@@ -311,4 +312,107 @@ export function verifyProofMessage(result: VerifyProofResult): string {
     return `ok: ${count} ${verb} the proof. The doctor check was not run; pass --doctor to rerun it.`;
   }
   return `ok: ${count} ${verb} the proof. The proof records no doctor level.`;
+}
+
+/** The check that failed: the proof file itself, a recorded file's hash, or the doctor level. */
+export type VerifyCheck = "proof" | "hash" | "doctor";
+
+/** One reason a proof did not verify: the failed check, its location, and the levels a doctor comparison had. */
+export interface VerifyDiagnostic {
+  readonly code:
+    | "verify.proof-invalid"
+    | "verify.file.changed"
+    | "verify.file.missing"
+    | "verify.file.extra"
+    | "verify.doctor.mismatch"
+    | "verify.doctor.unavailable";
+  readonly check: VerifyCheck;
+  /** The failure sentence, the same one the text mode prints. */
+  readonly message: string;
+  /** The proof for a proof failure, else the site-relative file; null for a doctor failure. */
+  readonly path: string | null;
+  /** The recorded doctor level for a mismatch, else null. */
+  readonly expected: ProofLevel;
+  /** The level the doctor reported for a mismatch, else null. */
+  readonly actual: ProofLevel;
+}
+
+/** The JSON `mizzen edit verify --format json` prints: one shape for a match and every failure. */
+export interface VerifyProofReport {
+  readonly version: 1;
+  readonly command: "edit.verify";
+  /** `ok` is exit 0, `failed` exit 1, `invalid` exit 2. */
+  readonly status: "ok" | "failed" | "invalid";
+  readonly ok: boolean;
+  /** The code the command returns; `status` names it. */
+  readonly exitCode: number;
+  readonly proof: string;
+  readonly siteRoot: string;
+  readonly files: number;
+  readonly doctor: VerifyProofDoctorState;
+  readonly diagnostics: readonly VerifyDiagnostic[];
+}
+
+/** The file-state failure codes, one per {@link VerifyProofFileState}. */
+const FILE_CODE: Record<VerifyProofFileState, VerifyDiagnostic["code"]> = {
+  changed: "verify.file.changed",
+  missing: "verify.file.missing",
+  extra: "verify.file.extra",
+};
+
+/** The failed check as data, with the sentence the text mode prints. */
+function diagnosticOf(failure: VerifyProofFailure, result: VerifyProofResult): VerifyDiagnostic {
+  const message = verifyProofMessage(result);
+  if (failure.kind === "proof") {
+    return {
+      code: "verify.proof-invalid",
+      check: "proof",
+      message,
+      path: result.proof,
+      expected: null,
+      actual: null,
+    };
+  }
+  if (failure.kind === "file") {
+    return {
+      code: FILE_CODE[failure.state],
+      check: "hash",
+      message,
+      path: failure.path,
+      expected: null,
+      actual: null,
+    };
+  }
+  if (failure.kind === "doctor") {
+    return {
+      code: "verify.doctor.mismatch",
+      check: "doctor",
+      message,
+      path: null,
+      expected: failure.expected,
+      actual: failure.actual,
+    };
+  }
+  return { code: "verify.doctor.unavailable", check: "doctor", message, path: null, expected: null, actual: null };
+}
+
+/**
+ * The machine-readable result of `edit verify`. `exitCode` is the code the command returns, so the
+ * report and the exit status always agree; a failure names the check that failed and where it is.
+ */
+export function formatVerifyProofJson(result: VerifyProofResult, exitCode: number): string {
+  const failure = result.failure;
+  const report: VerifyProofReport = {
+    version: 1,
+    command: "edit.verify",
+    status: exitCode === 0 ? "ok" : exitCode === 2 ? "invalid" : "failed",
+    ok: exitCode === 0,
+    exitCode,
+    proof: result.proof,
+    siteRoot: result.siteRoot,
+    files: result.files,
+    doctor: result.doctor,
+    diagnostics: failure === undefined ? [] : [diagnosticOf(failure, result)],
+  };
+  return `${JSON.stringify(report, null, 2)}\n`;
 }

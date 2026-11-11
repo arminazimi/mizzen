@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { main, parseArgs } from "../src/cli/index.ts";
-import { unifiedDiff } from "../src/cli/edit-apply.ts";
+import { formatEditApplyJson, unifiedDiff, EditApplyError, type EditApplyReport } from "../src/cli/edit-apply.ts";
 import { hashSource, type Patch } from "../src/edits/patch.ts";
 
 /** A temporary folder holding `files`, removed by the caller. */
@@ -58,12 +58,21 @@ function capture() {
   };
 }
 
+/** The one machine-readable document a `--format json` run printed to stdout. */
+function report(logs: readonly string[]): EditApplyReport {
+  assert.equal(logs.length, 1, logs.join("\n"));
+  return JSON.parse(logs[0]!) as EditApplyReport;
+}
+
 test("parseArgs: edit apply takes a patch, an optional site root, and its flags", () => {
   assert.deepEqual(parseArgs(["edit", "apply", "patch.json"]), {
-    options: { command: "edit-apply", root: ".", patch: "patch.json", dryRun: false },
+    options: { command: "edit-apply", root: ".", patch: "patch.json", dryRun: false, format: "text" },
   });
   assert.deepEqual(parseArgs(["edit", "apply", "patch.json", "site", "--dry-run", "--proof", "p.json"]), {
-    options: { command: "edit-apply", root: "site", patch: "patch.json", dryRun: true, proof: "p.json" },
+    options: { command: "edit-apply", root: "site", patch: "patch.json", dryRun: true, proof: "p.json", format: "text" },
+  });
+  assert.deepEqual(parseArgs(["edit", "apply", "patch.json", "--format", "json"]), {
+    options: { command: "edit-apply", root: ".", patch: "patch.json", dryRun: false, format: "json" },
   });
   assert.deepEqual(parseArgs(["edit", "--help"]), { help: true });
   assert.deepEqual(parseArgs(["edit", "apply", "--help"]), { help: true });
@@ -73,6 +82,8 @@ test("parseArgs: edit apply takes a patch, an optional site root, and its flags"
   assert.equal("error" in parseArgs(["edit", "apply", "p.json", "site", "extra"]), true);
   assert.equal("error" in parseArgs(["edit", "apply", "p.json", "--out", "dist"]), true);
   assert.equal("error" in parseArgs(["edit", "apply", "p.json", "--proof"]), true);
+  assert.equal("error" in parseArgs(["edit", "apply", "p.json", "--format", "sarif"]), true);
+  assert.equal("error" in parseArgs(["edit", "apply", "p.json", "--format"]), true);
 });
 
 test("edit apply writes the file and its proof, and prints the proof path", async () => {
@@ -256,6 +267,154 @@ test("a span outside the source is refused and leaves the file unchanged", async
   } finally {
     rmSync(root, { recursive: true });
   }
+});
+
+test("--format json reports an applied patch as one machine-readable document", async () => {
+  const source = "# Old\n\nBody\n";
+  const root = tree({ "docs/a.md": source });
+  const patch = patchAt(root, headingPatch(source));
+  const { logs, errors, io } = capture();
+  try {
+    assert.equal(await main(["edit", "apply", patch, root, "--format", "json"], io), 0, errors.join("\n"));
+    assert.deepEqual(errors, []);
+    assert.deepEqual(report(logs), {
+      version: 1,
+      command: "edit.apply",
+      status: "ok",
+      ok: true,
+      exitCode: 0,
+      dryRun: false,
+      applied: true,
+      siteRoot: root,
+      file: "docs/a.md",
+      proof: `${patch}.proof.json`,
+      beforeHash: hash(source),
+      afterHash: hash("# New\n\nBody\n"),
+      diff: null,
+      diagnostics: [],
+    });
+    assert.equal(readFileSync(join(root, "docs", "a.md"), "utf8"), "# New\n\nBody\n");
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("--format json reports a dry run with its diff and no proof", async () => {
+  const source = "# Old\n\nBody\n";
+  const root = tree({ "docs/a.md": source });
+  const patch = patchAt(root, headingPatch(source));
+  const { logs, io } = capture();
+  try {
+    assert.equal(await main(["edit", "apply", patch, root, "--dry-run", "--format", "json"], io), 0);
+    const out = report(logs);
+    assert.equal(out.status, "ok");
+    assert.equal(out.dryRun, true);
+    assert.equal(out.applied, false);
+    assert.equal(out.proof, null);
+    assert.match(out.diff ?? "", /^\+\+\+ b\/docs\/a\.md$/m);
+    assert.equal(readFileSync(join(root, "docs", "a.md"), "utf8"), source);
+    assert.equal(existsSync(`${patch}.proof.json`), false);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("--format json reports a refused patch as failed, with its path and span", async () => {
+  const source = "# Old\n";
+  const root = tree({ "docs/a.md": source });
+  const patch = patchAt(root, headingPatch(source, { expected: "# Nope" }));
+  const { logs, errors, io } = capture();
+  try {
+    assert.equal(await main(["edit", "apply", patch, root, "--format", "json"], io), 1);
+    assert.deepEqual(errors, []);
+    const out = report(logs);
+    assert.equal(out.status, "failed");
+    assert.equal(out.ok, false);
+    assert.equal(out.exitCode, 1);
+    assert.equal(out.applied, false);
+    assert.equal(out.file, null);
+    assert.equal(out.diagnostics.length, 1);
+    const diagnostic = out.diagnostics[0]!;
+    assert.equal(diagnostic.code, "edit.patch-refused");
+    assert.equal(diagnostic.path, "docs/a.md");
+    assert.deepEqual(diagnostic.span, { file: "docs/a.md", line: 1, column: 1, endLine: 1, endColumn: 5 });
+    // The sentence is the same one the text mode prints after `mizzen: `.
+    assert.match(diagnostic.message, /refused and the file is unchanged/);
+    assert.equal(readFileSync(join(root, "docs", "a.md"), "utf8"), source);
+    assert.equal(existsSync(`${patch}.proof.json`), false);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("--format json reports a path escape as failed, with the patch's pushed-out path", async () => {
+  const parent = tree({ "outside.md": "# Old\n", "site/docs/a.md": "# Old\n" });
+  const site = join(parent, "site");
+  const patch = patchAt(parent, {
+    span: { file: "../outside.md", line: 1, column: 1, endLine: 1, endColumn: 5 },
+    replacement: "# New",
+  });
+  const { logs, io } = capture();
+  try {
+    assert.equal(await main(["edit", "apply", patch, site, "--format", "json"], io), 1);
+    const diagnostic = report(logs).diagnostics[0]!;
+    assert.equal(diagnostic.code, "edit.path-escape");
+    assert.equal(diagnostic.path, "../outside.md");
+    assert.equal(readFileSync(join(parent, "outside.md"), "utf8"), "# Old\n");
+  } finally {
+    rmSync(parent, { recursive: true });
+  }
+});
+
+test("--format json reports an invalid request as invalid and writes nothing", async () => {
+  const source = "# Old\n";
+  const root = tree({ "docs/a.md": source });
+  try {
+    const missing = join(root, "nope.json");
+    const absent = capture();
+    assert.equal(await main(["edit", "apply", missing, root, "--format", "json"], absent.io), 2);
+    assert.deepEqual(absent.errors, []);
+    const first = report(absent.logs);
+    assert.equal(first.status, "invalid");
+    assert.equal(first.ok, false);
+    assert.equal(first.exitCode, 2);
+    assert.equal(first.applied, false);
+    assert.equal(first.diagnostics[0]?.code, "edit.patch-missing");
+    assert.equal(first.diagnostics[0]?.path, missing);
+
+    const noFile = patchAt(root, {
+      span: { line: 1, column: 1, endLine: 1, endColumn: 5 },
+      replacement: "# New",
+    } as Patch);
+    const malformed = capture();
+    assert.equal(await main(["edit", "apply", noFile, root, "--format", "json"], malformed.io), 2);
+    const second = report(malformed.logs);
+    assert.equal(second.status, "invalid");
+    assert.equal(second.diagnostics[0]?.code, "edit.patch-invalid");
+    assert.equal(second.diagnostics[0]?.path, noFile);
+    assert.match(second.diagnostics[0]?.message ?? "", /span\.file/);
+
+    // An invalid request never reports success and leaves the source and the proof folder alone.
+    assert.equal(readFileSync(join(root, "docs", "a.md"), "utf8"), source);
+    assert.equal(existsSync(`${noFile}.proof.json`), false);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("formatEditApplyJson names the status an exit code has", () => {
+  const refusal = new EditApplyError("edit.source-missing", "missing", false);
+  const failed = JSON.parse(formatEditApplyJson(refusal, 1)) as EditApplyReport;
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.ok, false);
+  assert.deepEqual(failed.diagnostics, [
+    { code: "edit.source-missing", message: "missing", path: null, span: null },
+  ]);
+
+  const invalid = JSON.parse(formatEditApplyJson(refusal, 2)) as EditApplyReport;
+  assert.equal(invalid.status, "invalid");
+  assert.equal(invalid.exitCode, 2);
+  assert.equal(invalid.ok, false);
 });
 
 test("unifiedDiff keeps three lines of context around one changed line", () => {
