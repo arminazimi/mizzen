@@ -8,8 +8,8 @@
  *
  * ## Isolation
  *
- * The environment is an allow-list — `PATH`, `HOME`, `TMPDIR`, `LANG=C.UTF-8`, `NO_COLOR=1`, plus whatever the caller
- * passes in `env` — so the engine's secrets never reach the example. A snippet that invokes a command in
+ * The environment is an allow-list — `PATH`, `HOME`, `TMPDIR`, `NODE_V8_COVERAGE`, `LANG=C.UTF-8`, `NO_COLOR=1`, plus
+ * whatever the caller passes in `env` — so the engine's secrets never reach the example. A snippet that invokes a command in
  * {@link DENIED_COMMANDS} is refused before the folder is created. Where the host offers an OS sandbox,
  * {@link planSandbox} confines writes to the working folder; {@link NodeExampleResult.sandboxed} says whether that
  * happened.
@@ -46,7 +46,7 @@ export interface RunNodeExampleOptions {
   readonly timeoutMs?: number;
   /**
    * Extra environment variables for the example. They are added to the scrubbed environment; they cannot move
-   * `HOME`, `TMPDIR`, `PATH`, `LANG`, or `NO_COLOR`, which are always set by the runner.
+   * `HOME`, `TMPDIR`, `PATH`, `NODE_V8_COVERAGE`, `LANG`, or `NO_COLOR`, which are always set by the runner.
    */
   readonly env?: Readonly<Record<string, string>>;
   /**
@@ -215,13 +215,15 @@ function runChild(
   });
 }
 
-/** The scrubbed environment of an example: the five fixed values, then whatever the caller added. */
+/** The scrubbed environment of an example: the six fixed values, then whatever the caller added. */
 function environment(root: string, extra: Readonly<Record<string, string>> | undefined): NodeJS.ProcessEnv {
   return {
     ...extra,
     PATH: process.env.PATH ?? "",
     HOME: join(root, "home"),
     TMPDIR: join(root, "tmp"),
+    // Node re-adds an inherited coverage path even when env omits it; keep that write inside the sandbox.
+    NODE_V8_COVERAGE: join(root, "tmp"),
     LANG: "C.UTF-8",
     NO_COLOR: "1",
   };
