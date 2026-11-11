@@ -11,16 +11,30 @@
  *
  * **Budget allocation.** Required evidence — the caller's `required` items (source, version,
  * warnings, dependency information) and every page's mandatory content — is placed first in the
- * serialization and counted before any optional section. The optional sections are then dropped
- * from the last page and its last section backwards, so the input order is the caller's ranking.
- * Required evidence is never trimmed: when it alone costs more than the budget, it is kept whole,
- * the output is over budget, and a warning names it. The `keep` option pins further sections by
- * id or heading text; a pinned section can also keep the output above the budget, and both
- * over-budget cases are reported as diagnostics with a source position.
+ * serialization and counted before any optional section. In the default `estimate` mode, the
+ * optional sections are then dropped from the last page and its last section backwards, so the
+ * input order is the caller's ranking. Required evidence is never trimmed: when it alone costs
+ * more than the budget, it is kept whole, the output is over budget, and a warning names it. The
+ * `keep` option pins further sections by id or heading text; a pinned section can also keep the
+ * output above the budget, and both over-budget cases are reported as diagnostics with a source
+ * position.
+ *
+ * **Hard limits.** `mode: "hard"` prices the complete serialization by the estimator's upper bound,
+ * so a result reported as fitting has {@link TrimAccounting.upper} within the budget. Separators
+ * are included because the whole serialization is measured, not its parts. `reservedTokens` is
+ * taken off the budget before any optional section is considered and is never spent: when the
+ * required evidence is smaller than the reserve, the difference still stays unavailable. Optional
+ * sections are allocated in equal turns: each round visits the pages in the caller's ranking order
+ * and lets each page add its next section when the whole serialization still fits, so one page
+ * cannot take another's share; a page that cannot add its next section cannot add a later, larger
+ * one. Ties fall to the input order, then to document order. Required evidence, mandatory content,
+ * and pinned sections are fixed; when they alone exceed the limit the result is
+ * `status: "over-budget"`, with {@link TrimOverBudget.minimumUpper} reporting the smallest feasible
+ * upper bound and every optional section reported as a `budget` omission.
  *
  * **The contract is measured on the serialization.** The budget applies to
  * {@link TrimResult.markdown}, the required evidence and the kept pages joined with one blank
- * line, not to the sum of per-page estimates: joining costs tokens too. The measure is the
+ * line, not to the sum of per-page estimates: joining costs tokens too. The default measure is the
  * estimator's estimate, and {@link TrimAccounting.upper} reports the planning bound above it,
  * because no model-agnostic estimator is exact (see `tokens.ts`).
  *
@@ -121,18 +135,48 @@ export interface TrimOmission {
   readonly duplicateOf: { readonly url: string; readonly id: string } | undefined;
 }
 
+/** How a budget is enforced. */
+export type TrimMode = "estimate" | "hard";
+
+/** Whether a result fits the limit its mode measures. */
+export type TrimStatus = "fits" | "over-budget";
+
+/**
+ * The smallest feasible result, reported when the content that may not be dropped is alone over the
+ * limit. The accounting values are exact upper bounds, so a caller can see how far over the budget
+ * its mandatory requirements are.
+ */
+export interface TrimOverBudget {
+  /** The effective limit: {@link TrimAccounting.budget} minus {@link TrimAccounting.reserved}. */
+  readonly limit: number;
+  /** The upper bound of the smallest possible serialization: required evidence, mandatory content, and pinned sections. */
+  readonly minimumUpper: number;
+  /** How far {@link minimumUpper} exceeds {@link limit}; never negative. */
+  readonly missingUpper: number;
+  /** The upper bound of the required evidence and mandatory content alone, without pinned sections. */
+  readonly requiredUpper: number;
+}
+
 /** The token accounting of a trimmed result, so a caller can inspect every number the contract used. */
 export interface TrimAccounting {
   /** The budget the caller asked for, after rounding down and clamping at 0. */
   readonly budget: number;
+  /** Tokens held back from optional content: the requested reserve, rounded down and clamped at 0. */
+  readonly reserved: number;
+  /** The effective limit: {@link budget} minus {@link reserved}, clamped at 0. */
+  readonly limit: number;
   /** The estimate of {@link TrimResult.markdown}, the serialized result. */
   readonly tokens: number;
-  /** {@link tokens} grown by {@link margin}: a planning bound that a hard limit should reserve. */
+  /** {@link tokens} grown by {@link margin}: a planning bound that a hard limit reserves. */
   readonly upper: number;
   /** The estimate of the required evidence and each page's mandatory content alone. */
   readonly required: number;
   /** {@link required} grown by {@link margin}, for the same reason as {@link upper}. */
   readonly requiredUpper: number;
+  /** The upper bound of the smallest possible serialization, pinned sections included. */
+  readonly minimumUpper: number;
+  /** {@link limit} minus {@link upper}, clamped at 0: headroom the output leaves unused. */
+  readonly remaining: number;
   /** The estimator's name: {@link TOKEN_METHOD} by default, `custom` for an override. */
   readonly method: string;
   /** The relative margin behind {@link upper}; 0 for a custom estimator, which states its own. */
@@ -154,6 +198,10 @@ export interface TrimResult {
   readonly markdown: string;
   /** How the budget was spent, with the estimator's uncertainty. */
   readonly accounting: TrimAccounting;
+  /** `fits` when the result meets its mode's limit; `over-budget` when the fixed content alone cannot. */
+  readonly status: TrimStatus;
+  /** What the smallest feasible serialization would cost, when even it exceeds the limit; else `undefined`. */
+  readonly overBudget: TrimOverBudget | undefined;
   /** Every section left out and why, in page and document order. */
   readonly omissions: readonly TrimOmission[];
 }
@@ -166,6 +214,18 @@ export interface TrimOptions {
    * A custom estimator reports no margin, because this module cannot know its error.
    */
   readonly estimate?: (text: string) => number;
+  /**
+   * How the budget is enforced. `estimate` (the default) drops sections while the estimate exceeds
+   * it, so the estimator's margin may sit above the budget; `hard` keeps the whole serialization's
+   * upper bound inside it.
+   */
+  readonly mode?: TrimMode;
+  /**
+   * Tokens held back from optional content, for a caller's own prompt or tool output. The reserve
+   * reduces the effective limit and is never spent, even when the required evidence is smaller
+   * than it. Default `0`.
+   */
+  readonly reservedTokens?: number;
   /**
    * Section ids (block ids from {@link TrimSection.id}) and heading texts that are never dropped.
    * Pinned sections take precedence over the budget; an over-budget result is reported.
@@ -323,9 +383,21 @@ function assemble(lead: string, sections: readonly BuiltSection[], kept: readonl
   return parts.join("\n\n");
 }
 
+/** A page's Markdown with the sections the predicate keeps; the original text when every section is kept. */
+function renderPage(page: BuiltPage, keep: (section: BuiltSection, index: number) => boolean): string {
+  return page.sections.every((section, index) => keep(section, index))
+    ? page.page.markdown
+    : assemble(page.lead, page.sections, page.sections.map((section, index) => keep(section, index)));
+}
+
 /** A page's Markdown after trimming; the original text when nothing was dropped. */
 function pageMarkdown(page: BuiltPage): string {
-  return page.kept.some((kept) => !kept) ? assemble(page.lead, page.sections, page.kept) : page.page.markdown;
+  return renderPage(page, (_section, index) => page.kept[index]!);
+}
+
+/** A page's smallest possible Markdown: its mandatory content and its pinned sections. */
+function fixedMarkdown(page: BuiltPage): string {
+  return renderPage(page, (section) => section.mandatory || section.pinned);
 }
 
 /** A page's mandatory content: its lead and its mandatory sections. */
@@ -391,6 +463,59 @@ function droppable(pages: readonly BuiltPage[]): { page: number; section: number
     }
   }
   return undefined;
+}
+
+/** The next section a page may add, from `from`; mandatory and pinned sections are skipped. */
+function nextDroppable(page: BuiltPage, from: number): number {
+  for (let index = from; index < page.sections.length; index += 1) {
+    const section = page.sections[index]!;
+    if (!section.mandatory && !section.pinned) return index;
+  }
+  return -1;
+}
+
+/**
+ * Allocates optional sections in equal turns and keeps the whole serialization inside the limit.
+ *
+ * Each round visits the pages in the caller's ranking order, and every page may add its next
+ * section when the upper bound of the complete serialization still fits. So one page cannot take
+ * another page's turn, and a page that cannot add its next section cannot add a later, larger one.
+ * Ties fall to the input order, then to document order. Required evidence, mandatory content, and
+ * pinned sections are already kept and are never touched.
+ */
+function allocateFair(
+  built: readonly BuiltPage[],
+  evidence: readonly RequiredEvidence[],
+  estimate: (text: string) => number,
+  limit: number,
+  margin: number,
+): void {
+  const cursors: number[] = [];
+  for (const page of built) {
+    const first = nextDroppable(page, 0);
+    for (let index = first; index !== -1; index = nextDroppable(page, index + 1)) {
+      page.kept[index] = false;
+    }
+    cursors.push(first);
+  }
+
+  while (cursors.some((cursor) => cursor !== -1)) {
+    let progress = false;
+    for (let index = 0; index < built.length; index += 1) {
+      const page = built[index]!;
+      const cursor = cursors[index]!;
+      if (cursor === -1) continue;
+      page.kept[cursor] = true;
+      if (upperOf(totalOf(built, evidence, estimate), margin) <= limit) {
+        progress = true;
+        cursors[index] = nextDroppable(page, cursor + 1);
+      } else {
+        page.kept[cursor] = false;
+        cursors[index] = -1;
+      }
+    }
+    if (!progress) break;
+  }
 }
 
 /** A section's words, for near-duplicate comparison. */
@@ -462,11 +587,11 @@ function omissionsOf(
 }
 
 /** A page's over-budget diagnostic: its mandatory content alone does not fit the budget. */
-function pageDiagnostic(built: BuiltPage, limit: number, total: number): Diagnostic {
+function pageDiagnostic(built: BuiltPage, limit: number, total: number, cost = built.mandatoryTokens): Diagnostic {
   return {
     id: "pack.trim.over-budget",
     severity: "warning",
-    message: `The heading and first paragraph of ${built.page.url} take ${built.mandatoryTokens} tokens, above the budget of ${limit}; they are kept, and the output is ${total} tokens.`,
+    message: `The heading and first paragraph of ${built.page.url} take ${cost} tokens, above the budget of ${limit}; they are kept, and the output is ${total} tokens.`,
     pos: built.mandatoryPos,
     help: "Raise the budget, or use `keep` deliberately: mandatory content is never dropped.",
   };
@@ -501,15 +626,18 @@ function requiredDiagnostic(
 }
 
 /**
- * Trims pages to a token budget by dropping whole trailing sections, then near-duplicates.
+ * Trims pages to a token budget by dropping whole sections, then near-duplicates.
  *
- * The budget is the total token estimate of {@link TrimResult.markdown}: the required evidence
- * first, then the pages in the input order, joined with one blank line between parts. While it is
- * exceeded, the last kept section of the last page in the input order is dropped; a page that has
- * only its mandatory content left is skipped and the previous page's last section is dropped.
- * Mandatory content is the lead (the title heading and the text before the first section) plus,
- * when the lead has no paragraph, the first section. Therefore every page keeps its heading and
- * first paragraph, and the required evidence is always kept.
+ * The budget is the total of {@link TrimResult.markdown}: the required evidence first, then the
+ * pages in the input order, joined with one blank line between parts. In the default `estimate`
+ * mode, while the estimate is exceeded the last kept section of the last page in the input order is
+ * dropped; a page that has only its mandatory content left is skipped and the previous page's last
+ * section is dropped. In `hard` mode the whole serialization is priced by the estimator's upper
+ * bound, `reservedTokens` is taken off the budget, and optional sections are kept in equal turns
+ * across the pages (see `allocateFair`). Mandatory content is the lead (the title heading and the
+ * text before the first section) plus, when the lead has no paragraph, the first section.
+ * Therefore every page keeps its heading and first paragraph, and the required evidence is always
+ * kept.
  *
  * After the budget is met, a kept section that repeats an earlier kept section is dropped and
  * reported as a `duplicate` omission. The result is deterministic: pages stay in the input order,
@@ -524,27 +652,41 @@ export async function trimPages(
   const estimate = options.estimate ?? ((text: string): number => estimateTokens(text).tokens);
   const margin = options.estimate === undefined ? TOKEN_ERROR_MARGIN : 0;
   const method = options.estimate === undefined ? TOKEN_METHOD : "custom";
+  const hard = options.mode === "hard";
   const keep = new Set(options.keep ?? []);
   const evidence = evidenceOf(options.required);
-  const limit = Number.isFinite(budget) ? Math.max(0, Math.floor(budget)) : 0;
+  const budgetLimit = Number.isFinite(budget) ? Math.max(0, Math.floor(budget)) : 0;
+  const requestedReserve = options.reservedTokens ?? 0;
+  const reserved = Number.isFinite(requestedReserve) ? Math.max(0, Math.floor(requestedReserve)) : 0;
+  const limit = Math.max(0, budgetLimit - reserved);
 
   const built: BuiltPage[] = [];
   for (const page of pages) built.push(await buildPage(page, estimate, keep));
 
-  let total = totalOf(built, evidence, estimate);
-  let next = droppable(built);
-  while (total > limit && next !== undefined) {
-    built[next.page]!.kept[next.section] = false;
-    total = totalOf(built, evidence, estimate);
-    next = droppable(built);
+  if (hard) {
+    allocateFair(built, evidence, estimate, limit, margin);
+  } else {
+    let total = totalOf(built, evidence, estimate);
+    let next = droppable(built);
+    while (total > limit && next !== undefined) {
+      built[next.page]!.kept[next.section] = false;
+      total = totalOf(built, evidence, estimate);
+      next = droppable(built);
+    }
   }
 
   const duplicates = removeDuplicates(built);
   const markdown = serializeParts([...evidence.map((item) => item.text), ...built.map(pageMarkdown)]);
   const tokens = tokensOf(estimate, markdown);
+  const upper = upperOf(tokens, margin);
   const required = tokensOf(
     estimate,
     serializeParts([...evidence.map((item) => item.text), ...built.map(mandatoryMarkdown)]),
+  );
+  const requiredUpper = upperOf(required, margin);
+  const minimumUpper = upperOf(
+    tokensOf(estimate, serializeParts([...evidence.map((item) => item.text), ...built.map(fixedMarkdown)])),
+    margin,
   );
 
   const trimmed: TrimmedPage[] = built.map((page) => {
@@ -558,17 +700,30 @@ export async function trimPages(
     };
   });
 
+  // The mode's measure: a hard limit must fit the upper bound, the default one the estimate.
+  const measure = hard ? upper : tokens;
+  const status: TrimStatus = measure <= limit ? "fits" : "over-budget";
+  const overBudget: TrimOverBudget | undefined =
+    status === "fits"
+      ? undefined
+      : { limit, minimumUpper, missingUpper: Math.max(0, minimumUpper - limit), requiredUpper };
+
   const diagnostics: Diagnostic[] = [];
-  if (tokens > limit) {
-    const evidenceTokens = tokensOf(estimate, serializeParts(evidence.map((item) => item.text)));
-    if (evidence.length > 0 && evidenceTokens > limit) {
-      diagnostics.push(requiredDiagnostic(evidence, evidenceTokens, limit, tokens));
+  if (measure > limit) {
+    const evidenceMeasure = hard
+      ? upperOf(tokensOf(estimate, serializeParts(evidence.map((item) => item.text))), margin)
+      : tokensOf(estimate, serializeParts(evidence.map((item) => item.text)));
+    if (evidence.length > 0 && evidenceMeasure > limit) {
+      diagnostics.push(requiredDiagnostic(evidence, evidenceMeasure, limit, measure));
     } else if (built.length > 0) {
-      const over = built.filter((page) => page.mandatoryTokens > limit);
+      const over = built.filter((page) => (hard ? upperOf(page.mandatoryTokens, margin) : page.mandatoryTokens) > limit);
       if (over.length > 0) {
-        for (const page of over) diagnostics.push(pageDiagnostic(page, limit, tokens));
+        for (const page of over) {
+          const cost = hard ? upperOf(page.mandatoryTokens, margin) : page.mandatoryTokens;
+          diagnostics.push(pageDiagnostic(page, limit, measure, cost));
+        }
       } else {
-        diagnostics.push(setDiagnostic(built[0]!.page, limit, tokens, built.length));
+        diagnostics.push(setDiagnostic(built[0]!.page, limit, measure, built.length));
       }
     }
   }
@@ -579,14 +734,20 @@ export async function trimPages(
     required: evidence,
     markdown,
     accounting: {
-      budget: limit,
+      budget: budgetLimit,
+      reserved,
+      limit,
       tokens,
-      upper: upperOf(tokens, margin),
+      upper,
       required,
-      requiredUpper: upperOf(required, margin),
+      requiredUpper,
+      minimumUpper,
+      remaining: Math.max(0, limit - upper),
       method,
       margin,
     },
+    status,
+    overBudget,
     omissions: omissionsOf(built, duplicates),
   };
 }
