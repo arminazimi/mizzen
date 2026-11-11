@@ -324,7 +324,7 @@ const banner: Plugin = {
 export default { plugins: [banner] };
 ```
 
-The loader and the hook runners are `loadCodeConfig()`, `runContentHooks()`, `runModelHooks()`, and `runOutputsHooks()` in `src/plugins/hooks.ts`. Each runner returns `{ value, diagnostics }` and never fails the stage. The pipeline does not call them yet: `build()` does not load `mizzen.config.ts` in this version, so a site's plugins are not applied by the CLI until that wiring lands.
+The loader and the hook runners are `loadCodeConfig()`, `runContentHooks()`, `runModelHooks()`, and `runOutputsHooks()` in `src/plugins/hooks.ts`. Each runner returns `{ value, diagnostics }` and never fails the stage. `build()` loads `mizzen.config.ts` and runs every hook in the order above, once per stage, before anything is written. A site with a code file always builds cold, since what its imports read cannot be part of the cache key, and the file itself is never copied into the output.
 
 ## Layout
 

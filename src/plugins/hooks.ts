@@ -1,4 +1,5 @@
-import { access } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Diagnostic, MaybePromise, OutputFile, Page, Plugin, PluginHooks, Site } from "../contracts/index.ts";
@@ -66,12 +67,16 @@ function fileDiagnostic(file: string, id: string, message: string, help: string)
   return { id, severity: "error", message, pos: { file, line: 1, column: 1, endLine: 1, endColumn: 1 }, help };
 }
 
-/** An error about one plugin's hook, naming the plugin so the site owner knows which one to fix. */
+/**
+ * An error about one plugin's hook, naming the plugin so the site owner knows which one to fix, at the code file the
+ * plugins come from.
+ */
 function hookDiagnostic(plugin: Plugin, message: string): Diagnostic {
   return {
     id: "plugin.hook-failed",
     severity: "error",
     message: `Plugin "${plugin.name}" ${message}`,
+    pos: { file: CODE_CONFIG_FILE, line: 1, column: 1, endLine: 1, endColumn: 1 },
     help: "Fix the plugin or remove it from the site's code file.",
   };
 }
@@ -105,7 +110,10 @@ export async function loadCodeConfig(siteRoot: string, options: LoadCodeOptions 
 
   let mod: Record<string, unknown>;
   try {
-    mod = (await import(pathToFileURL(abs).href)) as Record<string, unknown>;
+    // Node keeps a module for the life of the process, so key the URL by the file's content: an edit is a new module,
+    // while unchanged content reuses the one already imported.
+    const digest = createHash("sha256").update(await readFile(abs)).digest("hex");
+    mod = (await import(`${pathToFileURL(abs).href}?v=${digest}`)) as Record<string, unknown>;
   } catch (err) {
     return {
       plugins: [],

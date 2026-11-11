@@ -6,6 +6,7 @@ import { discover } from "../content/discover.ts";
 import type { Diagnostic, Output, OutputContext, OutputFile, Page } from "../contracts/index.ts";
 import { buildModel } from "../model/build.ts";
 import { MANIFEST_PATH, recordBuildHash } from "../outputs/build-hash.ts";
+import { CODE_CONFIG_FILE, loadCodeConfig, runModelHooks, runOutputsHooks } from "../plugins/hooks.ts";
 import { createCssBundler, type CssBundle } from "../render/css.ts";
 import { loadRegistry } from "../render/registry.ts";
 import { copyAssets } from "./assets.ts";
@@ -166,6 +167,11 @@ function assertOutOutsideSource(sourceDir: string, out: string): void {
 /**
  * Builds the site: model, theme, outputs, and write.
  *
+ * The site's plugins run in the build, in the order `mizzen.config.ts` lists them: `content` on every page while the
+ * model is assembled, `model` on the finished site before anything renders, `outputs` on the files the outputs produced
+ * before any of them is written. A hook that fails is an error naming its plugin, and the build carries on with the
+ * value it had.
+ *
  * Every output runs first, in file-name order, and its files are checked in memory: a path outside the output folder
  * is an error, and so is a path two outputs both write; the first one wins. Then the site's assets are copied and the
  * output files written, all into a staging folder beside `out`. A site file wins over an output file at the same path:
@@ -176,7 +182,8 @@ function assertOutOutsideSource(sourceDir: string, out: string): void {
  * unchanged restores the previous output instead of building again. Config and navigation are in the same key as the
  * pages, so changing either invalidates every page. When that whole-build entry misses, each page's Markdown parse is
  * kept under `<cache>/pages/` and keyed by its expanded body, body line, plugin names and orders, and the engine
- * version, so only the pages that changed are parsed again.
+ * version, so only the pages that changed are parsed again. A site with a code file always builds cold: what the
+ * plugins import cannot be part of the key, so a hit could restore stale output.
  *
  * With `workers` above 1, pages render in worker threads, and the site written is byte for byte the one a single
  * process writes. A worker that fails renders its pages in this process, with a `render.worker-failed` warning.
@@ -201,7 +208,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const sourceDir = resolve(root, loaded.config.source);
   assertOutOutsideSource(sourceDir, out);
 
-  const cacheRoot = options.cache === true ? resolve(options.cacheDir ?? cacheRootOf(root)) : undefined;
+  const cacheRoot =
+    options.cache === true && !(await exists(join(root, CODE_CONFIG_FILE)))
+      ? resolve(options.cacheDir ?? cacheRootOf(root))
+      : undefined;
   let key: string | undefined;
   if (cacheRoot !== undefined) {
     key = await cacheKey({
@@ -228,12 +238,21 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     }
   }
 
-  const model = await buildModel(
-    root,
-    cacheRoot === undefined ? undefined : { pageCacheDir: join(cacheRoot, "pages") },
-  );
+  // The site's code file is read after the cache, which it never shares a key with. Its problems are diagnostics, not a
+  // failed build: the pages still build and the plugin that could not load costs only its own work.
+  const code = await loadCodeConfig(root);
+  for (const d of code.diagnostics) diagnostics.report(d);
+
+  const model = await buildModel(root, {
+    ...(cacheRoot === undefined ? {} : { pageCacheDir: join(cacheRoot, "pages") }),
+    plugins: code.plugins,
+  });
   for (const d of model.diagnostics) diagnostics.report(d);
-  const { site } = model;
+
+  // The model hooks run once, on the assembled site and before anything is rendered from it.
+  const hookedModel = await runModelHooks(code.plugins, model.site);
+  for (const d of hookedModel.diagnostics) diagnostics.report(d);
+  const site = hookedModel.value;
   for (const d of await placeholderDiagnostics(site)) diagnostics.report(d);
 
   const registry = await loadRegistry(themeRoot);
@@ -264,7 +283,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     return rendered.html.replace(/<\/head>/i, () => `${preloads.join("")}${links}</head>`);
   };
 
-  const files = await discover(sourceDir, { include: site.config.include, exclude: site.config.exclude });
+  // The site's code file is code, not a site file: it is never copied into the output.
+  const files = (await discover(sourceDir, { include: site.config.include, exclude: site.config.exclude })).filter(
+    (file) => file.path !== CODE_CONFIG_FILE,
+  );
 
   // With one worker, pages render in this process exactly as before. With more, the pool starts rendering the doc
   // pages the html output will ask for while the outputs are still being loaded, then serves them from its results.
@@ -303,32 +325,46 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     report: (d) => diagnostics.report(d),
   };
 
-  // Outputs run in memory, so every path is checked before anything is written.
-  const claimed = new Map<string, string>();
-  const pending: { readonly output: string; readonly file: OutputFile }[] = [];
+  // Outputs run in memory and the plugins' `outputs` hooks run on what they produced, so every path is checked before
+  // anything is written.
+  const produced: OutputFile[] = [];
+  const owner = new Map<OutputFile, string>();
   try {
     for (const output of await loadOutputs(outputsDir, diagnostics)) {
       if (site.config.outputs[output.name] === false) continue;
       for (const file of await output.run(site, ctx)) {
-        if (!isInside(file.path)) {
-          diagnostics.error("output.bad-path", `Output "${output.name}" writes "${file.path}", which is not inside the output folder.`, {
-            help: "Use a relative path with `/` separators and no `..`.",
-          });
-          continue;
-        }
-        const first = claimed.get(file.path);
-        if (first !== undefined) {
-          diagnostics.error("output.duplicate-path", `Two files write "${file.path}": outputs "${first}" and "${output.name}".`, {
-            help: "Turn one of them off in `outputs`, or rename its file.",
-          });
-          continue;
-        }
-        claimed.set(file.path, output.name);
-        pending.push({ output: output.name, file });
+        produced.push(file);
+        owner.set(file, output.name);
       }
     }
   } finally {
     await pool?.close();
+  }
+
+  const hookedOutputs = await runOutputsHooks(code.plugins, produced, site);
+  for (const d of hookedOutputs.diagnostics) diagnostics.report(d);
+
+  const claimed = new Map<string, string>();
+  const pending: OutputFile[] = [];
+  for (const file of hookedOutputs.value) {
+    const from = owner.get(file);
+    const who = from === undefined ? "The outputs hook" : `Output "${from}"`;
+    if (!isInside(file.path)) {
+      diagnostics.error("output.bad-path", `${who} writes "${file.path}", which is not inside the output folder.`, {
+        help: "Use a relative path with `/` separators and no `..`.",
+      });
+      continue;
+    }
+    if (claimed.has(file.path)) {
+      const first = claimed.get(file.path);
+      const name = (output: string | undefined): string => (output === undefined ? "the outputs hook" : `outputs "${output}"`);
+      diagnostics.error("output.duplicate-path", `Two files write "${file.path}": ${name(first)} and ${name(from)}.`, {
+        help: "Turn one of them off in `outputs`, or rename its file.",
+      });
+      continue;
+    }
+    claimed.set(file.path, from ?? "");
+    pending.push(file);
   }
 
   const parent = dirname(out);
@@ -365,7 +401,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       written.push(bundle.path);
     }
 
-    for (const { output, file } of pending) {
+    for (const file of pending) {
       // A site's own file wins over a generated one at the same path, silently: a site `llms.txt` replaces the output's.
       if (assetPaths.has(file.path)) continue;
       const abs = join(staging, file.path);

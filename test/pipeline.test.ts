@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Diagnostic } from "../src/contracts/index.ts";
 import { build } from "../src/pipeline/build.ts";
 
@@ -311,6 +311,156 @@ test("the pipeline builds fixtures/docs-site with the theme: no errors, app page
     assert.equal(readFileSync(join(out, "llms.txt"), "utf8"), readFileSync(join(FIXTURE, "llms.txt"), "utf8"), "the site's own llms.txt wins");
     assert.deepEqual(readFileSync(join(out, "dashboard/index.html")), readFileSync(join(FIXTURE, "dashboard/index.html")));
   } finally {
+    rmSync(parent, { recursive: true });
+  }
+});
+
+/** A site's code file: `body` declares the plugins its default export lists. The contract import is type-only. */
+function codeConfig(body: string): Record<string, string> {
+  const contracts = JSON.stringify(pathToFileURL(join(process.cwd(), "src/contracts/index.ts")).href);
+  return { "mizzen.config.ts": `import type { Plugin } from ${contracts};\n${body}` };
+}
+
+/** The hooks a fixture plugin saw, in the order it saw them. */
+type HookLog = { hookLog?: string[] };
+
+/** The fixture plugin: records every hook it gets, changes a title, adds a model page and one output file. */
+const OBSERVER = `const log = globalThis as { hookLog?: string[] };
+const record = (entry: string): void => {
+  (log.hookLog ??= []).push(entry);
+};
+const observer: Plugin = {
+  name: "observer",
+  content(page) {
+    record(\`content:\${page.url}\`);
+    return { ...page, title: \`\${page.title} (hooked)\` };
+  },
+  async model(site) {
+    await Promise.resolve();
+    record(\`model:\${site.pages.length}\`);
+    return { ...site, pages: [...site.pages, { ...site.pages[0]!, url: "/added/", title: "Added" }] };
+  },
+  outputs(files, site) {
+    const pages = files.filter((file) => file.path.endsWith("index.html")).map((file) => file.path);
+    record(\`outputs:\${site.pages.length}:\${pages.join(",")}\`);
+    return [...files, { path: "hooked.txt", contents: "hooked\\n" }];
+  },
+};
+export default { plugins: [observer] };
+`;
+
+test("a fixture plugin observes every hook of a build, in order, with sync and async hooks", async () => {
+  const root = tree({
+    ...codeConfig(OBSERVER),
+    "a.md": "---\ntitle: A\n---\n# A\n",
+    "b.md": "---\ntitle: B\n---\n# B\n",
+  });
+  const first = scratch();
+  const second = scratch();
+  const log = globalThis as HookLog;
+  delete log.hookLog;
+  try {
+    const one = await build({ root, out: first.out, themeRoot: THEME, defaultLayout: "doc" });
+    assert.deepEqual(errors(one.diagnostics), []);
+    assert.deepEqual(log.hookLog, [
+      "content:/a/",
+      "content:/b/",
+      "model:2",
+      "outputs:3:a/index.html,added/index.html,b/index.html",
+    ]);
+    assert.equal(readFileSync(join(first.out, "hooked.txt"), "utf8"), "hooked\n", "an output file added by a hook is written");
+    assert.ok(existsSync(join(first.out, "added/index.html")), "a page added by the model hook is rendered");
+    assert.match(readFileSync(join(first.out, "a/index.html"), "utf8"), /A \(hooked\)/, "a content hook's title is rendered");
+    assert.equal(existsSync(join(first.out, "mizzen.config.ts")), false, "the site's code file is never published");
+    assert.equal(one.files.includes("mizzen.config.ts"), false);
+
+    delete log.hookLog;
+    const two = await build({ root, out: second.out, themeRoot: THEME, defaultLayout: "doc" });
+    assert.deepEqual(two.diagnostics, one.diagnostics, "the diagnostics of the same build are the same");
+    assert.deepEqual(log.hookLog, [
+      "content:/a/",
+      "content:/b/",
+      "model:2",
+      "outputs:3:a/index.html,added/index.html,b/index.html",
+    ], "the hook order is the same on every build");
+    assert.deepEqual(snapshot(second.out), snapshot(first.out));
+  } finally {
+    delete log.hookLog;
+    rmSync(root, { recursive: true });
+    rmSync(first.parent, { recursive: true });
+    rmSync(second.parent, { recursive: true });
+  }
+});
+
+test("a failing hook is a diagnostic naming the plugin and the code file, and leaves no partial output", async () => {
+  const pages = {
+    "mizzen.yml": "title: Plugin Test\n",
+    "a.md": "---\ntitle: A\n---\n# A\n",
+    "b.md": "---\ntitle: B\n---\n# B\n",
+  };
+  const root = tree({
+    ...pages,
+    ...codeConfig(`const broken: Plugin = {
+  name: "broken",
+  model() {
+    throw new Error("no model today");
+  },
+};
+export default { plugins: [broken] };
+`),
+  });
+  const clean = tree(pages);
+  const failing = scratch();
+  const repeat = scratch();
+  const plain = scratch();
+  mkdirSync(failing.out);
+  writeFileSync(join(failing.out, "stale.txt"), "stale\n");
+  try {
+    const result = await build({ root, out: failing.out, themeRoot: THEME, defaultLayout: "doc" });
+    const found = errors(result.diagnostics);
+    assert.equal(found.length, 1);
+    assert.equal(found[0]?.id, "plugin.hook-failed");
+    assert.match(found[0]?.message ?? "", /"broken"/);
+    assert.match(found[0]?.message ?? "", /no model today/);
+    assert.equal(found[0]?.pos?.file, "mizzen.config.ts", "the diagnostic is source-aware");
+    assert.deepEqual(readdirSync(failing.parent).filter((name) => name.startsWith(".")), [], "no staging folder is left behind");
+    assert.equal(existsSync(join(failing.out, "stale.txt")), false, "the old site is replaced whole, not edited");
+
+    const again = await build({ root, out: repeat.out, themeRoot: THEME, defaultLayout: "doc" });
+    assert.deepEqual(again.diagnostics, result.diagnostics, "a failing hook reports the same diagnostic every build");
+
+    const expected = await build({ root: clean, out: plain.out, themeRoot: THEME, defaultLayout: "doc" });
+    assert.deepEqual(errors(expected.diagnostics), []);
+    assert.deepEqual(snapshot(failing.out), snapshot(plain.out), "the failing hook leaves a complete site, not a partial one");
+  } finally {
+    for (const dir of [root, clean]) rmSync(dir, { recursive: true });
+    for (const dir of [failing.parent, repeat.parent, plain.parent]) rmSync(dir, { recursive: true });
+  }
+});
+
+test("a site with a code file writes no whole-build cache, so its plugin output is never restored stale", async () => {
+  const plugin = `const banner: Plugin = {
+  name: "banner",
+  content(page) {
+    return { ...page, title: "first" };
+  },
+};
+export default { plugins: [banner] };
+`;
+  const root = tree({
+    "mizzen.yml": "title: Plugin Test\n",
+    "a.md": "---\ntitle: A\n---\n# A\n",
+    ...codeConfig(plugin),
+  });
+  const { parent, out } = scratch();
+  const cacheDir = join(parent, "cache");
+  try {
+    const result = await build({ root, out, themeRoot: THEME, defaultLayout: "doc", cache: true, cacheDir });
+    assert.deepEqual(errors(result.diagnostics), []);
+    assert.match(readFileSync(join(out, "a/index.html"), "utf8"), /first/, "the plugin's output is written");
+    assert.equal(existsSync(cacheDir), false, "a site with a code file writes no whole-build cache entry");
+  } finally {
+    rmSync(root, { recursive: true });
     rmSync(parent, { recursive: true });
   }
 });
