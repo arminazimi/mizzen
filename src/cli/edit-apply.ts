@@ -4,26 +4,41 @@
  *
  * The patch is the plain-data shape of N27 (`src/edits/patch.ts`): one span with 1-based lines and
  * columns, the optional text it expected to find there, its replacement, and the optional SHA-256
- * of the source it was computed from. The source is `span.file`, resolved against the site root and
- * refused when it points outside it. The patch is applied in memory first; the file is written only
- * when the whole patch succeeds, through a temporary file beside it and one rename, so a refusal
- * leaves it byte-identical.
+ * of the source it was computed from. A patch that carries either precondition must carry both, so
+ * a patch written by the planner cannot silently lose its staleness check. The source is
+ * `span.file`, resolved against the site root; a lexical escape and a symlink whose real target
+ * leaves the root are both refused. The patch is applied in memory first.
  *
- * After a successful write the command records an N29 proof (`src/edits/proof.ts`) with the SHA-256
- * of the file before and after, at `--proof` or `<patch>.proof.json`, and appends one provenance
- * record to `<patch>.audit.jsonl` (`src/edits/audit.ts`). A dry run prints the unified
- * diff and writes neither the source, the proof, nor the ledger.
+ * The source, its N29 proof (`src/edits/proof.ts`) at `--proof` or `<patch>.proof.json`, and the
+ * provenance line appended to `<patch>.audit.jsonl` (`src/edits/audit.ts`) are then committed as
+ * one transaction (`src/edits/transaction.ts`): every byte is staged first, the files are re-read
+ * just before the renames, and a failed commit puts the artifacts already replaced back. A refusal
+ * or failure therefore leaves every artifact byte-identical unless the diagnostic says the rollback
+ * itself was incomplete. A dry run prints the unified diff and writes nothing at all.
  *
  * Exit codes follow the rest of the CLI: `0` applied (or a dry run that would apply), `1` a refused
  * patch or a refused path (the file is unchanged), `2` a usage problem, such as a patch that is
  * missing or is not a patch. `--format json` prints the same outcome as one {@link EditApplyReport}.
  *
  */
-import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { appendEditAudit } from "../edits/audit.ts";
-import { applyPatch, hashSource, PatchError, type Patch, type PatchSpan } from "../edits/patch.ts";
-import { writeProof } from "../edits/proof.ts";
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { createEditAudit, formatEditAudit } from "../edits/audit.ts";
+import {
+  applyPatches,
+  hashSource,
+  PatchError,
+  type ApplyPatchOptions,
+  type Patch,
+  type PatchSpan,
+} from "../edits/patch.ts";
+import { createProof, formatProof } from "../edits/proof.ts";
+import {
+  commitArtifacts,
+  TransactionError,
+  type TransactionArtifact,
+  type TransactionHooks,
+} from "../edits/transaction.ts";
 
 /** Options of {@link editApply}. */
 export interface EditApplyOptions {
@@ -35,6 +50,8 @@ export interface EditApplyOptions {
   readonly proof?: string;
   /** Print the diff and write neither the source nor the proof. */
   readonly dryRun?: boolean;
+  /** Test seam for the commit transaction; the CLI never sets it. */
+  readonly transactionHooks?: TransactionHooks;
 }
 
 /** What a successful {@link editApply} did, or what a dry run would do. */
@@ -260,25 +277,143 @@ export function unifiedDiff(before: string, after: string, file: string, context
   ].join("\n");
 }
 
-/** Writes `text` in one rename: a fresh folder beside the target, one file, then the rename. */
-async function writeAtomic(target: string, text: string): Promise<void> {
-  const folder = dirname(target);
-  const mode = (await stat(target)).mode & 0o7777;
-  const staging = await mkdtemp(join(folder, ".edit-apply-"));
-  try {
-    const temp = join(staging, "source");
-    await writeFile(temp, text, "utf8");
-    await chmod(temp, mode);
-    await rename(temp, target);
-  } finally {
-    await rm(staging, { recursive: true, force: true });
-  }
+/** The reason an errno error gives, as one phrase. */
+function reasonOf(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "ENOENT") return "it does not exist";
+  if (code === "EISDIR") return "it is a directory";
+  if (code === "EACCES" || code === "EPERM") return "it is not readable";
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Applies one patch to its source file and (unless `dryRun`) writes both the source and an N29
- * proof record. The patch and the whole new source are computed in memory first: a refusal throws
- * an {@link EditApplyError} before the file is touched.
+ * The source target: a lexical path inside the root whose real target is also inside it. A symlink
+ * that stays inside the root is written through, so the link itself survives; one that leaves the
+ * root is refused before its source is read.
+ */
+async function sourceTarget(
+  siteRoot: string,
+  file: string,
+  span: PatchSpan,
+): Promise<{ readonly path: string; readonly record: string }> {
+  const target = insideRoot(siteRoot, file, span);
+  let root = resolve(siteRoot);
+  try {
+    root = await realpath(root);
+  } catch {
+    // A missing root reads as a missing source below.
+  }
+
+  let real: string;
+  try {
+    real = await realpath(target.path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return target;
+    throw error;
+  }
+
+  const inside = relative(root, real);
+  if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+    throw new EditApplyError(
+      "edit.path-escape",
+      `${file}: the patch's file resolves outside the site root "${root}"; refusing it.`,
+      false,
+      { path: file, span },
+    );
+  }
+  return { path: real, record: target.record };
+}
+
+/**
+ * The preconditions a patch asks for. A planner patch carries both `expected` and `beforeHash`; a
+ * patch that carries one must carry the other, so a staleness check cannot be silently dropped. A
+ * patch that carries neither is the explicit unchecked form the CLI has always accepted.
+ */
+function applyOptions(patch: Patch): ApplyPatchOptions {
+  const carries = patch.expected !== undefined || patch.beforeHash !== undefined;
+  return { requireHash: carries, requireExpected: carries };
+}
+
+/** One ledger line to append, and the existing ledger it was computed from. */
+interface LedgerWrite {
+  readonly text: string;
+  readonly expectedBeforeHash: string | null;
+}
+
+/**
+ * The ledger's bytes after one applied record, or undefined when the identical line is already
+ * present. The append follows `appendEditAudit`: a ledger that does not end with a line feed is
+ * refused, never repaired.
+ */
+async function appendLedger(
+  ledger: string,
+  plan: {
+    readonly file: string;
+    readonly span: PatchSpan;
+    readonly beforeHash: string;
+    readonly afterHash: string;
+  },
+): Promise<LedgerWrite | undefined> {
+  let line: string;
+  try {
+    line = formatEditAudit(
+      createEditAudit({
+        outcome: "applied",
+        plan: {
+          file: plan.file,
+          span: {
+            line: plan.span.line,
+            column: plan.span.column,
+            endLine: plan.span.endLine,
+            endColumn: plan.span.endColumn,
+          },
+          beforeHash: plan.beforeHash,
+          afterHash: plan.afterHash,
+        },
+      }),
+    );
+  } catch (error) {
+    throw new EditApplyError(
+      "edit.write-failed",
+      `${plan.file}: the audit record cannot be built: ${reasonOf(error)}; nothing was written.`,
+      false,
+      { path: plan.file },
+    );
+  }
+
+  let existing = "";
+  let exists = false;
+  try {
+    existing = await readFile(ledger, "utf8");
+    exists = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new EditApplyError(
+        "edit.write-failed",
+        `${plan.file}: the audit ledger at "${ledger}" cannot be read: ${reasonOf(error)}; nothing was written.`,
+        false,
+        { path: plan.file },
+      );
+    }
+  }
+  if (existing !== "" && !existing.endsWith("\n")) {
+    throw new EditApplyError(
+      "edit.write-failed",
+      `${plan.file}: the audit ledger at "${ledger}" does not end with a line feed; refusing to append to a damaged ledger; nothing was written.`,
+      false,
+      { path: plan.file },
+    );
+  }
+  if (existing.split("\n").includes(line.slice(0, -1))) return undefined;
+  return { text: existing + line, expectedBeforeHash: exists ? hashSource(existing) : null };
+}
+
+/**
+ * Applies one patch to its source file and, unless `dryRun`, commits the source, an N29 proof
+ * record, and one provenance line as one transaction. The patch and the whole new source are
+ * computed in memory first, so a refusal throws an {@link EditApplyError} before any file is
+ * touched.
  */
 export async function editApply(options: EditApplyOptions): Promise<EditApplyResult> {
   const siteRoot = resolve(options.siteRoot);
@@ -289,7 +424,7 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
       path: options.patch,
     });
   }
-  const target = insideRoot(siteRoot, spanFile, patch.span);
+  const target = await sourceTarget(siteRoot, spanFile, patch.span);
 
   let source: string;
   try {
@@ -307,7 +442,9 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
 
   let after: string;
   try {
-    after = applyPatch(source, patch);
+    // A dry run writes nothing, so it can still show the diff of a patch that the real apply would
+    // refuse for a missing precondition. Every precondition the patch carries is still checked.
+    after = applyPatches(source, [patch], options.dryRun === true ? {} : applyOptions(patch)).text;
   } catch (error) {
     if (!(error instanceof PatchError)) throw error;
     throw new EditApplyError(
@@ -332,59 +469,58 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
     };
   }
 
-  try {
-    await writeAtomic(target.path, after);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new EditApplyError("edit.write-failed", `${target.record}: writing the file failed: ${reason}.`, false, {
-      path: target.record,
-    });
-  }
-
   const proof = options.proof === undefined ? `${resolve(options.patch)}.proof.json` : resolve(options.proof);
+  let proofText: string;
   try {
-    await writeProof({
-      siteRoot,
-      files: [target.record],
-      before: { [target.record]: source },
-      after: { [target.record]: after },
-      out: proof,
-    });
+    proofText = formatProof(
+      createProof({
+        siteRoot,
+        files: [target.record],
+        before: { [target.record]: source },
+        after: { [target.record]: after },
+      }),
+    );
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
     throw new EditApplyError(
       "edit.write-failed",
-      `${target.record}: the file was written, but the proof at "${proof}" was not: ${reason}.`,
+      `${target.record}: the proof at "${proof}" cannot be built: ${reasonOf(error)}; nothing was written.`,
       false,
       { path: target.record },
     );
   }
 
-  // One ledger line per applied plan; it is written after the source, like the proof above.
   const ledger = `${resolve(options.patch)}.audit.jsonl`;
-  try {
-    await appendEditAudit({
-      siteRoot,
-      ledger,
-      outcome: "applied",
-      plan: {
-        file: target.record,
-        span: {
-          line: patch.span.line,
-          column: patch.span.column,
-          endLine: patch.span.endLine,
-          endColumn: patch.span.endColumn,
-        },
-        beforeHash,
-        afterHash,
-      },
+  const ledgerWrite = await appendLedger(ledger, {
+    file: target.record,
+    span: patch.span,
+    beforeHash,
+    afterHash,
+  });
+
+  // Proof and ledger first, source last: the source is only replaced once the records that
+  // describe it are already in place.
+  const artifacts: TransactionArtifact[] = [{ path: proof, label: proof, content: proofText }];
+  if (ledgerWrite !== undefined) {
+    artifacts.push({
+      path: ledger,
+      label: ledger,
+      content: ledgerWrite.text,
+      expectedBeforeHash: ledgerWrite.expectedBeforeHash,
     });
+  }
+  artifacts.push({ path: target.path, label: target.record, content: after, expectedBeforeHash: beforeHash });
+
+  try {
+    await commitArtifacts(artifacts, options.transactionHooks);
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    if (error instanceof TransactionError) {
+      throw new EditApplyError("edit.write-failed", error.message, false, { path: error.path ?? target.record });
+    }
     throw new EditApplyError(
       "edit.write-failed",
-      `${target.record}: the file was written, but the audit ledger at "${ledger}" was not: ${reason}.`,
+      `${target.record}: committing the edit failed: ${reasonOf(error)}; nothing was written.`,
       false,
+      { path: target.record },
     );
   }
 
