@@ -513,12 +513,12 @@ function reasonOf(error: unknown): string {
  *
  * A `file` that is absolute or leaves `siteRoot` is `path-escape`; a file that cannot be read is
  * `source-missing`. Both preconditions are required by default: pass `requireHash: false` or
- * `requireExpected: false` to write a patch that carries neither.
+ * `requireExpected: false` to disable that one; the other stays required.
  */
 export async function writeFilePatches(
   siteRoot: string,
   files: readonly EditFile[],
-  options: ApplyPatchOptions = { requireExpected: true, requireHash: true },
+  options: ApplyPatchOptions = {},
 ): Promise<readonly PatchedFile[]> {
   const root = resolve(siteRoot);
   const targets: { readonly path: string; readonly record: string; readonly patches: readonly Patch[] }[] = [];
@@ -552,7 +552,11 @@ export async function writeFilePatches(
   }
 
   // Every check runs here; a refusal leaves no staging folder and no changed file.
-  const results = applyFilePatches(inputs, options);
+  // Each default is explicit so disabling one option leaves the other required.
+  const results = applyFilePatches(inputs, {
+    requireHash: options.requireHash ?? true,
+    requireExpected: options.requireExpected ?? true,
+  });
 
   const staged: StagedFile[] = [];
   for (let index = 0; index < results.length; index += 1) {

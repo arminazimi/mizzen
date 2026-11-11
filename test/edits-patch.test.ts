@@ -453,6 +453,88 @@ test("writing requires the source hash and the exact expected text by default", 
   }
 });
 
+test("requireExpected: false still requires the source hash", async () => {
+  const root = tree({ "docs/a.md": "# Old\n" });
+  try {
+    await assert.rejects(
+      writeFilePatches(
+        root,
+        [
+          {
+            file: "docs/a.md",
+            patches: [{ span: span(1, 1, 1, 5, "docs/a.md"), expected: "# Old", replacement: "# New" }],
+          },
+        ],
+        { requireExpected: false },
+      ),
+      (error: unknown) => error instanceof PatchError && error.code === "missing-hash",
+    );
+    assert.equal(readFileSync(join(root, "docs/a.md"), "utf8"), "# Old\n");
+
+    const results = await writeFilePatches(
+      root,
+      [
+        {
+          file: "docs/a.md",
+          patches: [
+            {
+              span: span(1, 1, 1, 5, "docs/a.md"),
+              replacement: "# New",
+              beforeHash: hashSource("# Old\n"),
+            },
+          ],
+        },
+      ],
+      { requireExpected: false },
+    );
+    assert.equal(results[0]?.after, "# New\n");
+    assert.equal(readFileSync(join(root, "docs/a.md"), "utf8"), "# New\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("requireHash: false still requires the expected text", async () => {
+  const root = tree({ "docs/a.md": "# Old\n" });
+  try {
+    await assert.rejects(
+      writeFilePatches(
+        root,
+        [
+          {
+            file: "docs/a.md",
+            patches: [
+              {
+                span: span(1, 1, 1, 5, "docs/a.md"),
+                replacement: "# New",
+                beforeHash: hashSource("# Old\n"),
+              },
+            ],
+          },
+        ],
+        { requireHash: false },
+      ),
+      (error: unknown) => error instanceof PatchError && error.code === "missing-expected",
+    );
+    assert.equal(readFileSync(join(root, "docs/a.md"), "utf8"), "# Old\n");
+
+    const results = await writeFilePatches(
+      root,
+      [
+        {
+          file: "docs/a.md",
+          patches: [{ span: span(1, 1, 1, 5, "docs/a.md"), expected: "# Old", replacement: "# New" }],
+        },
+      ],
+      { requireHash: false },
+    );
+    assert.equal(results[0]?.after, "# New\n");
+    assert.equal(readFileSync(join(root, "docs/a.md"), "utf8"), "# New\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("refuses a file outside the site root, a missing file, and the same file spelled twice", async () => {
   const parent = tree({ "outside.md": "# Old\n", "site/docs/a.md": "# Old\n" });
   const site = join(parent, "site");
