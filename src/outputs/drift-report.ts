@@ -366,11 +366,6 @@ function evidenceFromData(value: unknown): Map<string, DriftEvidence> | undefine
   return byUrl;
 }
 
-/** A span key that matches a diagnostic to the reference whose span it carries. */
-function spanKey(pos: SourcePos): string {
-  return `${pos.file}:${pos.line}:${pos.column}:${pos.endLine}:${pos.endColumn}`;
-}
-
 /** The reference a page made, back in its short form: `path:line`, `path:line-endLine`, or `path:line:column`. */
 function referenceOf(ref: CodeRef): string {
   const lines = ref.endLine === undefined || ref.endLine === ref.line ? `${ref.line}` : `${ref.line}-${ref.endLine}`;
@@ -380,27 +375,19 @@ function referenceOf(ref: CodeRef): string {
 
 /** The findings of one comparison, each naming the reference that earned it and its exact place. */
 function findingsOf(comparison: ClaimComparison): DriftFinding[] {
-  const references = new Map<string, CodeRef>();
-  for (const ref of comparison.references) references.set(spanKey(ref.pos), ref);
-
-  const findings: DriftFinding[] = [];
-  for (const diagnostic of comparison.diagnostics) {
-    const pos = diagnostic.pos;
-    if (pos === undefined) continue;
-    const ref = references.get(spanKey(pos));
-    const reference = ref === undefined ? `${pos.file}:${pos.line}` : referenceOf(ref);
-    const target = ref === undefined ? undefined : targetOf(ref, comparison.identity.sources[ref.path]);
-    findings.push({
+  return comparison.findings.map(({ diagnostic, reference: ref }) => {
+    const target = targetOf(ref, comparison.identity.sources[ref.path]);
+    return {
       kind: diagnostic.id,
-      reference,
+      reference: referenceOf(ref),
       severity: diagnostic.severity,
       message: diagnostic.message,
       ...(diagnostic.help === undefined ? {} : { help: diagnostic.help }),
-      source: pos,
+      // A signature finding points at the inline code that states it; other findings point at the citation.
+      source: diagnostic.pos ?? ref.pos,
       ...(target === undefined ? {} : { target }),
-    });
-  }
-  return findings;
+    };
+  });
 }
 
 /** True when two source identities name the same paths with the same hashes or markers. */
