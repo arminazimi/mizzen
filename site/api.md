@@ -12,6 +12,8 @@ The package exposes two entry points today:
 | `@velella/mizzen` | `version`. |
 | `@velella/mizzen/contracts` | The frozen contract types, type-only. |
 
+`test/contracts-import.test.ts` builds the package and imports each entry point the way a consumer does, so the table above is checked against the artifact.
+
 Inside the repository, each stage is a function with typed input and output:
 
 | Function | File | Returns |
@@ -31,6 +33,9 @@ Inside the repository, each stage is a function with typed input and output:
 - `themeFiles`: theme files to copy, as paths relative to `themeRoot`; each lands under `assets/theme/` with its hash in the name.
 - `defaultLayout`: the layout for a page that names none; without it such a page is an error.
 - `outputsDir`: the folder outputs are read from; default `src/outputs/`.
+- `cache`: reuse an unchanged build's output from the cache; off by default, and `mizzen build` turns it on.
+- `cacheDir`: the cache folder; default `<root>/.mizzen/cache`, and only used when `cache` is true.
+- `workers`: pages to render at once in worker threads; default `1`, which renders in this process. `2` or more starts that many workers, each loading the theme.
 
 Every output runs first, in memory, and its files are checked: a path outside `out` is an error, and so is a path two outputs both write (the first one wins). Then the site is written to a staging folder beside `out` and swapped in only when complete. A site's own file wins over an output's file at the same path, with no diagnostic. Problems in content and theme come back as diagnostics; a throw means a bug, such as an output or layout that threw, and leaves `out` as it was.
 

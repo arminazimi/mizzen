@@ -27,14 +27,14 @@
 
 ---
 
-A deterministic docs engine with exact source positions: config, the content model, Markdown, navigation, the render host, outputs, diagnostics, and the CLI. It knows nothing about the theme: nothing here imports from the theme, and no theme name, color, or layout appears in it. `test/boundary.test.ts` is the place to enforce it.
+A deterministic docs engine with exact source positions: config, the content model, Markdown, navigation, the render host, outputs, diagnostics, and the CLI. No source file imports the theme's code, and no theme color, layout, or stylesheet ships here. A [Lateen](https://github.com/velella-sh/lateen) checkout beside this repository is only the CLI's fallback when no theme is configured. `test/boundary.test.ts` enforces that boundary.
 
 ## Why Mizzen
 
 - **Deterministic.** The same input gives byte-identical output, in the same order, with LF line endings.
 - **Traceable.** Every page keeps the exact source position of its text, so a tool or an agent can edit the right line.
 - **Agent-ready.** A build also writes `llms.txt`, Markdown twins, a source map, and per-page JSON beside the HTML.
-- **Theme-free.** The engine knows nothing about colors or layouts; [Lateen](https://github.com/velella-sh/lateen) draws the pages.
+- **Theme-free.** The engine ships no colors or layouts; [Lateen](https://github.com/velella-sh/lateen) draws the pages.
 
 A build runs eight stages, each a function from typed input to typed output: config, discover, front matter, Markdown, HTML, site model, render, and outputs. Stages talk only through the frozen types in `src/contracts/`. The same input gives byte-identical output, in the same order, with LF line endings.
 
@@ -51,7 +51,7 @@ Many tests build the fixtures in `fixtures/` with the theme, so check out [Latee
 
 ## CLI
 
-The package installs one command, `mizzen`, from `bin/mizzen.ts`. Its help is the source of truth for the flags:
+The package installs one command, `mizzen`, from `bin/mizzen.js`, which runs the built `dist/cli/index.js`. Its help is the source of truth for the flags:
 
 ```text
 Usage: mizzen <command> [dir] [options]
@@ -107,7 +107,7 @@ The theme root is picked in this order:
 
 1. `--theme <dir>`, resolved from the current working directory.
 2. `theme.name` in `mizzen.yml`: a folder relative to the site root, an absolute path, or a package name resolved from the site and then from the current directory.
-3. The `theme` folder beside this package, when it exists.
+3. A `lateen` checkout beside this repository (`../lateen`), when it exists.
 
 A page with no layout in its front matter or in `defaults` gets the layout `doc` from the CLI. A programmatic build has no default unless it passes `defaultLayout`.
 
@@ -170,6 +170,8 @@ The package exposes two entry points today:
 | `@velella/mizzen` | `version`. |
 | `@velella/mizzen/contracts` | The frozen contract types, type-only. |
 
+`test/contracts-import.test.ts` builds the package and imports each entry point the way a consumer does, so the table above is checked against the artifact.
+
 Inside the repository, each stage is a function with typed input and output:
 
 | Function | File | Returns |
@@ -189,6 +191,9 @@ Inside the repository, each stage is a function with typed input and output:
 - `themeFiles`: theme files to copy, as paths relative to `themeRoot`; each lands under `assets/theme/` with its hash in the name.
 - `defaultLayout`: the layout for a page that names none; without it such a page is an error.
 - `outputsDir`: the folder outputs are read from; default `src/outputs/`.
+- `cache`: reuse an unchanged build's output from the cache; off by default, and `mizzen build` turns it on.
+- `cacheDir`: the cache folder; default `<root>/.mizzen/cache`, and only used when `cache` is true.
+- `workers`: pages to render at once in worker threads; default `1`, which renders in this process. `2` or more starts that many workers, each loading the theme.
 
 Every output runs first, in memory, and its files are checked: a path outside `out` is an error, and so is a path two outputs both write (the first one wins). Then the site is written to a staging folder beside `out` and swapped in only when complete. A site's own file wins over an output's file at the same path, with no diagnostic. Problems in content and theme come back as diagnostics; a throw means a bug, such as an output or layout that threw, and leaves `out` as it was.
 
@@ -211,19 +216,38 @@ Each `*.ts` file in an outputs folder is one unit. The pipeline finds them by li
 | Name | Writes |
 | --- | --- |
 | `agents-md` | `AGENTS.md`, a guide to the built site for agents. |
+| `changelog-feed` | `changelog.xml`, an Atom feed of the changelog page's dated release headings. |
+| `code-meta-check` | No files: reports fence meta that names lines the fence does not have. |
 | `context-pack` | `pack/<topic>.md` for each topic in `_data/context-packs.yml`: the best pages for the topic, trimmed to its token budget, with each page's URL and source path. |
+| `drift-report` | `drift.json`, every drift finding grouped by page URL. |
+| `examples-report` | `examples.json`, per page: the runnable examples and how many passed, failed, or were skipped. |
+| `feed` | `changes.xml`, an Atom feed of the 30 most recently changed doc pages, when the config has `url`. |
+| `footnote-check` | No files: reports footnote references with no definition. |
 | `html` | One HTML file per document page, at the page's pretty URL. |
+| `link-check` | No files: reports internal links and heading anchors that do not resolve. |
 | `llms` | `llms.txt`, following llmstxt.org. |
 | `llms-full` | `llms-full.txt`, every page's Markdown in one file. |
-| `manifest` | `.mizzen/manifest.json`, the page list and per-page source and HTML hashes. |
+| `manifest` | `.mizzen/manifest.json`, the page list, per-page source and HTML hashes, and the build hash. |
+| `not-found` | `404.html`, the page at `/404/` when the site has one, else a minimal page. |
 | `opensearch` | `opensearch.xml`, the site's search as an OpenSearch provider, when the config has `url`. |
 | `page-agent` | One JSON file per document page with an `agent:` block (`agent.json` for a pretty URL): URL, source, and the page's instructions. |
 | `page-json` | One JSON file per document page (`index.json` for a pretty URL): URL, title, description, headings, source, last change, and estimated tokens. |
+| `pages-files` | `.nojekyll`, and `CNAME` when the config's `url` is a custom domain on GitHub Pages. |
+| `reading-time` | `reading-time.json`, the word count and reading minutes of each doc page. |
+| `redirects` | One HTML redirect page per old path, and `_redirects` for hosts that read it. |
+| `related` | `related.json`, the few pages each doc page is most related to. |
 | `robots` | `robots.txt`, with the sitemap address when the config has `url`. |
 | `search` | `pagefind/`, a static search index. |
+| `search-synonyms` | `pagefind.yml`, the search synonyms from `_data/search-synonyms.yml`. |
+| `site-files` | No files: names the root files a site may own (`llms.txt`, `llms-full.txt`, `robots.txt`, `sitemap.xml`) so its own copy wins. |
 | `sitemap` | `sitemap.xml`. |
 | `sourcemap` | `sourcemap.json`, the line-exact source map (format). |
+| `translations` | `translations.json`, each page's status in every configured language. |
+| `trust` | `trust.json`, each doc page's trust level, reasons, and last reviewer. |
 | `twins` | One Markdown twin per document page: the same URL with `.md` in place of the HTML file. |
+| `variables` | `variables.json`, every variable placeholder a page uses and its declaration. |
+| `version-diff` | `diff/<version>/<path>.json` for each adjacent pair of versions whose page sections differ. |
+| `versions` | `versions.json`, the versions each page path exists in and how it differs from the newest. |
 
 `outputs` in `mizzen.yml` turns one off by name:
 
@@ -308,7 +332,8 @@ The loader and the hook runners are `loadCodeConfig()`, `runContentHooks()`, `ru
 - `src/config/`, `src/content/`, `src/markdown/`, `src/model/`, `src/nav/`, `src/pipeline/`, `src/plugins/`, `src/render/`, `src/outputs/`, `src/source/`: the pipeline's stages and units.
 - `src/model/facts/`: one file per derived fact, merged into `Site.data` at the end of the model stage; see its [README](src/model/facts/README.md).
 - `src/outputs/`: one file per output; see its [README](src/outputs/README.md).
-- `bin/mizzen.ts`: the `mizzen` command.
+- `bin/mizzen.js`: the installed `mizzen` command, which runs the built `dist/cli/index.js`.
+- `bin/mizzen.ts`: the same command run from a checkout.
 - `schema/config.schema.json`: the site config schema.
 - `test/`: `*.test.ts` files for `node --test`.
 

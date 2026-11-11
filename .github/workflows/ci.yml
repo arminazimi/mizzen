@@ -30,8 +30,8 @@ jobs:
       - name: Install both repositories
         run: |
           set -euo pipefail
-          (cd mizzen && npm install --no-audit --no-fund && npm run build)
-          (cd lateen && npm install --no-audit --no-fund --no-save ../mizzen)
+          (cd mizzen && npm ci --no-audit --no-fund && npm run build)
+          (cd lateen && npm ci --no-audit --no-fund && npm install --no-audit --no-fund --no-save ../mizzen)
       - name: Test
         run: npm test
         working-directory: mizzen
@@ -68,8 +68,8 @@ jobs:
       - name: Install both repositories
         run: |
           set -euo pipefail
-          (cd mizzen && npm install --no-audit --no-fund && npm run build)
-          (cd lateen && npm install --no-audit --no-fund --no-save ../mizzen)
+          (cd mizzen && npm ci --no-audit --no-fund && npm run build)
+          (cd lateen && npm ci --no-audit --no-fund && npm install --no-audit --no-fund --no-save ../mizzen)
       - name: Measure coverage
         working-directory: mizzen
         run: |
