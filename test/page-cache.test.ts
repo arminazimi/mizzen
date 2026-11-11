@@ -17,7 +17,7 @@ import { version } from "../src/index.ts";
 import { loadMarkdownPlugins } from "../src/markdown/parse.ts";
 import { buildModel } from "../src/model/build.ts";
 import { build } from "../src/pipeline/build.ts";
-import { PAGE_CACHE_FORMAT, pageCache, parseMarkdownCached, parseMarkdownWithCache } from "../src/pipeline/page-cache.ts";
+import { PAGE_CACHE_FORMAT, pageCache, parseMarkdownCached, parseMarkdownWithCache, type PageCacheMissReason } from "../src/pipeline/page-cache.ts";
 
 const THEME = fileURLToPath(new URL("../../lateen", import.meta.url));
 
@@ -303,10 +303,92 @@ test("the page cache format is recorded with the engine version", async () => {
       format: number;
       engine: string;
       key: string;
+      checksum: string;
     };
     assert.equal(entry.format, PAGE_CACHE_FORMAT);
     assert.equal(entry.engine, version);
     assert.equal(entry.key, key);
+    assert.match(entry.checksum, /^[0-9a-f]{64}$/);
+  } finally {
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("equal inputs reuse one deterministic entry", async () => {
+  const cacheDir = scratch();
+  const pages = join(cacheDir, "pages");
+  const options = { engineVersion: "1.0.0", plugins: [{ name: "gfm", order: 0 }] } as const;
+  try {
+    const first = pageCache(pages, options);
+    const second = pageCache(pages, { engineVersion: "1.0.0", plugins: [{ name: "gfm", order: 0 }] });
+
+    const key = await first.key("# Hi\n", 1);
+    assert.equal(await first.key("# Hi\n", 1), key, "the same inputs always give the same key");
+    assert.equal(await second.key("# Hi\n", 1), key, "an equal configuration gives the same key");
+
+    await parseMarkdownCached("# Hi\n", 1, first);
+    assert.equal((await parseMarkdownWithCache("# Hi\n", 1, second)).parsed, false, "the entry is reused across instances");
+    assert.equal(entries(pages).length, 1, "the entry is written once");
+  } finally {
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("the cache reports why an entry misses, and a tampered tree is never read", async () => {
+  const cacheDir = scratch();
+  const reasons: PageCacheMissReason[] = [];
+  const options = { engineVersion: "1.0.0", plugins: [{ name: "gfm", order: 0 }] } as const;
+  const cache = pageCache(cacheDir, {
+    ...options,
+    onMiss: (reason) => {
+      reasons.push(reason);
+    },
+  });
+  const body = "Some *text*.\n";
+  const key = await cache.key(body, 1);
+  const file = join(cacheDir, `${key}.json`);
+  try {
+    assert.equal(await cache.get(key), undefined);
+    assert.deepEqual(reasons, ["missing"]);
+
+    reasons.length = 0;
+    const cold = await parseMarkdownCached(body, 1, cache);
+    assert.deepEqual(reasons, ["missing"], "the first parse misses");
+    assert.equal((await parseMarkdownWithCache(body, 1, cache)).parsed, false);
+
+    // A tree changed in a way that keeps the entry's shape valid: the checksum catches it.
+    const tampered = JSON.parse(readFileSync(file, "utf8")) as { tree: { children: unknown[] } };
+    tampered.tree.children.push({ type: "text", value: "injected" });
+    writeFileSync(file, JSON.stringify(tampered));
+    reasons.length = 0;
+    assert.equal(await cache.get(key), undefined);
+    assert.deepEqual(reasons, ["corrupt"]);
+
+    // Another format or engine is incompatible, not corrupt.
+    writeFileSync(
+      file,
+      JSON.stringify({ format: PAGE_CACHE_FORMAT - 1, engine: "1.0.0", key, tree: { type: "root", children: [] } }),
+    );
+    reasons.length = 0;
+    assert.equal(await cache.get(key), undefined);
+    assert.deepEqual(reasons, ["incompatible"]);
+
+    writeFileSync(
+      file,
+      JSON.stringify({ format: PAGE_CACHE_FORMAT, engine: "0.0.1", key, tree: { type: "root", children: [] } }),
+    );
+    reasons.length = 0;
+    assert.equal(await cache.get(key), undefined);
+    assert.deepEqual(reasons, ["incompatible"]);
+
+    // Truncated bytes are corrupt, and the page is parsed again to exactly the cold tree.
+    writeFileSync(file, '{"format":');
+    reasons.length = 0;
+    const rescued = await parseMarkdownWithCache(body, 1, cache);
+    assert.deepEqual(reasons, ["corrupt"]);
+    assert.equal(rescued.parsed, true);
+    assert.deepEqual(rescued.tree, cold);
+    assert.equal((await parseMarkdownWithCache(body, 1, cache)).parsed, false, "the rewritten entry hits");
   } finally {
     rmSync(cacheDir, { recursive: true, force: true });
   }
