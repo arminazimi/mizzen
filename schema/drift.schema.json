@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mizzen drift report",
+  "description": "`drift.json` in the output folder: every drift finding grouped by page URL, per-page coverage, and the evidence each page's findings were computed from. Page keys are output URLs including `base`, in code-point order. A computed finding carries the diagnostic's message, help, exact documentation source span, and structured code target, so it can be repaired without rerunning the scanner. `coverage` names every doc page, including pages with no findings, and says whether this run measured it. Evidence names the SHA-256 of the page content and of each cited source, or the marker that says why a source was not read. Identical inputs write identical bytes; no absolute path or wall-clock value appears.",
+  "type": "object",
+  "required": [
+    "pages",
+    "coverage",
+    "evidence"
+  ],
+  "properties": {
+    "pages": {
+      "description": "Findings per page URL, keyed in code-point order. A page with no findings is absent.",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/url"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/finding"
+        }
+      }
+    },
+    "coverage": {
+      "description": "One entry per doc page, keyed in code-point order, so zero findings and an unmeasured page stay distinct.",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/url"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/coverage"
+      }
+    },
+    "evidence": {
+      "description": "Evidence per doc page URL, keyed in code-point order.",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/url"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/evidence"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "url": {
+      "type": "string",
+      "pattern": "^/",
+      "description": "An output URL, including `base`. It always starts with `/`."
+    },
+    "finding": {
+      "description": "One finding. `kind`, `reference`, and `severity` are always present; a computed finding also has `message`, `help`, `source`, and `target`.",
+      "type": "object",
+      "required": [
+        "kind",
+        "reference",
+        "severity"
+      ],
+      "properties": {
+        "kind": {
+          "description": "The check ID that found it, such as `drift.missing-file`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "reference": {
+          "description": "The code reference the page makes, such as `src/app.ts:12`, `src/app.ts:10-14`, or `src/app.ts:12:7`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "description": "How serious the finding is.",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ]
+        },
+        "message": {
+          "description": "What is wrong, in one sentence.",
+          "type": "string",
+          "minLength": 1
+        },
+        "help": {
+          "description": "How to repair the claim, when the check offers one.",
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "description": "The exact documentation span the finding was judged at.",
+          "$ref": "#/$defs/span"
+        },
+        "target": {
+          "description": "The structured code target and the identity of the source bytes it was judged against.",
+          "$ref": "#/$defs/target"
+        }
+      },
+      "additionalProperties": false
+    },
+    "span": {
+      "description": "A span in a source file. Lines and columns are 1-based and inclusive, and the end is at or after the start.",
+      "type": "object",
+      "required": [
+        "file",
+        "line",
+        "column",
+        "endLine",
+        "endColumn"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/path",
+          "description": "The page's source file, relative to the site root."
+        },
+        "line": {
+          "description": "Line where the span starts.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "description": "Column where the span starts.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "description": "Line where the span ends.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "endColumn": {
+          "description": "Column of the span's last character.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "description": "The code target a finding judged, and the identity recorded in `evidence.sources` for its path.",
+      "type": "object",
+      "required": [
+        "path",
+        "line",
+        "identity"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path",
+          "description": "The cited file, relative to the site root."
+        },
+        "line": {
+          "description": "The first cited line.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "description": "The last cited line of a range; absent for one line.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "description": "The cited column; absent when the reference names only lines.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "identity": {
+          "description": "The source identity from `evidence`: a SHA-256, or `missing`/`outside` when the source could not be read.",
+          "$ref": "#/$defs/identity"
+        }
+      },
+      "additionalProperties": false
+    },
+    "coverage": {
+      "description": "Whether and how thoroughly one page was measured.",
+      "type": "object",
+      "required": [
+        "checked",
+        "findings"
+      ],
+      "properties": {
+        "checked": {
+          "description": "True only when this run measured the page, or reused evidence that still matches.",
+          "type": "boolean"
+        },
+        "findings": {
+          "description": "How many findings the report holds for the page; zero means none were found, not that the page was skipped.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "description": "What a page's findings were computed from, and whether they still hold.",
+      "type": "object",
+      "required": [
+        "version",
+        "state"
+      ],
+      "properties": {
+        "version": {
+          "description": "The evidence format; only 1 is read.",
+          "const": 1
+        },
+        "state": {
+          "description": "`fresh` evidence was measured or still matches; `stale` no longer matches; `unknown` means none exists; `unavailable` means the sources could not be read.",
+          "enum": [
+            "fresh",
+            "stale",
+            "unknown",
+            "unavailable"
+          ]
+        },
+        "content": {
+          "$ref": "#/$defs/hash",
+          "description": "SHA-256 of the page content the findings came from; absent when nothing was measured."
+        },
+        "sources": {
+          "description": "Per cited path, the source identity the findings came from; absent when nothing was measured.",
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/path"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/identity"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "hash": {
+      "description": "SHA-256 as 64 lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identity": {
+      "description": "A SHA-256 of the source bytes, `missing` when the file does not exist, or `outside` when it resolves outside the site root.",
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{64}|missing|outside)$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^([a-zA-Z]:)?[\\\\/]|(^|/)\\.\\.(/|$)|\\\\|[\\u0000-\\u001f\\u007f]"
+      },
+      "description": "A relative path with forward slashes: no leading slash, drive letter, backslash, `..` segment, or control character."
+    }
+  }
+}
