@@ -11,34 +11,72 @@ import {
   type TrustScoreOptions,
   type TrustThresholds,
 } from "../model/trust-score.ts";
+import { hashOf } from "./build-hash.ts";
 
 /**
- * Writes `trust.json`: one entry per doc page, keyed by its URL, with the page's trust level, the
- * reasons behind it, and the last reviewer (N14). A theme can render its trust chip from this file.
+ * Writes `trust.json`: one entry per doc page, keyed by its URL, with a stable page key and a build
+ * identifier so a consumer can join the evidence to the page that was rendered without guessing from
+ * source paths (N14). A theme can render its trust chip from this file.
  *
  * ## Shape
  *
- * The file is one JSON object. Every key is a page URL, including the site's `base`, and the keys come
- * in code-point order. Each entry has a fixed key order:
+ * The file is one JSON object with `version`, `build`, and `pages`, in that order:
  *
  * ```json
  * {
- *   "/guide/install/": {
- *     "level": "verified",
- *     "reasons": [
- *       { "code": "examples.passed", "message": "No example fails; 2 of 2 pass." },
- *       { "code": "drift.clean", "message": "No drift findings." },
- *       { "code": "review.recent", "message": "Last reviewed 9 days ago, within the 180-day limit." }
- *     ],
- *     "lastReviewer": "Ada Lovelace"
+ *   "version": 1,
+ *   "build": {
+ *     "algorithm": "sha256",
+ *     "id": "…64 hex…",
+ *     "pages": 1
+ *   },
+ *   "pages": {
+ *     "/guide/install/": {
+ *       "key": "…64 hex…",
+ *       "url": "/guide/install/",
+ *       "source": "guide/install.md",
+ *       "evidence": {
+ *         "examples": "measured",
+ *         "drift": "measured",
+ *         "review": "measured"
+ *       },
+ *       "level": "verified",
+ *       "reasons": [
+ *         { "code": "examples.passed", "message": "No example fails; 2 of 2 pass." },
+ *         { "code": "drift.clean", "message": "No drift findings." },
+ *         { "code": "review.recent", "message": "Last reviewed 9 days ago, within the 180-day limit." }
+ *       ],
+ *       "lastReviewer": "Ada Lovelace"
+ *     }
  *   }
  * }
  * ```
+ *
+ * Every page key in `pages` is a page URL, including the site's `base`, and the keys come in code-point
+ * order. A page's `key` is the SHA-256 of its URL, a NUL, and its source file: two builds of the same
+ * page carry the same key, and the entry also carries the URL and source file it belongs to, so no
+ * consumer has to derive them from the filesystem. `build.id` is the SHA-256 of one line per doc page
+ * (page key, Markdown hash, HTML hash), sorted by URL: the same rendered pages share one build
+ * identifier, and changing a page's URL, source, Markdown, or HTML changes it.
  *
  * `level` is `verified`, `review-due`, or `at-risk`, exactly as N12's {@link trustScore} decides.
  * `reasons` always has three entries, in the fixed order examples, drift, review. `lastReviewer` is
  * present only when the last commit that touched the page has a non-empty author name. The JSON uses
  * two-space indentation and one trailing LF, and `schema/trust.schema.json` describes the same shape.
+ *
+ * ## Evidence
+ *
+ * Every rendered content page gets an entry, and `evidence` says what each signal actually measured:
+ *
+ * - `examples`: `measured` (the page's examples have counts), `none` (the page declares no `test`
+ *   fence), or `unknown` (the page declares examples but their result is unavailable).
+ * - `drift`: `measured` (a finding count exists, including zero), `missing` (no drift data and no root
+ *   to check), or `unknown` (the check was available but gave no answer).
+ * - `review`: `measured` (a review date exists), `missing` (no reviewer data and no root to ask), or
+ *   `unknown` (git was available but names no date for the page).
+ *
+ * A signal that is not `measured` also has an explaining reason in `reasons`, so no page is silently
+ * treated as healthy. `examples: "none"` is known evidence, not a gap: the page has no examples to run.
  *
  * ## Where the signals come from
  *
@@ -89,6 +127,9 @@ export const SITE_ROOT_ENV = "MIZZEN_SITE_ROOT";
 /** The reproducible-build variable the output reads as `asOf`, in seconds since the Unix epoch. */
 export const AS_OF_ENV = "SOURCE_DATE_EPOCH";
 
+/** The shape version of `trust.json`. */
+export const TRUST_VERSION = 1;
+
 /** Milliseconds in a whole day. */
 const DAY = 86_400_000;
 
@@ -103,14 +144,56 @@ export interface TrustEntryReason {
   readonly message: string;
 }
 
+/** What one signal measured, or why it did not. */
+export type TrustSignalState = "measured" | "none" | "missing" | "unknown";
+
+/** Per-signal evidence states, in the fixed order examples, drift, review. */
+export interface TrustEvidence {
+  /** `measured`, `none` when no example is declared, or `unknown` when results are unavailable. */
+  readonly examples: Exclude<TrustSignalState, "missing">;
+  /** `measured`, `missing` when nothing could check drift, or `unknown` when the check gave no answer. */
+  readonly drift: Exclude<TrustSignalState, "none">;
+  /** `measured`, `missing` when no review source exists, or `unknown` when it names no date. */
+  readonly review: Exclude<TrustSignalState, "none">;
+}
+
 /** One page's entry in `trust.json`, in key order. */
 export interface TrustEntry {
+  /** What each signal measured, or why it did not. */
+  readonly evidence: TrustEvidence;
   /** The worst level the reasons support. */
   readonly level: TrustLevel;
   /** Exactly three reasons, ordered examples, drift, review. */
   readonly reasons: readonly TrustEntryReason[];
   /** The last commit's author name, when it is known. */
   readonly lastReviewer?: string;
+}
+
+/** One rendered page's entry in `trust.json`, with the facts a consumer joins on. */
+export interface TrustPageEntry extends TrustEntry {
+  /** Stable page key: SHA-256 of the URL, a NUL, and the source file. */
+  readonly key: string;
+  /** Output URL, including `base`. */
+  readonly url: string;
+  /** The source file, relative to the site root, with forward slashes. */
+  readonly source: string;
+}
+
+/** The identity of the rendered pages the evidence belongs to. */
+export interface TrustBuild {
+  /** The digest the `id` was made with. */
+  readonly algorithm: "sha256";
+  /** SHA-256 over every doc page's key, Markdown hash, and HTML hash, sorted by URL. */
+  readonly id: string;
+  /** How many rendered content pages the build has. */
+  readonly pages: number;
+}
+
+/** The whole `trust.json` body, in key order. */
+export interface TrustReport {
+  readonly version: typeof TRUST_VERSION;
+  readonly build: TrustBuild;
+  readonly pages: Readonly<Record<string, TrustPageEntry>>;
 }
 
 /** What the pure entry builder reads, with everything already resolved. */
@@ -123,6 +206,10 @@ export interface TrustSignals {
   readonly review?: Review | typeof REVIEW_UNKNOWN;
   /** The instant to measure the review age from; absent means the age is unknown. */
   readonly asOf?: Date;
+  /** Why drift has no count; only read when `drift` is absent. Default `missing`. */
+  readonly driftState?: "missing" | "unknown";
+  /** Why review has no date; only read when `review` is absent or `UNKNOWN`. Default `missing`. */
+  readonly reviewState?: "missing" | "unknown";
 }
 
 /** Options of {@link trustReport}; every field has a default. */
@@ -238,9 +325,27 @@ function reviewAgeOf(review: Review | typeof REVIEW_UNKNOWN | undefined, asOf: D
   return Math.max(0, Math.floor((asOf.getTime() - date.getTime()) / DAY));
 }
 
+/** The evidence states for the signals the entry builder was given. */
+function evidenceOf(signals: TrustSignals): TrustEvidence {
+  const examples: TrustEvidence["examples"] =
+    signals.examples === "unknown" ? "unknown" : signals.examples === undefined ? "none" : "measured";
+  const drift: TrustEvidence["drift"] =
+    signals.drift === undefined ? (signals.driftState ?? "missing") : "measured";
+  const review: TrustEvidence["review"] =
+    signals.review === undefined || signals.review === REVIEW_UNKNOWN
+      ? (signals.reviewState ?? "missing")
+      : "measured";
+  return { examples, drift, review };
+}
+
 /** One entry, with `lastReviewer` present only when it is known. */
-function entryOf(level: TrustLevel, reasons: readonly TrustEntryReason[], lastReviewer: string): TrustEntry {
-  return lastReviewer === "" ? { level, reasons } : { level, reasons, lastReviewer };
+function entryOf(
+  evidence: TrustEvidence,
+  level: TrustLevel,
+  reasons: readonly TrustEntryReason[],
+  lastReviewer: string,
+): TrustEntry {
+  return lastReviewer === "" ? { evidence, level, reasons } : { evidence, level, reasons, lastReviewer };
 }
 
 /**
@@ -260,17 +365,32 @@ export function trustEntryOf(signals: TrustSignals, options: TrustScoreOptions =
     options,
   );
 
+  const evidence = evidenceOf(signals);
   const lastReviewer =
     signals.review === undefined || signals.review === REVIEW_UNKNOWN ? "" : signals.review.author.trim();
 
-  if (signals.examples !== "unknown") return entryOf(score.level, score.reasons, lastReviewer);
+  if (signals.examples !== "unknown") return entryOf(evidence, score.level, score.reasons, lastReviewer);
 
   const unknownExamples: TrustEntryReason = {
     code: "examples.unknown",
     message: "The example results are unknown, so the page cannot be verified.",
   };
   const reasons: readonly TrustEntryReason[] = [unknownExamples, score.reasons[1]!, score.reasons[2]!];
-  return entryOf("at-risk", reasons, lastReviewer);
+  return entryOf(evidence, "at-risk", reasons, lastReviewer);
+}
+
+/** A page's stable key, from the two facts that identify it: its URL and its source file. */
+function pageKeyOf(page: Page): string {
+  return hashOf(`${page.url}\0${page.source.file}`);
+}
+
+/** The build identifier: one line per rendered page, sorted by URL, over the page's identity and content. */
+function buildIdOf(pages: readonly Page[]): string {
+  return hashOf(
+    pages
+      .map((page) => `${pageKeyOf(page)}\0${hashOf(page.markdown)}\0${hashOf(page.html)}\n`)
+      .join(""),
+  );
 }
 
 /**
@@ -345,7 +465,7 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
       ? await driftCountsOf(pages, root)
       : undefined;
 
-  const body: Record<string, TrustEntry> = {};
+  const body: Record<string, TrustPageEntry> = {};
   for (const page of pages) {
     const measured = examples.get(page.url);
     const examplesSignal: TrustExamples | "unknown" | undefined =
@@ -359,11 +479,28 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
       ...(drift === undefined ? {} : { drift }),
       review,
       ...(asOf === undefined ? {} : { asOf }),
+      // A root means the check could have run; without one, the signal was never available at all.
+      ...(drift === undefined ? { driftState: root === undefined ? "missing" : "unknown" } : {}),
+      ...(review === REVIEW_UNKNOWN ? { reviewState: root === undefined ? "missing" : "unknown" } : {}),
     };
-    body[page.url] = trustEntryOf(signals, options.thresholds === undefined ? {} : { thresholds: options.thresholds });
+    const entry = trustEntryOf(signals, options.thresholds === undefined ? {} : { thresholds: options.thresholds });
+    body[page.url] = {
+      key: pageKeyOf(page),
+      url: page.url,
+      source: page.source.file,
+      evidence: entry.evidence,
+      level: entry.level,
+      reasons: entry.reasons,
+      ...(entry.lastReviewer === undefined ? {} : { lastReviewer: entry.lastReviewer }),
+    };
   }
 
-  return [{ path: "trust.json", contents: `${JSON.stringify(body, null, 2)}\n` }];
+  const report: TrustReport = {
+    version: TRUST_VERSION,
+    build: { algorithm: "sha256", id: buildIdOf(pages), pages: pages.length },
+    pages: body,
+  };
+  return [{ path: "trust.json", contents: `${JSON.stringify(report, null, 2)}\n` }];
 }
 
 /**
