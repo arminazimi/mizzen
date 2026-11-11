@@ -3,6 +3,16 @@ import { access, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Diagnostic, MaybePromise, OutputFile, Page, Plugin, PluginHooks, Site } from "../contracts/index.ts";
+import {
+  DEFAULT_HOOK_POLICY,
+  isHookDeadline,
+  outputFilesProblem,
+  pageProblem,
+  resolveHookTimeout,
+  runWithinDeadline,
+  siteProblem,
+  type HookPolicy,
+} from "./policy.ts";
 
 /**
  * The site's code file, at the site root: plugins and nothing else.
@@ -42,7 +52,7 @@ export interface HookResult<T> {
 /** What a stage does with one plugin's hook and the value the stage carries. */
 type HookCall<T> = (plugin: Plugin, value: T) => MaybePromise<T>;
 
-/** Names what a hook must return ("a page"), or returns `undefined` when the value is usable. */
+/** Names what a hook must return ("a page", "a page whose `url` is not a string"), or `undefined` when it is usable. */
 type ValueCheck<T> = (value: T) => string | undefined;
 
 async function exists(path: string): Promise<boolean> {
@@ -71,13 +81,18 @@ function fileDiagnostic(file: string, id: string, message: string, help: string)
  * An error about one plugin's hook, naming the plugin so the site owner knows which one to fix, at the code file the
  * plugins come from.
  */
-function hookDiagnostic(plugin: Plugin, message: string): Diagnostic {
+function hookDiagnostic(
+  plugin: Plugin,
+  message: string,
+  id = "plugin.hook-failed",
+  help = "Fix the plugin or remove it from the site's code file.",
+): Diagnostic {
   return {
-    id: "plugin.hook-failed",
+    id,
     severity: "error",
     message: `Plugin "${plugin.name}" ${message}`,
     pos: { file: CODE_CONFIG_FILE, line: 1, column: 1, endLine: 1, endColumn: 1 },
-    help: "Fix the plugin or remove it from the site's code file.",
+    help,
   };
 }
 
@@ -182,9 +197,9 @@ export async function loadCodeConfig(siteRoot: string, options: LoadCodeOptions 
  * Runs one hook of every plugin in the order the plugins are listed, so each hook gets what the hook before it returned.
  *
  * A plugin that does not implement the hook is skipped, and a promise is awaited before the next plugin runs. A hook
- * that throws, or returns a value the stage cannot use, is an error naming the plugin; the value the stage carried
- * before that plugin is kept and the plugins after it still run, so one bad plugin costs its own work and nothing more.
- * Nothing here changes the value handed in: a plugin that wants a change returns a new value.
+ * that misses the policy's deadline, throws, or returns a value the stage cannot use is an error naming the plugin; the
+ * value the stage carried before that plugin is kept and the plugins after it still run, so one bad plugin costs its
+ * own work and nothing more. Nothing here changes the value handed in: a plugin that wants a change returns a new value.
  */
 async function runStage<T>(
   plugins: readonly Plugin[],
@@ -192,22 +207,35 @@ async function runStage<T>(
   start: T,
   call: HookCall<T>,
   check: ValueCheck<T>,
+  policy: HookPolicy,
 ): Promise<HookResult<T>> {
+  const timeoutMs = resolveHookTimeout(policy);
   const diagnostics: Diagnostic[] = [];
   let value = start;
   for (const plugin of plugins) {
     if (typeof plugin[hook] !== "function") continue;
     try {
-      const next = await call(plugin, value);
+      const next = await runWithinDeadline(Promise.resolve(call(plugin, value)), timeoutMs);
       const expected = check(next);
       if (expected !== undefined) {
         diagnostics.push(
-          hookDiagnostic(plugin, `returned something that is not ${expected} from its ${hook} hook; the value before it is kept.`),
+          hookDiagnostic(plugin, `returned ${expected} from its ${hook} hook; the value before it is kept.`),
         );
         continue;
       }
       value = next;
     } catch (err) {
+      if (isHookDeadline(err)) {
+        diagnostics.push(
+          hookDiagnostic(
+            plugin,
+            `did not finish its ${hook} hook within ${timeoutMs} ms; the value before it is kept.`,
+            "plugin.hook-timeout",
+            "Make the hook finish sooner, or raise the deadline of the hook policy.",
+          ),
+        );
+        continue;
+      }
       diagnostics.push(hookDiagnostic(plugin, `failed in its ${hook} hook: ${detailOf(err)}.`));
     }
   }
@@ -215,17 +243,21 @@ async function runStage<T>(
 }
 
 /** Runs the `content` hooks of `page`: once per page, after its Markdown is parsed and before the model is assembled. */
-export function runContentHooks(plugins: readonly Plugin[], page: Page): Promise<HookResult<Page>> {
-  return runStage(plugins, "content", page, (plugin, value) => plugin.content!(value), (value) =>
-    isPlainObject(value) ? undefined : "a page",
-  );
+export function runContentHooks(
+  plugins: readonly Plugin[],
+  page: Page,
+  policy: HookPolicy = DEFAULT_HOOK_POLICY,
+): Promise<HookResult<Page>> {
+  return runStage(plugins, "content", page, (plugin, value) => plugin.content!(value), pageProblem, policy);
 }
 
 /** Runs the `model` hooks of the assembled `site`: once, before anything is rendered. */
-export function runModelHooks(plugins: readonly Plugin[], site: Site): Promise<HookResult<Site>> {
-  return runStage(plugins, "model", site, (plugin, value) => plugin.model!(value), (value) =>
-    isPlainObject(value) ? undefined : "a site model",
-  );
+export function runModelHooks(
+  plugins: readonly Plugin[],
+  site: Site,
+  policy: HookPolicy = DEFAULT_HOOK_POLICY,
+): Promise<HookResult<Site>> {
+  return runStage(plugins, "model", site, (plugin, value) => plugin.model!(value), siteProblem, policy);
 }
 
 /**
@@ -236,8 +268,14 @@ export function runOutputsHooks(
   plugins: readonly Plugin[],
   files: readonly OutputFile[],
   site: Site,
+  policy: HookPolicy = DEFAULT_HOOK_POLICY,
 ): Promise<HookResult<readonly OutputFile[]>> {
-  return runStage(plugins, "outputs", files, (plugin, value) => plugin.outputs!(value, site), (value) =>
-    Array.isArray(value) ? undefined : "a list of output files",
+  return runStage(
+    plugins,
+    "outputs",
+    files,
+    (plugin, value) => plugin.outputs!(value, site),
+    outputFilesProblem,
+    policy,
   );
 }
