@@ -94,7 +94,8 @@ export interface RankedPage {
   readonly page: Page;
   /**
    * Its relevance score; higher is better. It is the sum of {@link reasons}. A page that matches no
-   * query term scores zero unless a matching page depends on it.
+   * query term scores zero unless a matching page depends on it; a dependency-only page is still
+   * subject to the version, locale, and trust signals.
    */
   readonly score: number;
   /** The number of distinct other pages on this site that link to it. */
@@ -507,15 +508,18 @@ function duplicateGroups(
  *   navigation folders. A sibling of the focus page scores a half.
  * - **Version**: a page in `version` — or in the newest detected version when none is named — gains
  *   `version`, and a page in another version loses as much. A site without version folders is
- *   unaffected.
- * - **Locale**: a page in `lang` gains `locale`, and a page in another language loses as much.
+ *   unaffected. A dependency-only page is adjusted against its dependency score.
+ * - **Locale**: a page in `lang` gains `locale`, and a page in another language loses as much. A
+ *   dependency-only page is adjusted against its dependency score.
  * - **Trust**: a deprecated, rejected, or superseded page, a generated page (`agent.edit: false`),
  *   or a duplicate loses at most the `trust` weight. The duplicate loss names the canonical page in
  *   its reason, and the canonical page gets a zero-contribution `canonical` reason, so a duplicate
- *   never displaces its canonical source silently.
+ *   never displaces its canonical source silently. A dependency-only page is adjusted against its
+ *   dependency score.
  * - **Dependency**: a page that a matching page links to and that matches no query term gains
  *   `dependency ×` the strongest linking page's relevance. This keeps required supporting pages
- *   (a requirements page, say) next to the primary source the task names.
+ *   (a requirements page, say) next to the primary source the task names; the version, locale, and
+ *   trust signals then apply to that dependency score as they do to a lexical score.
  *
  * Duplicates are versioned pages with the same path inside their version, and pages sharing a
  * non-empty `translation_key` when `lang` is requested; the canonical member is the one in the
@@ -656,6 +660,10 @@ export function rankPages(pages: readonly Page[], query: string, options: RankOp
     const relevance = entry?.relevance ?? 0;
     const reasons: RankReason[] = [...(entry?.reasons ?? [])];
     const inboundLinks = key === undefined ? 0 : inbound.get(key) ?? 0;
+    const required = key === undefined ? undefined : dependency.get(key);
+    const dependencyBase = relevance === 0 && required !== undefined ? required.relevance * weights.dependency : 0;
+    // A dependency-only page still has a score to adjust with version, locale, and trust evidence.
+    const basis = relevance > 0 ? relevance : dependencyBase;
 
     if (relevance > 0 && inboundLinks > 0 && maxInbound > 0) {
       reasons.push({
@@ -677,26 +685,26 @@ export function rankPages(pages: readonly Page[], query: string, options: RankOp
     }
 
     const versionInfo = versionByPage.get(page);
-    if (relevance > 0 && versionInfo !== undefined && versionInfo.version !== null && canonicalVersion !== undefined) {
+    if (basis > 0 && versionInfo !== undefined && versionInfo.version !== null && canonicalVersion !== undefined) {
       const sign = versionInfo.version === canonicalVersion ? 1 : -1;
       reasons.push({
         factor: "version",
         code: `version:${versionInfo.version}`,
-        contribution: relevance * weights.version * sign,
+        contribution: basis * weights.version * sign,
       });
     }
 
-    if (relevance > 0 && requestedLang !== undefined) {
+    if (basis > 0 && requestedLang !== undefined) {
       const pageLang = normalizeTag(page.lang);
       const sign = pageLang === requestedLang ? 1 : -1;
       reasons.push({
         factor: "locale",
         code: `locale:${pageLang}`,
-        contribution: relevance * weights.locale * sign,
+        contribution: basis * weights.locale * sign,
       });
     }
 
-    if (relevance > 0) {
+    if (basis > 0) {
       const evidence = trustEvidenceOf(page, duplicateOf);
       let total = 0;
       for (const item of evidence) total += item.fraction;
@@ -705,18 +713,17 @@ export function rankPages(pages: readonly Page[], query: string, options: RankOp
         reasons.push({
           factor: "trust",
           code: item.code,
-          contribution: -(weights.trust * relevance * capped * item.fraction) / total,
+          contribution: -(weights.trust * basis * capped * item.fraction) / total,
         });
       }
       if (canonical.has(page)) reasons.push({ factor: "trust", code: "canonical", contribution: 0 });
     }
 
-    const required = key === undefined ? undefined : dependency.get(key);
     if (relevance === 0 && required !== undefined) {
       reasons.push({
         factor: "dependency",
         code: `dependency:${required.from}`,
-        contribution: required.relevance * weights.dependency,
+        contribution: dependencyBase,
       });
     }
 

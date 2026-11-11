@@ -303,6 +303,63 @@ test("versions fixture: version and locale duplicates carry reasons naming the c
   assert.ok(canonicalIndex >= 0 && translationIndex > canonicalIndex);
 });
 
+test("dependency-only requirements inherit version and duplicate handling from their canonical version", () => {
+  const pages = [
+    page("/v1/guide/install/", {
+      title: "Install the engine",
+      source: "v1/guide/install.md",
+      html: '<p>Install the old package.</p><a href="/v1/guide/requirements/">Requirements</a>',
+    }),
+    page("/v1/guide/requirements/", {
+      title: "Requirements",
+      source: "v1/guide/requirements.md",
+      html: "<p>Node 20 or newer.</p>",
+    }),
+    page("/v2/guide/install/", {
+      title: "Install the engine",
+      source: "v2/guide/install.md",
+      html: '<p>Install the engine once.</p><a href="/v2/guide/requirements/">Requirements</a>',
+    }),
+    page("/v2/guide/requirements/", {
+      title: "Requirements",
+      source: "v2/guide/requirements.md",
+      html: "<p>Node 24 or newer.</p>",
+    }),
+  ];
+
+  const ranked = rankPages(pages, "install");
+  const v1 = ranked.find((entry) => entry.page.url === "/v1/guide/requirements/");
+  const v2 = ranked.find((entry) => entry.page.url === "/v2/guide/requirements/");
+  assert.ok(v1 !== undefined && v2 !== undefined);
+
+  assert.ok(
+    v1.reasons.every((reason) => reason.factor !== "lexical"),
+    "the requirements page does not match the query",
+  );
+  assert.ok(
+    v1.reasons.some((reason) => reason.factor === "version" && reason.code === "version:v1" && reason.contribution < 0),
+  );
+  assert.ok(
+    v1.reasons.some(
+      (reason) =>
+        reason.factor === "trust" && reason.code === "duplicate:/v2/guide/requirements/" && reason.contribution < 0,
+    ),
+  );
+  assert.ok(v2.reasons.some((reason) => reason.code === "canonical" && reason.contribution === 0));
+  assert.ok(v2.score > v1.score);
+  assert.ok(ranked.indexOf(v2) < ranked.indexOf(v1));
+
+  for (const entry of [v1, v2]) {
+    assert.equal(entry.score, entry.reasons.reduce((sum, reason) => sum + reason.contribution, 0), entry.page.url);
+  }
+
+  const reversed = rankPages([...pages].reverse(), "install");
+  assert.deepEqual(
+    reversed.map((entry) => ({ url: entry.page.url, score: entry.score, reasons: entry.reasons })),
+    ranked.map((entry) => ({ url: entry.page.url, score: entry.score, reasons: entry.reasons })),
+  );
+});
+
 test("every selected item exposes reasons whose contributions add up to its score", async () => {
   const runs = [
     rankPages((await fixture("docs")).pages, "install", { focus: "/guide/install/" }),
