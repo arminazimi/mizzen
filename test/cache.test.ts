@@ -4,7 +4,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { loadConfig } from "../src/config/load.ts";
+import type { Diagnostic } from "../src/contracts/index.ts";
+import { version } from "../src/index.ts";
 import { build } from "../src/pipeline/build.ts";
+import {
+  CACHE_FORMAT,
+  cacheKey,
+  restoreCache,
+  writeCache,
+  type CacheKeyOptions,
+  type CacheMissReason,
+} from "../src/pipeline/cache.ts";
 
 const REPO = fileURLToPath(new URL("../", import.meta.url));
 const THEME = fileURLToPath(new URL("../../lateen", import.meta.url));
@@ -271,6 +282,16 @@ test("a corrupt or missing cache falls back to a cold build", async () => {
     assert.deepEqual(afterCorrupt.files, first.files);
     assert.deepEqual(snapshot(out), cold);
 
+    // An entry written by an older format is never read, and the build replaces it.
+    const manifestFile = join(entry, "manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
+    writeFileSync(manifestFile, JSON.stringify({ ...manifest, version: CACHE_FORMAT - 1 }));
+    resetRenders();
+    const afterOld = await build({ root, out, themeRoot: theme, defaultLayout: "doc", cache: true, cacheDir });
+    assert.ok(renders() > 0, "an old-format entry rebuilt the site");
+    assert.deepEqual(afterOld.files, first.files);
+    assert.deepEqual(snapshot(out), cold);
+
     // A missing cache is just a miss.
     rmSync(cacheDir, { recursive: true, force: true });
     resetRenders();
@@ -299,5 +320,226 @@ test("the cache is off by default and lives under the site root when on", async 
     rmSync(root, { recursive: true, force: true });
     rmSync(theme, { recursive: true, force: true });
     rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+/** A site, theme, and outputs tree with at least one of every input `cacheKey` hashes. */
+function keyFixture(): { root: string; theme: string; outputs: string; options: CacheKeyOptions } {
+  const root = tree({
+    "mizzen.yml": "title: Cache\n",
+    "index.md": "# Home\n",
+    "_data/navigation.yml": "main:\n  - title: Home\n    url: /\n",
+  });
+  const theme = tree({ "src/index.ts": 'export const theme = { name: "cache" };\n' });
+  const outputs = tree({ "html.ts": 'export const html = { name: "html", run: () => [] };\n' });
+  return {
+    root,
+    theme,
+    outputs,
+    options: {
+      root,
+      sourceDir: root,
+      config: loadConfig(root).config,
+      themeRoot: theme,
+      outputsDir: outputs,
+      defaultLayout: "doc",
+      themeFiles: ["styles.css"],
+    },
+  };
+}
+
+/** Removes a fixture folder. */
+function clean(...dirs: string[]): void {
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+}
+
+test("changing any declared input makes a new key", async () => {
+  const { root, theme, outputs, options } = keyFixture();
+  try {
+    const base = await cacheKey(options);
+    const differs = async (what: string, next: Partial<CacheKeyOptions> = {}): Promise<void> => {
+      assert.notEqual(await cacheKey({ ...options, ...next }), base, `changing ${what} must miss`);
+    };
+
+    writeFileSync(join(root, "index.md"), "# Changed\n");
+    await differs("page content");
+
+    writeFileSync(join(root, "_data/navigation.yml"), "main:\n  - title: Changed\n    url: /\n");
+    await differs("navigation");
+
+    writeFileSync(join(root, "mizzen.yml"), "title: Changed\n");
+    await differs("the config file", { config: loadConfig(root).config });
+
+    writeFileSync(join(theme, "src/index.ts"), 'export const theme = { name: "changed" };\n');
+    await differs("a theme file");
+
+    writeFileSync(join(outputs, "html.ts"), 'export const html = { name: "html", run: () => [1] };\n');
+    await differs("an output file");
+
+    await differs("defaultLayout", { defaultLayout: "other" });
+    await differs("themeFiles", { themeFiles: ["other.css"] });
+    await differs("the engine version", { engineVersion: "0.0.1" });
+    await differs("the runtime version", { runtimeVersion: "some-other-runtime" });
+  } finally {
+    clean(root, theme, outputs);
+  }
+});
+
+test("the resolved config is part of the key, not only its file", async () => {
+  const first = tree({ "index.md": "# Home\n" });
+  const second = tree({ "index.md": "# Home\n" });
+  try {
+    // Neither site has a config: both take their title from the site folder's name, so their output differs.
+    const shared = { themeRoot: first, outputsDir: first, defaultLayout: "doc" };
+    const a = await cacheKey({ ...shared, root: first, sourceDir: first, config: loadConfig(first).config });
+    const b = await cacheKey({ ...shared, root: second, sourceDir: second, config: loadConfig(second).config });
+    assert.notEqual(a, b);
+  } finally {
+    clean(first, second);
+  }
+});
+
+test("equal inputs produce one deterministic key", async () => {
+  const { root, theme, outputs, options } = keyFixture();
+  try {
+    const base = await cacheKey(options);
+    assert.equal(await cacheKey(options), base, "the same inputs always give the same key");
+    assert.equal(
+      await cacheKey({ ...options, themeFiles: ["styles.css", "styles.css"] }),
+      base,
+      "a repeated theme file is one input",
+    );
+    assert.equal(await cacheKey({ ...options, engineVersion: version }), base, "the engine version defaults to the engine's");
+    assert.equal(
+      await cacheKey({ ...options, runtimeVersion: `${process.versions.node}/${process.versions.icu ?? ""}` }),
+      base,
+      "the runtime defaults to the running Node and ICU versions",
+    );
+
+    // A timestamp change alone is not a content change.
+    const later = new Date(Date.now() + 10_000);
+    utimesSync(join(root, "index.md"), later, later);
+    assert.equal(await cacheKey(options), base);
+  } finally {
+    clean(root, theme, outputs);
+  }
+});
+
+/** A finished build's output folder, and the entry `writeCache` records for it under a fixed key. */
+async function entryFixture(cacheDir: string): Promise<{
+  source: string;
+  key: string;
+  dir: string;
+  files: string[];
+  diagnostics: Diagnostic[];
+}> {
+  const source = tree({ "index.html": "<h1>Home</h1>\n", "assets/app.js": "console.log(1);\n" });
+  const key = "a".repeat(64);
+  const files = ["index.html", "assets/app.js"];
+  const diagnostics: Diagnostic[] = [{ id: "test.one", severity: "warning", message: "One." }];
+  await writeCache(cacheDir, key, source, files, diagnostics);
+  return { source, key, dir: join(cacheDir, key), files, diagnostics };
+}
+
+test("restoreCache reports missing, corrupt, and incompatible entries and never copies bad output", async () => {
+  const { parent, out, cacheDir } = scratch();
+  let source: string | undefined;
+  try {
+    const key = "a".repeat(64);
+    const reasons: CacheMissReason[] = [];
+    const onMiss = (reason: CacheMissReason): void => {
+      reasons.push(reason);
+    };
+
+    assert.equal(await restoreCache(cacheDir, key, out, { onMiss }), undefined);
+    assert.deepEqual(reasons, ["missing"]);
+    assert.equal(existsSync(out), false, "a miss writes nothing");
+
+    const fixture = await entryFixture(cacheDir);
+    source = fixture.source;
+    const { dir, files, diagnostics } = fixture;
+    const manifest = readFileSync(join(dir, "manifest.json"), "utf8");
+
+    const hit = await restoreCache(cacheDir, key, out, { onMiss });
+    assert.ok(hit !== undefined, "a valid entry is restored");
+    assert.deepEqual(hit.files, [...files].sort());
+    assert.deepEqual(hit.diagnostics, diagnostics);
+    for (const file of files) {
+      assert.deepEqual(readFileSync(join(hit.staging, file)), readFileSync(join(source, file)), `${file} is restored byte for byte`);
+    }
+    clean(hit.staging);
+    assert.equal(existsSync(out), false, "a restore stages the output and leaves `out` alone");
+
+    const expectMiss = async (reason: CacheMissReason): Promise<void> => {
+      reasons.length = 0;
+      assert.equal(await restoreCache(cacheDir, key, out, { onMiss }), undefined);
+      assert.deepEqual(reasons, [reason]);
+      assert.equal(existsSync(out), false);
+    };
+
+    writeFileSync(join(dir, "manifest.json"), "{ not json");
+    await expectMiss("corrupt");
+
+    writeFileSync(
+      join(dir, "manifest.json"),
+      JSON.stringify({ version: CACHE_FORMAT - 1, key, engine: version, files, hashes: {}, diagnostics }),
+    );
+    await expectMiss("incompatible");
+
+    writeFileSync(
+      join(dir, "manifest.json"),
+      JSON.stringify({ version: CACHE_FORMAT, key, engine: "0.0.0", files, hashes: {}, diagnostics }),
+    );
+    await expectMiss("incompatible");
+
+    // Well-shaped but not what was written: the manifest checksum covers the diagnostics too.
+    writeFileSync(join(dir, "manifest.json"), manifest.replace("One.", "Changed."));
+    await expectMiss("corrupt");
+
+    // A file that no longer matches its hash, and a file that is gone.
+    writeFileSync(join(dir, "manifest.json"), manifest);
+    writeFileSync(join(dir, "out/index.html"), "tampered\n");
+    await expectMiss("corrupt");
+    rmSync(join(dir, "out/index.html"));
+    await expectMiss("corrupt");
+
+    // A key that is not a key can name nothing.
+    reasons.length = 0;
+    assert.equal(await restoreCache(cacheDir, "../escape", out, { onMiss }), undefined);
+    assert.deepEqual(reasons, ["missing"]);
+
+    // A rewritten entry is reusable again.
+    await writeCache(cacheDir, key, source, files, diagnostics);
+    const again = await restoreCache(cacheDir, key, out);
+    assert.deepEqual(again?.files, [...files].sort());
+    if (again !== undefined) clean(again.staging);
+    assert.deepEqual(readdirSync(cacheDir), [key], "writing leaves one whole entry and no temporary folder");
+  } finally {
+    if (source !== undefined) clean(source);
+    clean(parent);
+  }
+});
+
+test("a file list that does not match the output writes no entry", async () => {
+  const { parent, cacheDir } = scratch();
+  const source = tree({ "index.html": "<h1>Home</h1>\n" });
+  try {
+    await writeCache(cacheDir, "b".repeat(64), source, ["index.html", "missing.html"], []);
+    assert.equal(existsSync(cacheDir), false, "a partial build is never cached");
+  } finally {
+    clean(source, parent);
+  }
+});
+
+test("a build that throws writes no whole-build entry", async () => {
+  const root = tree({ "index.md": "---\ntitle: Home\n---\n# Home\n" });
+  const theme = makeTheme("one");
+  writeFileSync(join(theme, "layouts/broken.ts"), 'const broken = () => {\n  throw new Error("boom");\n};\nexport default broken;\n');
+  const { parent, out, cacheDir } = scratch();
+  try {
+    await assert.rejects(build({ root, out, themeRoot: theme, defaultLayout: "broken", cache: true, cacheDir }));
+    assert.equal(entries(cacheDir).length, 0, "a build that threw wrote no whole-build entry");
+  } finally {
+    clean(root, theme, parent);
   }
 });

@@ -5,8 +5,8 @@
  * Only the parse stage is cached. Front matter, includes, titles, permalinks, navigation, data, facts, rendering, and
  * outputs all run every build, so a page cache hit produces exactly the tree a cold parse would. Changing one page
  * misses only that page; changing a plugin or its order misses every page; a corrupt, missing, stale, or half-written
- * entry is a miss, never bad content. Writes land in a temporary folder first and are renamed into place, so a reader
- * never sees half an entry.
+ * entry is a miss, never bad content, and an entry carries a checksum of its tree so a tampered tree is never read.
+ * Writes land in a temporary folder first and are renamed into place, so a reader never sees half an entry.
  *
  */
 import { createHash } from "node:crypto";
@@ -17,10 +17,13 @@ import { version } from "../index.ts";
 import { loadMarkdownPlugins, parseMarkdown } from "../markdown/parse.ts";
 
 /** Bumped when the meaning or shape of an entry changes, so an entry written by an older engine is never trusted. */
-export const PAGE_CACHE_FORMAT = 1;
+export const PAGE_CACHE_FORMAT = 2;
 
 /** A key has 64 lowercase hexadecimal characters, and so does a file named after one. */
 const KEY = /^[0-9a-f]{64}$/;
+
+/** Why an entry could not be used: no entry, unreadable bytes, or an entry this engine must not read. */
+export type PageCacheMissReason = "missing" | "corrupt" | "incompatible";
 
 /** The part of a Markdown plugin that changes the parsed tree: its name and its order. */
 export interface PageCachePlugin {
@@ -28,19 +31,21 @@ export interface PageCachePlugin {
   readonly order: number;
 }
 
-/** What {@link pageCache} needs. Both are only overridden by tests. */
+/** What {@link pageCache} needs. Every field is only overridden by tests. */
 export interface PageCacheOptions {
   /** The engine version folded into every key. Default: the engine's `version`. */
   readonly engineVersion?: string;
   /** Plugins folded into every key, in load order. Default: the plugins {@link loadMarkdownPlugins} returns. */
   readonly plugins?: readonly PageCachePlugin[];
+  /** Called with the reason an entry was not used. The page is parsed again. */
+  readonly onMiss?: (reason: PageCacheMissReason) => void;
 }
 
 /** A cache of parsed Markdown trees, stored as JSON under one folder. */
 export interface PageCache {
   /** The key of a page: SHA-256 of its body, body line, plugin names and orders, and engine version. */
   key(body: string, bodyLine?: number): Promise<string>;
-  /** The tree stored under `key`; `undefined` for a missing, corrupt, or stale entry. */
+  /** The tree stored under `key`; `undefined` for a missing, corrupt, or stale entry, reported to `onMiss`. */
   get(key: string): Promise<Root | undefined>;
   /** Stores `tree` under `key`, atomically. A failed write is ignored: the next build parses the page again. */
   set(key: string, tree: Root): Promise<void>;
@@ -51,6 +56,8 @@ interface PageCacheEntry {
   readonly format: number;
   readonly engine: string;
   readonly key: string;
+  /** SHA-256 of the tree's JSON, so a corrupted tree is a miss rather than bad content. */
+  readonly checksum: string;
   readonly tree: Root;
 }
 
@@ -80,8 +87,15 @@ function isEntry(value: unknown, key: string, engine: string): value is PageCach
     entry.format === PAGE_CACHE_FORMAT &&
     entry.engine === engine &&
     entry.key === key &&
+    typeof entry.checksum === "string" &&
+    KEY.test(entry.checksum) &&
     isTree(entry.tree)
   );
+}
+
+/** SHA-256 of a stored tree's JSON; parsing and re-serializing gives the same text for an untouched entry. */
+function treeChecksum(tree: Root): string {
+  return createHash("sha256").update(JSON.stringify(tree)).digest("hex");
 }
 
 /** A cache of parsed pages rooted at `dir`. Reads and writes never throw; a cache that fails only costs a parse. */
@@ -106,14 +120,39 @@ export function pageCache(dir: string, options: PageCacheOptions = {}): PageCach
     },
 
     async get(key) {
-      if (!KEY.test(key)) return undefined;
-      try {
-        const parsed: unknown = JSON.parse(await readFile(join(root, `${key}.json`), "utf8"));
-        if (!isEntry(parsed, key, engine)) return undefined;
-        return parsed.tree;
-      } catch {
+      if (!KEY.test(key)) {
+        options.onMiss?.("missing");
         return undefined;
       }
+      let text: string;
+      try {
+        text = await readFile(join(root, `${key}.json`), "utf8");
+      } catch (err) {
+        const code = (err as { code?: unknown }).code;
+        options.onMiss?.(code === "ENOENT" || code === "ENOTDIR" ? "missing" : "corrupt");
+        return undefined;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        options.onMiss?.("corrupt");
+        return undefined;
+      }
+      if (typeof parsed !== "object" || parsed === null) {
+        options.onMiss?.("corrupt");
+        return undefined;
+      }
+      const entry = parsed as Partial<PageCacheEntry>;
+      if (entry.format !== PAGE_CACHE_FORMAT || entry.engine !== engine) {
+        options.onMiss?.("incompatible");
+        return undefined;
+      }
+      if (!isEntry(parsed, key, engine) || parsed.checksum !== treeChecksum(parsed.tree)) {
+        options.onMiss?.("corrupt");
+        return undefined;
+      }
+      return parsed.tree;
     },
 
     async set(key, tree) {
@@ -122,7 +161,7 @@ export function pageCache(dir: string, options: PageCacheOptions = {}): PageCach
       try {
         await mkdir(root, { recursive: true });
         temp = await mkdtemp(join(root, ".tmp-"));
-        const entry: PageCacheEntry = { format: PAGE_CACHE_FORMAT, engine, key, tree };
+        const entry: PageCacheEntry = { format: PAGE_CACHE_FORMAT, engine, key, checksum: treeChecksum(tree), tree };
         await writeFile(join(temp, "entry.json"), `${JSON.stringify(entry)}\n`);
         // One rename puts the entry in place, so no reader ever sees a partial file.
         await rename(join(temp, "entry.json"), join(root, `${key}.json`));

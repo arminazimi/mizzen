@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Ajv2020 as Ajv2020Class } from "ajv/dist/2020.js";
 import type { Page, Site, SiteConfig } from "../src/contracts/index.ts";
+import type { Diagnostic } from "../src/contracts/diagnostic.ts";
 import type { OutputContext, OutputFile } from "../src/contracts/output.ts";
 import { buildModel } from "../src/model/build.ts";
 import { manifest } from "../src/outputs/manifest.ts";
@@ -90,8 +91,8 @@ interface Entry {
   readonly hashes: Readonly<Record<string, string>>;
 }
 
-async function manifestOf(model: Site): Promise<{ version: number; pages: Entry[] }> {
-  const text = String((await run(model)).contents);
+async function manifestOf(model: Site, context: OutputContext = ctx): Promise<{ version: number; pages: Entry[] }> {
+  const text = String((await run(model, context)).contents);
   return JSON.parse(text) as { version: number; pages: Entry[] };
 }
 
@@ -192,9 +193,40 @@ test("a URL that names a file other than HTML has no twin, so only the HTML outp
   assert.deepEqual(built.pages[0]?.outputs, ["feed.xml"]);
 });
 
-test("two runs of the same model write the same bytes", async () => {
+test("a source path is relative with forward slashes on every platform", async () => {
+  const windows = { ...page("/a/"), source: { ...pos, file: "guide\\install.md" } };
+  const dotted = { ...page("/b/"), source: { ...pos, file: "./guide/other.md" } };
+  const built = await manifestOf(site([windows, dotted]));
+
+  const entries = byUrl(built.pages);
+  assert.equal(entries.get("/a/")?.source, "guide/install.md");
+  assert.equal(entries.get("/b/")?.source, "guide/other.md");
+  assert.equal(validate(built), true, ajv.errorsText(validate.errors));
+});
+
+test("two pages that write one file: the lower URL keeps it and an error names both", async () => {
+  const diagnostics: Diagnostic[] = [];
+  const context: OutputContext = { ...ctx, report: (report) => diagnostics.push(report) };
+  const pretty = { ...page("/a/", "doc", {}, "# A"), source: { ...pos, file: "a.md" } };
+  const named = { ...page("/a/index.html", "doc", {}, "# A"), source: { ...pos, file: "a-index.md" } };
+
+  const built = await manifestOf(site([named, pretty], { outputs: { twins: false } }), context);
+  const entries = byUrl(built.pages);
+  assert.deepEqual(entries.get("/a/")?.outputs, ["a/index.html"], "the page with the lower URL owns the file");
+  assert.deepEqual(entries.get("/a/index.html")?.outputs, [], "the other page does not claim a file it cannot own");
+
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.id, "manifest.output-collision");
+  assert.equal(diagnostics[0]?.severity, "error");
+  assert.match(diagnostics[0]?.message ?? "", /"a\/index\.html".*a\.md.*a-index\.md/);
+  assert.equal(validate(built), true, ajv.errorsText(validate.errors));
+});
+
+test("two runs of the same model write the same bytes, whatever order the pages arrived in", async () => {
   const model = site([page("/b/", "doc", {}, "# B"), page("/a/", "doc", {}, "# A")]);
+  const reversed = site([...model.pages].reverse());
   assert.equal(String((await run(model)).contents), String((await run(model)).contents));
+  assert.equal(String((await run(reversed)).contents), String((await run(model)).contents), "order is not part of the identity");
   assert.deepEqual((await manifestOf(model)).pages.map((e) => e.url), ["/a/", "/b/"]);
 });
 
@@ -223,6 +255,7 @@ test("the schema rejects a manifest a tool must not accept", () => {
     ["a URL without a leading slash", { version: 1, pages: [{ ...valid.pages[0], url: "a/" }] }],
     ["an output with a leading slash", { version: 1, pages: [{ ...valid.pages[0], outputs: ["/a/index.html"] }] }],
     ["an output with a parent segment", { version: 1, pages: [{ ...valid.pages[0], outputs: ["a/../b.html"] }] }],
+    ["an output with a control character", { version: 1, pages: [{ ...valid.pages[0], outputs: ["a/\nb.html"] }] }],
     ["a hash that is not SHA-256", { version: 1, pages: [{ ...valid.pages[0], hashes: { source: "abc", html: "abc" } }] }],
     ["hashes without a source", { version: 1, pages: [{ ...valid.pages[0], hashes: { html: sha256("") } }] }],
     ["hashes without an html", { version: 1, pages: [{ ...valid.pages[0], hashes: { source: sha256("") } }] }],

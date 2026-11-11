@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Diagnostic, SourcePos } from "../contracts/index.ts";
@@ -40,6 +41,18 @@ export interface ExpandIncludesOptions {
   readonly maxDepth?: number;
 }
 
+/** One file a body depends on: the target of an `::include` directive, at every nesting level. */
+export interface IncludeDependency {
+  /** Path of the file that holds the directive, relative to `sourceDir`, `/`-separated. */
+  readonly from: string;
+  /** Path the directive names, relative to `sourceDir`, `/`-separated. */
+  readonly path: string;
+  /** The span of the directive line. */
+  readonly pos: SourcePos;
+  /** True when the named file does not exist under the source folder. */
+  readonly missing: boolean;
+}
+
 /** What {@link expandIncludes} returns. */
 export interface IncludeResult {
   /** The body with every expandable directive replaced by its file. */
@@ -48,6 +61,8 @@ export interface IncludeResult {
   readonly bodyLine: number;
   /** One finding per directive that could not be expanded; empty when every directive worked. */
   readonly diagnostics: readonly Diagnostic[];
+  /** Every directive's target, in the order the directives were read; a cycle's closing edge is included. */
+  readonly includes: readonly IncludeDependency[];
 }
 
 /** The directive alone on a line, with an optional label and optional attributes. */
@@ -77,6 +92,7 @@ interface Scope {
   /** Prefix that turns a source-relative path into the display path; `""` when the two are the same. */
   readonly prefix: string;
   readonly diagnostics: Diagnostic[];
+  readonly includes: IncludeDependency[];
 }
 
 /** A 1-based inclusive range of lines. */
@@ -254,6 +270,7 @@ async function expandDirective(
   const rel = inside.split(sep).join("/");
   const display = displayOf(scope, rel);
   const key = keyOf(scope.sourceDir, rel);
+  scope.includes.push({ from: input.relPath, path: rel, pos, missing: !existsSync(absolute) });
   if (stack.some((frame) => frame.key === key)) {
     const chain = [...stack.map((frame) => frame.display), display].join(" → ");
     scope.diagnostics.push(
@@ -342,21 +359,24 @@ async function expandBody(
 /**
  * Expands the `::include` directives of one page body, reading only files under `sourceDir`. The body keeps its
  * starting line; every failure becomes a diagnostic at the directive's line and the rest of the body still expands.
+ * `includes` reports every target with the file and line that named it, which a dependency graph reads.
  */
 export async function expandIncludes(options: ExpandIncludesOptions): Promise<IncludeResult> {
   if (!options.body.includes("::include")) {
-    return { body: options.body, bodyLine: options.bodyLine, diagnostics: [] };
+    return { body: options.body, bodyLine: options.bodyLine, diagnostics: [], includes: [] };
   }
   const file = options.file.split("\\").join("/");
   const displayFile = options.displayFile ?? file;
   const diagnostics: Diagnostic[] = [];
+  const includes: IncludeDependency[] = [];
   const scope: Scope = {
     sourceDir: resolve(options.sourceDir),
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
     prefix: prefixOf(displayFile, file),
     diagnostics,
+    includes,
   };
   const stack: Frame[] = [{ key: keyOf(scope.sourceDir, file), display: displayFile }];
   const body = await expandBody(scope, options.body, options.bodyLine, file, displayFile, stack);
-  return { body, bodyLine: options.bodyLine, diagnostics };
+  return { body, bodyLine: options.bodyLine, diagnostics, includes };
 }

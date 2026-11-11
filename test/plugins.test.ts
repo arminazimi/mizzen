@@ -101,6 +101,26 @@ test("the code file lists the plugins a build runs, in order", async () => {
   }
 });
 
+test("an edited code file is imported again, and unchanged content reuses its module", async () => {
+  const first = codeFile(`const plugin: Plugin = { name: "first" };\n`, "plugin");
+  const root = siteRoot(first);
+  try {
+    const before = await loadCodeConfig(root);
+    assert.deepEqual(before.plugins.map((plugin) => plugin.name), ["first"]);
+
+    const unchanged = await loadCodeConfig(root);
+    assert.equal(unchanged.plugins[0], before.plugins[0], "unchanged content reuses the same module instance");
+
+    const second = codeFile(`const plugin: Plugin = { name: "second" };\n`, "plugin");
+    writeFileSync(join(root, CODE_CONFIG_FILE), second[CODE_CONFIG_FILE]!);
+
+    const after = await loadCodeConfig(root);
+    assert.deepEqual(after.plugins.map((plugin) => plugin.name), ["second"]);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
 test("a code file with an empty list is an ordinary site", async () => {
   const root = siteRoot(codeFile("", ""));
   try {
@@ -274,6 +294,7 @@ test("a hook that throws is an error naming the plugin and the value before it i
   assert.ok(diagnostic?.message.includes("broken"), `the plugin is named: ${diagnostic?.message}`);
   assert.ok(diagnostic?.message.includes("content hook"), diagnostic?.message);
   assert.ok(diagnostic?.message.includes("boom"), diagnostic?.message);
+  assert.equal(diagnostic?.pos?.file, CODE_CONFIG_FILE, "the diagnostic points at the site's code file");
   assert.equal(result.value.title, "kept", "the plugins after a throwing one still run");
   assert.equal(result.value.lang, "fa");
   assert.deepEqual(input, page("/install/"), "the page handed in is not changed");

@@ -5,6 +5,11 @@
  * SHA-256 of one line per file (`<path>`, a NUL, the file's hash, and a line feed), with the paths sorted by code
  * point. The build and `verify` run the same rule, so both agree byte for byte.
  *
+ * An identity describes reproducible content only: the path is relative with `/` separators, file times are not read,
+ * and the metadata files an operating system adds to a folder (`.DS_Store`, `Thumbs.db`, `desktop.ini`, AppleDouble
+ * `._*` files, and `__MACOSX` folders) are not part of it. A path that cannot be named unambiguously (absolute,
+ * backslash, a `.` or `..` segment, or a control character) is an error rather than a guess.
+ *
  * The manifest cannot hash itself, so it is left out: a change to the record is not a change to the build. A site
  * file that replaces the manifest makes the build leave it alone.
  *
@@ -24,6 +29,12 @@ export interface BuildRecord {
   readonly files: Readonly<Record<string, string>>;
 }
 
+/**
+ * Names an operating system or archive tool adds to a folder. They are not site content: a checkout that carries
+ * them still describes the same build.
+ */
+const PLATFORM_METADATA = new Set([".DS_Store", "Thumbs.db", "desktop.ini", ".Spotlight-V100", ".Trashes", "__MACOSX"]);
+
 /** Compares by code point, never by locale. */
 export function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -34,35 +45,51 @@ export function hashOf(bytes: string | Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/**
- * The one hash of a build from its per-file hashes: one line per file, sorted by path, so the same files give the
- * same hash whatever order they were hashed in.
- */
-export function buildHashOf(files: Readonly<Record<string, string>>): string {
-  const text = Object.keys(files)
-    .sort(byCodePoint)
-    .map((path) => `${path}\0${files[path]}\n`)
-    .join("");
-  return hashOf(text);
+/** True for a path an identity can name without ambiguity: relative, `/`-separated, and free of control characters. */
+function isIdentityPath(path: string): boolean {
+  if (path === "" || path.startsWith("/") || path.includes("\\") || /^[A-Za-z]:/.test(path)) return false;
+  if (/[\u0000-\u001f\u007f]/.test(path)) return false;
+  return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+/** True for a metadata file or folder an operating system adds, which no build identity includes. */
+function isPlatformMetadata(path: string): boolean {
+  return path.split("/").some((segment) => PLATFORM_METADATA.has(segment) || segment.startsWith("._"));
 }
 
 /**
- * Hashes every file under `root` in path order, leaving out the manifest that records the result. `verify` uses this
- * on a built folder, and {@link recordBuildHash} uses it on the staging folder before the build is swapped in.
+ * The one hash of a build from its per-file hashes: one line per file, sorted by path, so the same files give the
+ * same hash whatever order they were hashed in. A path that identity cannot name without ambiguity is an error: two
+ * different files could otherwise produce the same lines.
+ */
+export function buildHashOf(files: Readonly<Record<string, string>>): string {
+  const paths = Object.keys(files).sort(byCodePoint);
+  const ambiguous = paths.find((path) => !isIdentityPath(path));
+  if (ambiguous !== undefined) {
+    throw new TypeError(`build-hash: "${ambiguous}" is not a relative path a build identity can name.`);
+  }
+  return hashOf(paths.map((path) => `${path}\0${files[path]}\n`).join(""));
+}
+
+/**
+ * Hashes every file under `root` in path order, leaving out the manifest that records the result and the metadata
+ * files an operating system adds. `verify` uses this on a built folder, and {@link recordBuildHash} uses it on the
+ * staging folder before the build is swapped in.
  */
 export async function fingerprint(root: string): Promise<BuildRecord> {
   const paths: string[] = [];
   for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
     if (!entry.isFile()) continue;
-    paths.push(relative(root, join(entry.parentPath, entry.name)).split(sep).join("/"));
+    const path = relative(root, join(entry.parentPath, entry.name)).split(sep).join("/");
+    if (path === MANIFEST_PATH || isPlatformMetadata(path)) continue;
+    paths.push(path);
   }
   paths.sort(byCodePoint);
 
-  const files: Record<string, string> = {};
-  for (const path of paths) {
-    if (path === MANIFEST_PATH) continue;
-    files[path] = hashOf(await readFile(join(root, path)));
-  }
+  // A null prototype keeps a file literally named `__proto__` from landing on the object's prototype, where the
+  // hash would never see it.
+  const files: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const path of paths) files[path] = hashOf(await readFile(join(root, path)));
   return { hash: buildHashOf(files), files };
 }
 

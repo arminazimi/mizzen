@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { test } from "node:test";
-import type { Heading, Page, SourcePos } from "../src/contracts/index.ts";
+import { fileURLToPath } from "node:url";
+import type { Heading, Page, Site, SourcePos } from "../src/contracts/index.ts";
+import { buildModel } from "../src/model/build.ts";
 import { rankPages } from "../src/packs/rank.ts";
 
 function pos(file: string): SourcePos {
@@ -201,4 +204,135 @@ test("self-links are ignored, repeated links count once per page, and anchors an
     ["/b/", "/a/", "/c/", "/z/"],
   );
   assert.equal(ranked[0]?.inboundLinks, 2);
+});
+
+/** The fixture root, one folder per focused ranking fixture. */
+const FIXTURES = fileURLToPath(new URL("../fixtures/packs-rank/", import.meta.url));
+
+/** Built models, so a fixture is read once per test run. */
+const models = new Map<string, Promise<Site>>();
+
+/** The model of one fixture site. */
+function fixture(name: string): Promise<Site> {
+  let model = models.get(name);
+  if (model === undefined) {
+    model = buildModel(join(FIXTURES, name)).then((result) => result.site);
+    models.set(name, model);
+  }
+  return model;
+}
+
+test("navigation proximity raises an equal lexical match near the task focus", () => {
+  const pages = [
+    page("/guide/configure/", { title: "Install", html: "<p>Steps.</p>" }),
+    page("/reference/cli/", { title: "Install", html: "<p>Steps.</p>" }),
+    page("/guide/install/", { title: "Install", html: "<p>Steps.</p>" }),
+  ];
+
+  const ranked = rankPages(pages, "install", { focus: "/guide/install/" });
+  assert.deepEqual(
+    ranked.map((entry) => entry.page.url),
+    ["/guide/install/", "/guide/configure/", "/reference/cli/"],
+  );
+  assert.ok(ranked[0]?.reasons.some((reason) => reason.factor === "navigation"));
+  assert.ok(ranked[1]?.reasons.some((reason) => reason.factor === "navigation"));
+  assert.ok(ranked[2]?.reasons.every((reason) => reason.factor !== "navigation"));
+});
+
+test("docs fixture: the primary page and the supporting page it requires rank first", async () => {
+  const site = await fixture("docs");
+  const ranked = rankPages(site.pages, "install", { focus: "/guide/install/" });
+
+  assert.deepEqual(
+    ranked.slice(0, 2).map((entry) => entry.page.url),
+    ["/guide/install/", "/guide/requirements/"],
+  );
+  assert.equal(ranked[0]?.reasons.find((reason) => reason.factor === "navigation")?.code, "focus:/guide/install/");
+
+  const supporting = ranked[1];
+  assert.ok(Math.abs((supporting?.score ?? 0) - 4.8) < 1e-9);
+  assert.equal(supporting?.reasons.length, 1);
+  assert.equal(supporting?.reasons[0]?.factor, "dependency");
+  assert.equal(supporting?.reasons[0]?.code, "dependency:/guide/install/");
+});
+
+test("docs fixture: a generated duplicate stays behind its canonical source with a trust reason", async () => {
+  const site = await fixture("docs");
+  const ranked = rankPages(site.pages, "configuration");
+  const generated = ranked.find((entry) => entry.page.url === "/reference/config-generated/");
+
+  assert.deepEqual(
+    ranked.slice(0, 2).map((entry) => entry.page.url),
+    ["/reference/config/", "/reference/config-generated/"],
+  );
+  assert.ok(ranked[0]!.score > generated!.score);
+  assert.ok(
+    generated?.reasons.some((reason) => reason.factor === "trust" && reason.code === "generated" && reason.contribution < 0),
+  );
+  assert.ok(generated?.reasons.some((reason) => reason.code === "status:beta" && reason.contribution < 0));
+  assert.ok(ranked[0]?.reasons.every((reason) => reason.code !== "generated"));
+});
+
+test("versions fixture: version and locale duplicates carry reasons naming the canonical page", async () => {
+  const site = await fixture("versions");
+  const ranked = rankPages(site.pages, "install", { focus: "/v2/guide/install/", lang: "en" });
+
+  assert.deepEqual(
+    ranked.slice(0, 2).map((entry) => entry.page.url),
+    ["/v2/guide/install/", "/v2/guide/requirements/"],
+  );
+
+  const old = ranked.find((entry) => entry.page.url === "/v1/guide/install/");
+  assert.ok(old?.reasons.some((reason) => reason.factor === "version" && reason.code === "version:v1" && reason.contribution < 0));
+  assert.ok(
+    old?.reasons.some(
+      (reason) =>
+        reason.factor === "trust" && reason.code === "duplicate:/v2/guide/install/" && reason.contribution < 0,
+    ),
+  );
+
+  const translation = ranked.find((entry) => entry.page.url === "/fa/guide/install/");
+  assert.ok(
+    translation?.reasons.some((reason) => reason.factor === "locale" && reason.code === "locale:fa" && reason.contribution < 0),
+  );
+  assert.ok(
+    translation?.reasons.some((reason) => reason.code === "duplicate:/v2/guide/install/" && reason.contribution < 0),
+  );
+  const canonicalIndex = ranked.findIndex((entry) => entry.page.url === "/v2/guide/install/");
+  const translationIndex = ranked.findIndex((entry) => entry.page.url === "/fa/guide/install/");
+  assert.ok(canonicalIndex >= 0 && translationIndex > canonicalIndex);
+});
+
+test("every selected item exposes reasons whose contributions add up to its score", async () => {
+  const runs = [
+    rankPages((await fixture("docs")).pages, "install", { focus: "/guide/install/" }),
+    rankPages((await fixture("docs")).pages, "configuration"),
+    rankPages((await fixture("versions")).pages, "install", { focus: "/v2/guide/install/", lang: "en" }),
+  ];
+
+  for (const ranked of runs) {
+    const selected = ranked.filter((entry) => entry.score > 0);
+    assert.ok(selected.length > 0);
+    for (const entry of selected) {
+      assert.ok(entry.reasons.length > 0, entry.page.url);
+      assert.equal(entry.score, entry.reasons.reduce((sum, reason) => sum + reason.contribution, 0), entry.page.url);
+      for (const reason of entry.reasons) {
+        assert.equal(typeof reason.factor, "string");
+        assert.equal(typeof reason.code, "string");
+        assert.ok(Number.isFinite(reason.contribution));
+      }
+    }
+  }
+});
+
+test("equivalent fixture input gives an identical ranking and identical reasons", async () => {
+  const site = await fixture("versions");
+  const options = { focus: "/v2/guide/install/", lang: "en" };
+  const project = (ranked: ReturnType<typeof rankPages>) =>
+    ranked.map((entry) => ({ url: entry.page.url, score: entry.score, reasons: entry.reasons }));
+
+  const forward = project(rankPages(site.pages, "install", options));
+  const reversed = project(rankPages([...site.pages].reverse(), "install", options));
+
+  assert.deepEqual(reversed, forward);
 });

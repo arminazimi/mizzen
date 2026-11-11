@@ -4,6 +4,20 @@ import type { SourcePos } from "../../contracts/source.ts";
 /** The id of the finding a failing executable example reports. */
 export const EXAMPLE_FAILED_ID = "example-failed";
 
+/** The id of the finding that says examples ran without an OS sandbox. */
+export const EXAMPLE_SANDBOX_ID = "example-sandbox";
+
+/**
+ * The protections the example runners enforce even when the host has no OS sandbox. They bound a run, but they are not
+ * isolation: a best-effort protection is a limit the runner applies, not a boundary the operating system enforces.
+ */
+export const EXAMPLE_BEST_EFFORT_PROTECTIONS: readonly string[] = [
+  "working folder",
+  "environment allow-list",
+  "timeout",
+  "output cap",
+];
+
 /** Options of {@link exampleFailed}. */
 export interface ExampleFailedOptions {
   /** The fence's span in its page's source, so the finding points at the example. */
@@ -78,6 +92,27 @@ export function firstDifference(expected: string, actual: string): FirstDifferen
   while (offset < shared && left[offset] === right[offset]) offset++;
   const start = Math.max(0, offset - CONTEXT_BEFORE);
   return { offset, expected: windowOf(left, start), actual: windowOf(right, start) };
+}
+
+/**
+ * Reports that examples are running without an OS sandbox on `platform`, so a build never silently presents
+ * best-effort limits as isolation.
+ *
+ * The message names what is still enforced and what is not, so a reader can judge the trust a passing example carries.
+ * The severity is `warning`: the build may still be right, but its example results are weaker than on a host that can
+ * confine writes. Deterministic: the same platform always gives the same finding, with no position and no fix.
+ */
+export function exampleSandboxUnavailable(platform: string): Diagnostic {
+  return {
+    id: EXAMPLE_SANDBOX_ID,
+    severity: "warning",
+    message:
+      `Examples run without an OS sandbox on ${platform}, so writes outside their working folder, reads of the host, ` +
+      `and the network are not confined. Best-effort only: ${EXAMPLE_BEST_EFFORT_PROTECTIONS.join(", ")}.`,
+    help:
+      "Run the build on macOS with sandbox-exec or Linux with bwrap to confine writes, or accept that examples run with " +
+      "the engine's own permissions.",
+  };
 }
 
 /**

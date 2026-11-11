@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { Nodes } from "mdast";
@@ -46,9 +47,17 @@ import { exportedSymbols, type ExportedSymbol } from "./symbols.ts";
  * TypeScript file that N08 cannot scan is treated as exporting nothing; the scan's own diagnostic is
  * N08's to report.
  *
- * `compareClaims` reads files under `root` and returns diagnostics only; it writes nothing and keeps no
- * state between calls. Diagnostics come in the order of `pages`, then source line and column, then check
- * ID and message, so two runs over the same arguments agree.
+ * ## Evidence identity
+ *
+ * A finding only means something for the exact content and source bytes it was computed from. Every
+ * comparison therefore also returns a {@link DriftIdentity}: a hash of the page's Markdown, body line,
+ * and tolerance, plus a hash of each cited file (or a marker saying it was missing or outside the root).
+ * A stored report can compare that identity with the current files and refuse evidence that no longer
+ * matches instead of reusing it; {@link driftContentOf} gives the content half without reading anything.
+ *
+ * `compareClaims` and `comparePages` read files under `root` and write nothing; they keep no state
+ * between calls. Diagnostics come in the order of `pages`, then source line and column, then check ID
+ * and message, so two runs over the same arguments agree.
  */
 
 /** The default number of lines a cited line may miss a declaration by. */
@@ -107,36 +116,108 @@ function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/** SHA-256 of the text, as 64 lowercase hex characters. */
+function hashOf(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * The identity of the page content and cited sources a comparison was computed from. Two comparisons
+ * with the same identity read the same bytes and used the same tolerance, so one cannot replace the
+ * other's evidence by accident.
+ */
+export interface DriftIdentity {
+  /** SHA-256 over the page's Markdown, its body line, and the tolerance used. */
+  readonly content: string;
+  /**
+   * Per cited path: the SHA-256 of the file's bytes when it was read, or `"missing"` when it could not
+   * be read, or `"outside"` when it resolves outside the root. Keys are repository-relative paths in
+   * code-point order.
+   */
+  readonly sources: Readonly<Record<string, string>>;
+}
+
+/** One page's comparison: what it cites, what the files answered, and the identity behind both. */
+export interface ClaimComparison {
+  /** The page's source file, relative to the repository root. */
+  readonly file: string;
+  /** Every code reference the page makes, in document order. */
+  readonly references: readonly CodeRef[];
+  /** The findings, sorted by line, column, check ID, and message. */
+  readonly diagnostics: readonly Diagnostic[];
+  /** The content and source identities the findings were computed from. */
+  readonly identity: DriftIdentity;
+}
+
+/** The content half of a page's drift identity: its Markdown, body line, and the tolerance used. */
+export function driftContentOf(page: Page, tolerance?: number): string {
+  return hashOf(`mizzen-drift-content\u0000${normalizeTolerance(tolerance)}\u0000${page.source.line}\u0000${page.markdown}`);
+}
+
+/** The sources of one page, keyed and ordered by code point. */
+function sourcesOf(paths: Map<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const path of [...paths.keys()].sort(byCodePoint)) out[path] = paths.get(path) as string;
+  return out;
+}
+
+/**
+ * Every page's comparison, in input order. Reads only; `root` is the site root the reference paths
+ * resolve from. The identity a page returns covers the bytes its findings were judged against, so a
+ * caller can store the findings and later tell whether they still hold.
+ */
+export async function comparePages(
+  pages: readonly Page[],
+  options: CompareOptions,
+): Promise<ClaimComparison[]> {
+  const root = resolve(options.root);
+  const rootReal = await realpathOr(root);
+  const tolerance = normalizeTolerance(options.tolerance);
+  const targets = new Map<string, Target>();
+  const comparisons: ClaimComparison[] = [];
+
+  for (const page of pages) {
+    const references = await codeRefsOf(page);
+    const sources = new Map<string, string>();
+    for (const ref of references) {
+      if (sources.has(ref.path)) continue;
+      const target = await targetOf(ref.path, root, rootReal, targets);
+      sources.set(ref.path, target.kind === "text" ? hashOf(target.text) : target.kind);
+    }
+
+    const diagnostics: Diagnostic[] = [];
+    if (references.length > 0) {
+      const paragraphs = paragraphsOf(await parseMarkdown(page.markdown, page.source.line));
+      for (const ref of references) {
+        const target = await targetOf(ref.path, root, rootReal, targets);
+        const found = judge(ref, target, paragraphFor(ref.pos, paragraphs), tolerance);
+        if (found !== null) diagnostics.push(found);
+      }
+      diagnostics.sort(compareDiagnostics);
+    }
+
+    comparisons.push({
+      file: page.source.file,
+      references,
+      diagnostics,
+      identity: { content: driftContentOf(page, tolerance), sources: sourcesOf(sources) },
+    });
+  }
+
+  return comparisons;
+}
+
 /**
  * Every claim and every miss in the pages, in the input page order, then source line and column, then
- * check ID and message. Reads only; `root` is the site root the reference paths resolve from.
+ * check ID and message. Reads only; `root` is the site root the reference paths resolve from. Callers
+ * that need to store the findings against the bytes they came from use {@link comparePages} instead.
  */
 export async function compareClaims(
   pages: readonly Page[],
   options: CompareOptions,
 ): Promise<Diagnostic[]> {
-  const root = resolve(options.root);
-  const rootReal = await realpathOr(root);
-  const tolerance = normalizeTolerance(options.tolerance);
-  const targets = new Map<string, Target>();
-  const diagnostics: Diagnostic[] = [];
-
-  for (const page of pages) {
-    const refs = await codeRefsOf(page);
-    if (refs.length === 0) continue;
-
-    const paragraphs = paragraphsOf(await parseMarkdown(page.markdown, page.source.line));
-    const pageDiagnostics: Diagnostic[] = [];
-    for (const ref of refs) {
-      const target = await targetOf(ref.path, root, rootReal, targets);
-      const found = judge(ref, target, paragraphFor(ref.pos, paragraphs), tolerance);
-      if (found !== null) pageDiagnostics.push(found);
-    }
-    pageDiagnostics.sort(compareDiagnostics);
-    diagnostics.push(...pageDiagnostics);
-  }
-
-  return diagnostics;
+  const comparisons = await comparePages(pages, options);
+  return comparisons.flatMap((comparison) => comparison.diagnostics);
 }
 
 /** Reads one target, once per path, refusing anything outside the root. */

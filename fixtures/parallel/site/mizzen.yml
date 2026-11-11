@@ -1,0 +1,6 @@
+title: Parallel fixture
+description: A small site whose theme records how much of the render pool runs at once.
+defaults:
+  - path: ""
+    values:
+      layout: doc

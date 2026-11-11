@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -81,6 +82,29 @@ function bodyOf(file: OutputFile): Record<string, unknown> {
   return JSON.parse(String(file.contents)) as Record<string, unknown>;
 }
 
+/** The report's page entries, keyed by URL. */
+function pagesOf(file: OutputFile): Record<string, Record<string, unknown>> {
+  return bodyOf(file).pages as Record<string, Record<string, unknown>>;
+}
+
+function hash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/** The page key the report is expected to write for a URL and source file. */
+function pageKey(url: string, source = POS.file): string {
+  return hash(`${url}\0${source}`);
+}
+
+/** The build identifier the report is expected to write for these pages. */
+function buildId(ordered: readonly Page[]): string {
+  return hash(
+    ordered
+      .map((entry) => `${pageKey(entry.url, entry.source.file)}\0${hash(entry.markdown)}\0${hash(entry.html)}\n`)
+      .join(""),
+  );
+}
+
 test("the output is named after its file", () => {
   assert.equal(trust.name, "trust");
 });
@@ -93,8 +117,12 @@ test("a clean page with fresh examples, no drift, and a recent review is verifie
   });
 
   const file = await reportOf(model, { asOf: "2026-10-10T00:00:00.000Z" });
-  assert.deepEqual(bodyOf(file), {
+  assert.deepEqual(pagesOf(file), {
     "/guide/install/": {
+      key: pageKey("/guide/install/"),
+      url: "/guide/install/",
+      source: POS.file,
+      evidence: { examples: "measured", drift: "measured", review: "measured" },
       level: "verified",
       reasons: [
         { code: "examples.passed", message: "No example fails; 2 of 2 pass." },
@@ -114,7 +142,7 @@ test("a failing example makes the page at-risk whatever the other signals say", 
     reviewers: { "/guide/install/": { date: "2026-10-01T00:00:00.000Z", author: "Ada" } },
   });
 
-  const entry = bodyOf(await reportOf(model, { asOf: "2026-10-02T00:00:00.000Z" }))["/guide/install/"] as Record<string, unknown>;
+  const entry = pagesOf(await reportOf(model, { asOf: "2026-10-02T00:00:00.000Z" }))["/guide/install/"]!;
   assert.equal(entry.level, "at-risk");
   assert.deepEqual((entry.reasons as Array<Record<string, unknown>>)[0], {
     code: "examples.failed",
@@ -129,7 +157,7 @@ test("a drift finding makes the page at-risk", async () => {
     reviewers: { "/guide/install/": { date: "2026-10-01T00:00:00.000Z", author: "Ada" } },
   });
 
-  const entry = bodyOf(await reportOf(model, { asOf: "2026-10-02T00:00:00.000Z" }))["/guide/install/"] as Record<string, unknown>;
+  const entry = pagesOf(await reportOf(model, { asOf: "2026-10-02T00:00:00.000Z" }))["/guide/install/"]!;
   assert.equal(entry.level, "at-risk");
   assert.deepEqual((entry.reasons as Array<Record<string, unknown>>)[1], {
     code: "drift.findings",
@@ -144,7 +172,7 @@ test("a review older than 180 days makes the page review-due", async () => {
     reviewers: { "/guide/install/": { date: "2026-01-01T00:00:00.000Z", author: "Ada" } },
   });
 
-  const entry = bodyOf(await reportOf(model, { asOf: "2026-07-01T00:00:00.000Z" }))["/guide/install/"] as Record<string, unknown>;
+  const entry = pagesOf(await reportOf(model, { asOf: "2026-07-01T00:00:00.000Z" }))["/guide/install/"]!;
   assert.equal(entry.level, "review-due");
   assert.deepEqual((entry.reasons as Array<Record<string, unknown>>)[2], {
     code: "review.overdue",
@@ -156,8 +184,12 @@ test("unknown inputs write unknown reasons and never claim verified", async () =
   const markdown = ["```ts test", 'console.log("hi");', "```", ""].join("\n");
   const file = await reportOf(site([page("/guide/run/", markdown)]));
 
-  assert.deepEqual(bodyOf(file), {
+  assert.deepEqual(pagesOf(file), {
     "/guide/run/": {
+      key: pageKey("/guide/run/"),
+      url: "/guide/run/",
+      source: POS.file,
+      evidence: { examples: "unknown", drift: "missing", review: "missing" },
       level: "at-risk",
       reasons: [
         {
@@ -177,14 +209,114 @@ test("unknown inputs write unknown reasons and never claim verified", async () =
 
 test("a page that declares no examples keeps the neutral examples.none reason", async () => {
   const file = await reportOf(site([page("/guide/plain/")]));
-  const entry = bodyOf(file)["/guide/plain/"] as Record<string, unknown>;
+  const entry = pagesOf(file)["/guide/plain/"]!;
+  assert.deepEqual((entry.evidence as Record<string, unknown>).examples, "none");
   assert.deepEqual((entry.reasons as Array<Record<string, unknown>>)[0], {
     code: "examples.none",
     message: "The page declares no runnable examples.",
   });
 });
 
-test("URLs are sorted and the bytes are fixed: key order, two spaces, LF", async () => {
+test("every doc page is present, with a stable key, url, and source; app pages are left out", async () => {
+  const app: Page = { ...page("/dashboard/", "", "dashboard/index.html"), kind: "app" };
+  const file = await reportOf(site([page("/b/"), app, page("/a/", "# A\n", "a.md")]));
+  const pages = pagesOf(file);
+
+  assert.deepEqual(Object.keys(pages), ["/a/", "/b/"]);
+  assert.equal(pages["/a/"]!.key, pageKey("/a/", "a.md"));
+  assert.equal(pages["/a/"]!.url, "/a/");
+  assert.equal(pages["/a/"]!.source, "a.md");
+  assert.equal(pages["/b/"]!.key, pageKey("/b/"));
+  assert.notEqual(pages["/a/"]!.key, pages["/b/"]!.key);
+  assert.equal((bodyOf(file).build as Record<string, unknown>).pages, 2);
+});
+
+test("a page key is stable when only the evidence changes", async () => {
+  const model = site([page("/guide/install/")], { drift: { "/guide/install/": 0 } });
+  const first = pagesOf(await reportOf(model));
+  const second = pagesOf(
+    await reportOf(
+      site([page("/guide/install/")], {
+        examples: { "/guide/install/": { passed: 2, failed: 0 } },
+        reviewers: { "/guide/install/": { date: "2026-10-01T00:00:00.000Z", author: "Ada" } },
+      }),
+      { asOf: "2026-10-02T00:00:00.000Z" },
+    ),
+  );
+
+  assert.equal(first["/guide/install/"]!.key, second["/guide/install/"]!.key);
+});
+
+test("the build identifier is identical for equivalent builds and changes with page content", async () => {
+  const first = bodyOf(await reportOf(site([page("/b/"), page("/a/")])));
+  const reordered = bodyOf(await reportOf(site([page("/a/"), page("/b/")])));
+  const changed = bodyOf(await reportOf(site([page("/b/"), page("/a/", "# Different\n")])));
+
+  assert.equal((first.build as Record<string, unknown>).algorithm, "sha256");
+  assert.equal((first.build as Record<string, unknown>).id, buildId([page("/a/"), page("/b/")]));
+  assert.equal((first.build as Record<string, unknown>).id, (reordered.build as Record<string, unknown>).id);
+  assert.notEqual((first.build as Record<string, unknown>).id, (changed.build as Record<string, unknown>).id);
+});
+
+test("invalid drift and reviewer data are unknown, not missing, even without a root", async () => {
+  const model = site([page("/guide/install/")], {
+    drift: { "/guide/install/": "many" },
+    reviewers: { "/guide/install/": { date: "not-a-date", author: "Ada" } },
+  });
+
+  const entry = pagesOf(await reportOf(model))["/guide/install/"]!;
+  assert.deepEqual(entry.evidence, { examples: "none", drift: "unknown", review: "unknown" });
+  assert.deepEqual(
+    (entry.reasons as Array<Record<string, unknown>>).map((reason) => reason.code),
+    ["examples.none", "drift.unknown", "review.unknown"],
+  );
+  assert.equal(entry.level, "at-risk");
+});
+
+test("invalid data still falls back to a healthy git answer when a root is available", { skip: !hasGit() }, async () => {
+  const root = repository([
+    { path: "guide/install.md", date: "2026-10-01T00:00:00Z", author: "Ada Lovelace", text: "# Install\n" },
+  ]);
+  try {
+    const model = site([page("/guide/install/")], {
+      examples: { "/guide/install/": { passed: 2, failed: 0 } },
+      drift: { "/guide/install/": "many" },
+      reviewers: { "/guide/install/": { date: "not-a-date", author: "Ada" } },
+    });
+    const entry = pagesOf(await reportOf(model, { root, asOf: "2026-10-10T00:00:00.000Z" }))[
+      "/guide/install/"
+    ]!;
+
+    assert.deepEqual(entry.evidence, { examples: "measured", drift: "measured", review: "measured" });
+    assert.equal(entry.lastReviewer, "Ada Lovelace");
+    assert.equal(entry.level, "verified");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("evidence distinguishes a missing source from an unknown answer", async () => {
+  const unknown = trustEntryOf({
+    driftState: "unknown",
+    review: "unknown",
+    reviewState: "unknown",
+  });
+  assert.deepEqual(unknown.evidence, { examples: "none", drift: "unknown", review: "unknown" });
+
+  // Without a root neither signal has a source; with one, git is asked but a plain folder has no answer.
+  const noRoot = pagesOf(await reportOf(site([page("/guide/install/")])))["/guide/install/"]!;
+  assert.deepEqual(noRoot.evidence, { examples: "none", drift: "missing", review: "missing" });
+
+  const root = mkdtempSync(join(tmpdir(), "trust-root-"));
+  try {
+    const withRoot = pagesOf(await reportOf(site([page("/guide/install/")]), { root }))["/guide/install/"]!;
+    assert.deepEqual(withRoot.evidence, { examples: "none", drift: "measured", review: "unknown" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("URLs are sorted and the bytes are fixed: header, key order, two spaces, LF", async () => {
   const model = site([page("/b/"), page("/a/")], {
     drift: { "/a/": 0, "/b/": 0 },
     reviewers: {
@@ -197,41 +329,56 @@ test("URLs are sorted and the bytes are fixed: key order, two spaces, LF", async
   const second = await reportOf(model, { asOf: "2026-10-02T00:00:00.000Z" });
   assert.equal(first.contents, second.contents, "two runs write the same bytes");
 
-  const entry = (url: string): string[] => [
-    `  ${JSON.stringify(url)}: {`,
-    '    "level": "verified",',
-    '    "reasons": [',
-    "      {",
-    '        "code": "examples.none",',
-    '        "message": "The page declares no runnable examples."',
-    "      },",
-    "      {",
-    '        "code": "drift.clean",',
-    '        "message": "No drift findings."',
-    "      },",
-    "      {",
-    '        "code": "review.recent",',
-    '        "message": "Last reviewed 1 day ago, within the 180-day limit."',
-    "      }",
-    "    ],",
-    '    "lastReviewer": "Ada Lovelace"',
-    "  }",
-  ];
-
-  assert.equal(
-    String(first.contents),
-    ["{", `${entry("/a/").join("\n")},`, entry("/b/").join("\n"), "}", ""].join("\n"),
+  const text = String(first.contents);
+  const id = buildId([page("/a/"), page("/b/")]);
+  assert.ok(
+    text.startsWith(
+      `{\n  "version": 1,\n  "build": {\n    "algorithm": "sha256",\n    "id": ${JSON.stringify(id)},\n    "pages": 2\n  },\n  "pages": {\n`,
+    ),
+    "the header comes first, in a fixed key order",
   );
+  assert.ok(text.indexOf('"/a/"') < text.indexOf('"/b/"'), "pages are sorted by URL");
+  assert.ok(
+    text.indexOf('"key"') <
+      text.indexOf('"url"') &&
+      text.indexOf('"url"') < text.indexOf('"source"') &&
+      text.indexOf('"source"') < text.indexOf('"evidence"') &&
+      text.indexOf('"evidence"') < text.indexOf('"level"') &&
+      text.indexOf('"level"') < text.indexOf('"reasons"') &&
+      text.indexOf('"reasons"') < text.indexOf('"lastReviewer"'),
+    "each entry keeps its key order",
+  );
+  assert.ok(text.endsWith("}\n"), "one trailing LF");
+  assert.equal(validate(bodyOf(first)), true, JSON.stringify(validate.errors));
 });
 
-test("the schema rejects an entry with no reasons or an unknown code", () => {
-  assert.equal(validate({ "/a/": { level: "verified", reasons: [] } }), false);
+test("the schema requires the build identity and rejects an entry with no reasons or an unknown code", () => {
+  const base = {
+    version: 1,
+    build: { algorithm: "sha256", id: "a".repeat(64), pages: 1 },
+    pages: {
+      "/a/": {
+        key: "a".repeat(64),
+        url: "/a/",
+        source: "a.md",
+        evidence: { examples: "none", drift: "measured", review: "measured" },
+        level: "verified",
+        reasons: [
+          { code: "examples.none", message: "none" },
+          { code: "drift.clean", message: "clean" },
+          { code: "review.recent", message: "recent" },
+        ],
+      },
+    },
+  };
+  assert.equal(validate(base), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...base, version: 2 }), false);
+  assert.equal(validate({ ...base, build: { algorithm: "sha256", pages: 1 } }), false);
+  assert.equal(validate({ ...base, pages: { "/a/": { ...base.pages["/a/"], reasons: [] } } }), false);
   assert.equal(
     validate({
-      "/a/": {
-        level: "verified",
-        reasons: [{ code: "made.up", message: "no" }],
-      },
+      ...base,
+      pages: { "/a/": { ...base.pages["/a/"], reasons: [{ code: "made.up", message: "no" }] } },
     }),
     false,
   );
@@ -246,7 +393,7 @@ test("root makes drift and review real: a missing citation is a finding and git 
       examples: { "/guide/install/": { passed: 2, failed: 0 } },
     });
     const file = await reportOf(model, { root, asOf: "2026-10-10T00:00:00.000Z" });
-    const entry = bodyOf(file)["/guide/install/"] as Record<string, unknown>;
+    const entry = pagesOf(file)["/guide/install/"]!;
     assert.equal(entry.level, "verified");
     assert.equal(entry.lastReviewer, "Ada Lovelace");
     assert.deepEqual((entry.reasons as Array<Record<string, unknown>>)[2], {
@@ -266,7 +413,7 @@ test("root compares claims: a reference to a missing file is a drift finding", a
       examples: { "/guide/setup/": { passed: 1, failed: 0 } },
     });
     const file = await reportOf(model, { root });
-    const entry = bodyOf(file)["/guide/setup/"] as Record<string, unknown>;
+    const entry = pagesOf(file)["/guide/setup/"]!;
     assert.equal(entry.level, "at-risk");
     assert.deepEqual((entry.reasons as Array<Record<string, unknown>>)[1], {
       code: "drift.findings",
@@ -289,6 +436,7 @@ test("the pure entry builder adds examples.unknown and at-risk for an unmeasured
   );
   assert.equal(entry.level, "at-risk");
   assert.deepEqual(entry.reasons.map((reason) => reason.code), ["examples.unknown", "drift.clean", "review.recent"]);
+  assert.deepEqual(entry.evidence, { examples: "unknown", drift: "measured", review: "measured" });
   assert.equal(entry.lastReviewer, "Ada");
 });
 
@@ -379,9 +527,13 @@ test("the output runs by default and outputs: { trust: false } switches it off",
     process.env.SOURCE_DATE_EPOCH = "1767225600";
     const built = await build({ root: onRoot, out: on.out, themeRoot: THEME, defaultLayout: "doc" });
     assert.ok(built.files.includes("trust.json"), "the output is on by default");
-    const body = JSON.parse(readFileSync(join(on.out, "trust.json"), "utf8")) as Record<string, Record<string, unknown>>;
-    assert.deepEqual(Object.keys(body), ["/a/"]);
-    assert.equal(body["/a/"]?.level, "review-due");
+    const body = JSON.parse(readFileSync(join(on.out, "trust.json"), "utf8")) as {
+      build: Record<string, unknown>;
+      pages: Record<string, Record<string, unknown>>;
+    };
+    assert.deepEqual(Object.keys(body.pages), ["/a/"]);
+    assert.equal(body.pages["/a/"]?.level, "review-due");
+    assert.equal(typeof body.build.id, "string");
     assert.equal(validate(body), true, JSON.stringify(validate.errors));
 
     const switched = await build({ root: offRoot, out: off.out, themeRoot: THEME, defaultLayout: "doc" });
@@ -395,5 +547,35 @@ test("the output runs by default and outputs: { trust: false } switches it off",
     rmSync(offRoot, { recursive: true, force: true });
     rmSync(on.parent, { recursive: true, force: true });
     rmSync(off.parent, { recursive: true, force: true });
+  }
+});
+
+test("build.id follows the final layout HTML and stays stable for equivalent builds", async () => {
+  const root = tree({ "a.md": "---\ntitle: A\n---\n# A\n" });
+  const first = outFolder();
+  const second = outFolder();
+  const otherLayout = outFolder();
+  const previousRoot = process.env.MIZZEN_SITE_ROOT;
+  try {
+    process.env.MIZZEN_SITE_ROOT = root;
+    const doc = await build({ root, out: first.out, themeRoot: THEME, defaultLayout: "doc" });
+    await build({ root, out: second.out, themeRoot: THEME, defaultLayout: "doc" });
+    const home = await build({ root, out: otherLayout.out, themeRoot: THEME, defaultLayout: "home" });
+
+    assert.ok(doc.files.includes("trust.json"));
+    assert.ok(home.files.includes("trust.json"));
+    const docHtml = readFileSync(join(first.out, "a", "index.html"), "utf8");
+    const homeHtml = readFileSync(join(otherLayout.out, "a", "index.html"), "utf8");
+    assert.notEqual(docHtml, homeHtml, "the layouts write different documents");
+
+    const idOf = (dir: string) =>
+      (JSON.parse(readFileSync(join(dir, "trust.json"), "utf8")) as { build: { id: string } }).build.id;
+    assert.equal(idOf(first.out), idOf(second.out), "equivalent builds share one id");
+    assert.notEqual(idOf(first.out), idOf(otherLayout.out), "a different layout changes the id");
+  } finally {
+    if (previousRoot === undefined) delete process.env.MIZZEN_SITE_ROOT;
+    else process.env.MIZZEN_SITE_ROOT = previousRoot;
+    rmSync(root, { recursive: true, force: true });
+    for (const folder of [first, second, otherLayout]) rmSync(folder.parent, { recursive: true, force: true });
   }
 });

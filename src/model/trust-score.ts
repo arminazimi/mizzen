@@ -24,9 +24,20 @@
  * contributes one reason, so a maintainer sees both what is wrong and what is fine. Reasons always come
  * in the same order: examples, then drift, then review.
  *
+ * Each signal also returns a machine-readable {@link TrustFactor}. A factor carries the same stable code, one
+ * state, and the measured value, and no sentence, so a consumer can branch on data while the wording stays in
+ * the reasons. Reviewer coverage is reported separately as {@link TrustScore.reviewCoverage}, so a page with no
+ * recorded review is not mistaken for one that was merely reviewed long ago.
+ *
+ * Conflicting evidence never resolves towards a healthy page. Example counts that cannot all hold, a supplied
+ * review age that the coverage contradicts, and a review dated after the measured instant make the page
+ * `at-risk` or `review-due`, never `verified`.
+ *
  * Limits: the inputs are counts and an age, not page positions, so reasons carry no source position. The
  * drift and example checks report their own findings where they occur.
  */
+
+import type { ReviewCoverage } from "./reviewers.ts";
 
 /** The default number of days a review stays fresh: 180. */
 export const DEFAULT_REVIEW_DUE_DAYS = 180;
@@ -58,10 +69,17 @@ export interface TrustScoreInput {
    */
   readonly drift?: number;
   /**
-   * Whole days since the page was last reviewed, or `"unknown"` when that cannot be told. Omitted is
-   * treated as `"unknown"`; a negative or non-finite number is treated as zero. Defaults to unknown.
+   * Whole days since the page was last reviewed, or `"unknown"` when that cannot be told. Omitted or a
+   * non-finite number is treated as `"unknown"`. A negative age is a review dated after the measured instant,
+   * which cannot be confirmed, so it is reported as a conflict and is `review-due`.
    */
   readonly reviewAgeDays?: number | "unknown";
+  /**
+   * What git knows about the page's review, when the caller asked. Absent is derived from the age: a known age
+   * means a `recorded` review, an unknown age leaves the coverage `unknown`. `untracked` or `unavailable`
+   * together with a known age is conflicting evidence, and the age cannot make the page `verified`.
+   */
+  readonly reviewCoverage?: ReviewCoverage;
 }
 
 /** The settings a maintainer may change. Each has a documented default. */
@@ -85,12 +103,23 @@ export type TrustReasonCode =
   | "examples.none"
   | "examples.passed"
   | "examples.failed"
+  | "examples.conflict"
   | "drift.clean"
   | "drift.findings"
   | "drift.unknown"
   | "review.recent"
   | "review.overdue"
-  | "review.unknown";
+  | "review.unknown"
+  | "review.conflict";
+
+/** The signal a factor measures, in the fixed reason order. */
+export type TrustSignal = "examples" | "drift" | "review";
+
+/**
+ * What a signal's evidence says: `positive` supports trust, `neutral` has nothing to judge, `missing` could not
+ * be checked, `negative` shows a problem, and `conflict` contradicts itself.
+ */
+export type TrustFactorState = "positive" | "neutral" | "negative" | "missing" | "conflict";
 
 /** One readable piece of evidence behind a level. */
 export interface TrustReason {
@@ -100,12 +129,42 @@ export interface TrustReason {
   readonly message: string;
 }
 
-/** A page's level and every reason behind it, in a fixed order. */
+/**
+ * One signal as data, with no sentence. Consumers branch on `code` or `state` instead of parsing a message, so
+ * the scoring policy stays independent of any presentation.
+ */
+export interface TrustFactor {
+  /** Which signal this is; factors come in the fixed order examples, drift, review. */
+  readonly signal: TrustSignal;
+  /** The same stable code as the matching reason. */
+  readonly code: TrustReasonCode;
+  /** Whether the evidence is good, absent, bad, or contradictory. */
+  readonly state: TrustFactorState;
+  /**
+   * The measured value, or `"unknown"` when the signal was not measured: failing examples for examples, findings
+   * for drift, and whole days for review.
+   */
+  readonly value: number | "unknown";
+}
+
+/** A page's level, every reason behind it, and the same signals as data, in a fixed order. */
 export interface TrustScore {
   /** The worst level the reasons support. */
   readonly level: TrustLevel;
   /** Exactly one reason for examples, one for drift, and one for review, in that order. */
   readonly reasons: readonly TrustReason[];
+  /** One factor per reason, in the same fixed order, with no presentation. */
+  readonly factors: readonly TrustFactor[];
+  /** What is known about the reviewer: `recorded`, `untracked`, `unavailable`, or `unknown` when not looked up. */
+  readonly reviewCoverage: ReviewCoverage | "unknown";
+}
+
+/** One signal's level, reason, and factor, so the three views are decided once. */
+interface SignalVerdict {
+  readonly level: TrustLevel;
+  readonly state: TrustFactorState;
+  readonly value: number | "unknown";
+  readonly reason: TrustReason;
 }
 
 /** A count as a whole, non-negative number; a negative or non-finite one is treated as zero. */
@@ -113,11 +172,6 @@ function countOf(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return 0;
   const count = Math.trunc(value);
   return count < 0 ? 0 : count;
-}
-
-/** A whole, non-negative day count; a negative or non-finite one is treated as zero. */
-function daysOf(value: number): number {
-  return countOf(value);
 }
 
 /** An English plural suffix for a count. */
@@ -137,37 +191,54 @@ export function reviewDueDaysOf(options: TrustScoreOptions = {}): number {
 }
 
 /** The example reason: a failure is at-risk, some examples passing is good, none declared is neutral. */
-function exampleReason(examples: TrustExamples | undefined): {
-  readonly level: TrustLevel;
-  readonly reason: TrustReason;
-} {
+function exampleVerdict(examples: TrustExamples | undefined): SignalVerdict {
   const total = countOf(examples?.total);
   const passed = countOf(examples?.passed);
   const failed = countOf(examples?.failed);
 
+  // Counts that cannot all hold cannot confirm anything: neither the passes nor the failures are trusted.
+  if (examples !== undefined && passed + failed > total) {
+    return {
+      level: "at-risk",
+      state: "conflict",
+      value: failed,
+      reason: {
+        code: "examples.conflict",
+        message: `The example counts disagree: ${passed} pass and ${failed} fail of ${total}, so the page cannot be verified.`,
+      },
+    };
+  }
   if (failed > 0) {
     return {
       level: "at-risk",
+      state: "negative",
+      value: failed,
       reason: { code: "examples.failed", message: `${failed} of ${total} example${plural(total)} fail.` },
     };
   }
   if (total > 0) {
     return {
       level: "verified",
+      state: "positive",
+      value: 0,
       reason: { code: "examples.passed", message: `No example fails; ${passed} of ${total} pass.` },
     };
   }
   return {
     level: "verified",
+    state: "neutral",
+    value: "unknown",
     reason: { code: "examples.none", message: "The page declares no runnable examples." },
   };
 }
 
 /** The drift reason: findings are at-risk, zero is clean, and an absent count is unverified. */
-function driftReason(drift: number | undefined): { readonly level: TrustLevel; readonly reason: TrustReason } {
+function driftVerdict(drift: number | undefined): SignalVerdict {
   if (drift === undefined || !Number.isFinite(drift) || drift < 0) {
     return {
       level: "at-risk",
+      state: "missing",
+      value: "unknown",
       reason: {
         code: "drift.unknown",
         message: "Drift was not checked, so the page cannot be verified.",
@@ -178,33 +249,77 @@ function driftReason(drift: number | undefined): { readonly level: TrustLevel; r
   if (findings > 0) {
     return {
       level: "at-risk",
+      state: "negative",
+      value: findings,
       reason: {
         code: "drift.findings",
         message: `${findings} drift finding${plural(findings)}: the page no longer matches the code it cites.`,
       },
     };
   }
-  return { level: "verified", reason: { code: "drift.clean", message: "No drift findings." } };
+  return {
+    level: "verified",
+    state: "positive",
+    value: 0,
+    reason: { code: "drift.clean", message: "No drift findings." },
+  };
 }
 
-/** The review reason: a recent review is good, an old or unknown one needs attention. */
-function reviewReason(
+/** True when the caller supplied an age that can be measured, before truncation. */
+function ageKnown(reviewAgeDays: number | "unknown" | undefined): reviewAgeDays is number {
+  return reviewAgeDays !== undefined && reviewAgeDays !== "unknown" && Number.isFinite(reviewAgeDays);
+}
+
+/**
+ * The review reason: a recent review is good, an old or unknown one needs attention, and evidence that
+ * contradicts itself is never treated as fresh.
+ */
+function reviewVerdict(
   reviewAgeDays: number | "unknown" | undefined,
   reviewDueDays: number,
-): { readonly level: TrustLevel; readonly reason: TrustReason } {
-  if (reviewAgeDays === undefined || reviewAgeDays === "unknown" || !Number.isFinite(reviewAgeDays)) {
+  coverage: ReviewCoverage | undefined,
+): SignalVerdict {
+  if (!ageKnown(reviewAgeDays)) {
     return {
       level: "review-due",
+      state: "missing",
+      value: "unknown",
       reason: {
         code: "review.unknown",
         message: "The review age is unknown, so the page cannot be confirmed as reviewed.",
       },
     };
   }
-  const age = daysOf(reviewAgeDays);
+  const age = Math.trunc(reviewAgeDays);
+
+  // A supplied age that git's coverage denies, or a review dated after the measured instant, cannot be confirmed.
+  if (coverage === "untracked" || coverage === "unavailable") {
+    return {
+      level: "review-due",
+      state: "conflict",
+      value: age,
+      reason: {
+        code: "review.conflict",
+        message: `No review is recorded (${coverage}), so the supplied review age cannot be confirmed.`,
+      },
+    };
+  }
+  if (reviewAgeDays < 0) {
+    return {
+      level: "review-due",
+      state: "conflict",
+      value: age,
+      reason: {
+        code: "review.conflict",
+        message: "The review date is in the future, so the page cannot be confirmed as reviewed.",
+      },
+    };
+  }
   if (age > reviewDueDays) {
     return {
       level: "review-due",
+      state: "negative",
+      value: age,
       reason: {
         code: "review.overdue",
         message: `Last reviewed ${age} day${plural(age)} ago, past the ${reviewDueDays}-day limit.`,
@@ -213,11 +328,23 @@ function reviewReason(
   }
   return {
     level: "verified",
+    state: "positive",
+    value: age,
     reason: {
       code: "review.recent",
       message: `Last reviewed ${age} day${plural(age)} ago, within the ${reviewDueDays}-day limit.`,
     },
   };
+}
+
+/**
+ * The coverage a page reports: the caller's answer when it gave one, otherwise `recorded` for a known age and
+ * `unknown` without one. An unrecognized value at run time is ignored rather than trusted.
+ */
+function coverageOf(input: TrustScoreInput): ReviewCoverage | "unknown" {
+  const given = input.reviewCoverage;
+  if (given === "recorded" || given === "untracked" || given === "unavailable") return given;
+  return ageKnown(input.reviewAgeDays) ? "recorded" : "unknown";
 }
 
 /** The worse of two levels, with `at-risk` worst and `verified` best. */
@@ -226,23 +353,31 @@ function worse(a: TrustLevel, b: TrustLevel): TrustLevel {
   return rank[a] >= rank[b] ? a : b;
 }
 
+/** One factor built from its signal and verdict, so the factor order cannot drift from the reason order. */
+function factorOf(signal: TrustSignal, verdict: SignalVerdict): TrustFactor {
+  return { signal, code: verdict.reason.code, state: verdict.state, value: verdict.value };
+}
+
 /**
- * Combines example results, drift findings, and review age into one trust level plus the reasons behind
- * it. The rules and their defaults are in the module comment; the review threshold is overridable with
- * `{ thresholds: { reviewDueDays } }`, and no option can let a failing example or a drift finding pass.
+ * Combines example results, drift findings, and review age into one trust level plus the reasons and
+ * machine-readable factors behind it. The rules and their defaults are in the module comment; the review
+ * threshold is overridable with `{ thresholds: { reviewDueDays } }`, and no option can let a failing example, a
+ * drift finding, or conflicting evidence pass.
  *
  * The result depends only on the argument: no clock, filesystem, network, or environment is read, and
- * reasons come in the fixed order examples, drift, review. A page with one failing example is
+ * reasons and factors come in the fixed order examples, drift, review. A page with one failing example is
  * `at-risk` in every case.
  */
 export function trustScore(input: TrustScoreInput, options: TrustScoreOptions = {}): TrustScore {
   const reviewDueDays = reviewDueDaysOf(options);
-  const examples = exampleReason(input.examples);
-  const drift = driftReason(input.drift);
-  const review = reviewReason(input.reviewAgeDays, reviewDueDays);
+  const examples = exampleVerdict(input.examples);
+  const drift = driftVerdict(input.drift);
+  const review = reviewVerdict(input.reviewAgeDays, reviewDueDays, input.reviewCoverage);
 
   return {
     level: worse(worse(examples.level, drift.level), review.level),
     reasons: [examples.reason, drift.reason, review.reason],
+    factors: [factorOf("examples", examples), factorOf("drift", drift), factorOf("review", review)],
+    reviewCoverage: coverageOf(input),
   };
 }

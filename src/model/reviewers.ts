@@ -71,10 +71,10 @@ function canonicalInstant(date: string): string | undefined {
 /**
  * Reads every file's last commit under `root` with one `git log`, newest first, so a site of 600 pages costs one
  * process instead of 600. The newest commit that names a path is the one `git log -1 -- <path>` would give.
- * Any failure, including a missing git, is an empty map, so every page reads {@link UNKNOWN}.
+ * A failure, including a missing git, is `undefined` rather than an empty map: git did not answer, so a page must
+ * read {@link UNKNOWN} and coverage must be `unavailable`, not the `untracked` an empty map would imply.
  */
-function readReviews(root: string): Map<string, Review> {
-  const reviews = new Map<string, Review>();
+function readReviews(root: string): Map<string, Review> | undefined {
   let text: string;
   try {
     // `--relative` with `-- .` limits the log to `root` and names files relative to it; `-z` keeps odd names unquoted.
@@ -85,8 +85,10 @@ function readReviews(root: string): Map<string, Review> {
       stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {
-    return reviews;
+    return undefined;
   }
+
+  const reviews = new Map<string, Review>();
 
   // Each record is `\x01 date \x02 author NUL \n file NUL file NUL ...`; the author never holds a NUL or \x01.
   for (const record of text.split("\x01")) {
@@ -101,6 +103,26 @@ function readReviews(root: string): Map<string, Review> {
     }
   }
   return reviews;
+}
+
+/**
+ * How much review history a page has: `recorded` when git names a commit for it, `untracked` when the root is a
+ * work tree but no commit names it, and `unavailable` when git, a work tree, or a path inside the root is missing.
+ * The three are kept apart so a consumer can tell "never committed" from "git cannot be asked".
+ */
+export type ReviewCoverage = "recorded" | "untracked" | "unavailable";
+
+/** The path and history to ask about, or `undefined` when the path is unanswered or the root is not a work tree. */
+function historyOf(
+  root: string,
+  pageFile: string,
+): { readonly base: string; readonly history: History; readonly path: string } | undefined {
+  const base = resolve(root);
+  const path = gitPathOf(base, pageFile);
+  if (path === undefined) return undefined;
+
+  const history = historyAt(base);
+  return history.available ? { base, history, path } : undefined;
 }
 
 /**
@@ -119,13 +141,23 @@ function readReviews(root: string): Map<string, Review> {
  * does too.
  */
 export function reviewers(root: string, pageFile: string): ReviewLookup {
-  const base = resolve(root);
-  const path = gitPathOf(base, pageFile);
-  if (path === undefined) return UNKNOWN;
+  const found = historyOf(root, pageFile);
+  if (found === undefined) return UNKNOWN;
 
-  const history = historyAt(base);
-  if (!history.available) return UNKNOWN;
+  const reviews = (found.history.reviews ??= readReviews(found.base));
+  return reviews?.get(found.path) ?? UNKNOWN;
+}
 
-  history.reviews ??= readReviews(base);
-  return history.reviews.get(path) ?? UNKNOWN;
+/**
+ * What git knows about `pageFile`, without inventing a review: see {@link ReviewCoverage}. The path rules and the
+ * per-root cache are the ones {@link reviewers} uses, so asking both costs one `git log` and the two answers agree.
+ * A path outside the root is `unavailable`, because no history for it may be read.
+ */
+export function reviewCoverage(root: string, pageFile: string): ReviewCoverage {
+  const found = historyOf(root, pageFile);
+  if (found === undefined) return "unavailable";
+
+  const reviews = (found.history.reviews ??= readReviews(found.base));
+  if (reviews === undefined) return "unavailable";
+  return reviews.has(found.path) ? "recorded" : "untracked";
 }
