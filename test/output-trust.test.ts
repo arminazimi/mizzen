@@ -124,6 +124,17 @@ test("a clean page with fresh examples, no drift, and a recent review is verifie
       source: POS.file,
       evidence: { examples: "measured", drift: "measured", review: "measured" },
       level: "verified",
+      factors: [
+        { signal: "examples", code: "examples.passed", state: "positive", value: 0 },
+        { signal: "drift", code: "drift.clean", state: "positive", value: 0 },
+        { signal: "review", code: "review.recent", state: "positive", value: 9 },
+      ],
+      provenance: {
+        examples: { source: "inline", availability: "available", input: "/guide/install/" },
+        drift: { source: "inline", availability: "available", input: "/guide/install/" },
+        review: { source: "inline", availability: "available", input: "/guide/install/" },
+      },
+      reviewCoverage: "recorded",
       reasons: [
         { code: "examples.passed", message: "No example fails; 2 of 2 pass." },
         { code: "drift.clean", message: "No drift findings." },
@@ -191,6 +202,17 @@ test("unknown inputs write unknown reasons and never claim verified", async () =
       source: POS.file,
       evidence: { examples: "unknown", drift: "missing", review: "missing" },
       level: "at-risk",
+      factors: [
+        { signal: "examples", code: "examples.unknown", state: "missing", value: "unknown" },
+        { signal: "drift", code: "drift.unknown", state: "missing", value: "unknown" },
+        { signal: "review", code: "review.unknown", state: "missing", value: "unknown" },
+      ],
+      provenance: {
+        examples: { source: "none", availability: "missing" },
+        drift: { source: "none", availability: "missing" },
+        review: { source: "none", availability: "missing" },
+      },
+      reviewCoverage: "unknown",
       reasons: [
         {
           code: "examples.unknown",
@@ -273,7 +295,7 @@ test("invalid drift and reviewer data are unknown, not missing, even without a r
   assert.equal(entry.level, "at-risk");
 });
 
-test("invalid data still falls back to a healthy git answer when a root is available", { skip: !hasGit() }, async () => {
+test("invalid inline data never falls back to a healthy computed or git answer", { skip: !hasGit() }, async () => {
   const root = repository([
     { path: "guide/install.md", date: "2026-10-01T00:00:00Z", author: "Ada Lovelace", text: "# Install\n" },
   ]);
@@ -287,9 +309,20 @@ test("invalid data still falls back to a healthy git answer when a root is avail
       "/guide/install/"
     ]!;
 
-    assert.deepEqual(entry.evidence, { examples: "measured", drift: "measured", review: "measured" });
-    assert.equal(entry.lastReviewer, "Ada Lovelace");
-    assert.equal(entry.level, "verified");
+    const provenance = entry.provenance as { drift: unknown; review: unknown };
+    assert.deepEqual(entry.evidence, { examples: "measured", drift: "unknown", review: "unknown" });
+    assert.equal(entry.lastReviewer, undefined, "a git review must not stand in for invalid inline data");
+    assert.deepEqual(provenance.drift, {
+      source: "inline",
+      availability: "unavailable",
+      input: "/guide/install/",
+    });
+    assert.deepEqual(provenance.review, {
+      source: "inline",
+      availability: "unavailable",
+      input: "/guide/install/",
+    });
+    assert.equal(entry.level, "at-risk");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -333,7 +366,7 @@ test("URLs are sorted and the bytes are fixed: header, key order, two spaces, LF
   const id = buildId([page("/a/"), page("/b/")]);
   assert.ok(
     text.startsWith(
-      `{\n  "version": 1,\n  "build": {\n    "algorithm": "sha256",\n    "id": ${JSON.stringify(id)},\n    "pages": 2\n  },\n  "pages": {\n`,
+      `{\n  "version": 2,\n  "build": {\n    "algorithm": "sha256",\n    "id": ${JSON.stringify(id)},\n    "pages": 2\n  },\n  "reviewDueDays": 180,\n  "asOf": "2026-10-02T00:00:00.000Z",\n  "pages": {\n`,
     ),
     "the header comes first, in a fixed key order",
   );
@@ -354,8 +387,9 @@ test("URLs are sorted and the bytes are fixed: header, key order, two spaces, LF
 
 test("the schema requires the build identity and rejects an entry with no reasons or an unknown code", () => {
   const base = {
-    version: 1,
+    version: 2,
     build: { algorithm: "sha256", id: "a".repeat(64), pages: 1 },
+    reviewDueDays: 180,
     pages: {
       "/a/": {
         key: "a".repeat(64),
@@ -363,6 +397,17 @@ test("the schema requires the build identity and rejects an entry with no reason
         source: "a.md",
         evidence: { examples: "none", drift: "measured", review: "measured" },
         level: "verified",
+        factors: [
+          { signal: "examples", code: "examples.none", state: "neutral", value: "unknown" },
+          { signal: "drift", code: "drift.clean", state: "positive", value: 0 },
+          { signal: "review", code: "review.recent", state: "positive", value: 0 },
+        ],
+        provenance: {
+          examples: { source: "none", availability: "not-applicable" },
+          drift: { source: "inline", availability: "available", input: "/a/" },
+          review: { source: "inline", availability: "available", input: "/a/" },
+        },
+        reviewCoverage: "recorded",
         reasons: [
           { code: "examples.none", message: "none" },
           { code: "drift.clean", message: "clean" },
@@ -372,7 +417,7 @@ test("the schema requires the build identity and rejects an entry with no reason
     },
   };
   assert.equal(validate(base), true, JSON.stringify(validate.errors));
-  assert.equal(validate({ ...base, version: 2 }), false);
+  assert.equal(validate({ ...base, version: 3 }), false);
   assert.equal(validate({ ...base, build: { algorithm: "sha256", pages: 1 } }), false);
   assert.equal(validate({ ...base, pages: { "/a/": { ...base.pages["/a/"], reasons: [] } } }), false);
   assert.equal(
