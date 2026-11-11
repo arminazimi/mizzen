@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Mizzen trust report",
-  "description": "`trust.json` in the output folder: a build identifier plus one entry per rendered content page, keyed by the page URL including `base`. Keys are sorted by code point. Every entry names its stable `key`, its `url`, its `source`, the state of each evidence signal, `level`, `reasons`, and, when known, `lastReviewer`, in that order. `build.id` is a deterministic hash of the rendered pages, so evidence can be joined to the build that produced them. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes. App and asset pages are left out.",
+  "description": "`trust.json` in the output folder: a build identifier plus one entry per rendered content page, keyed by the page URL including `base`. Keys are sorted by code point. Every entry names its stable `key`, its `url`, its `source`, the state of each evidence signal, `level`, `reasons`, and, when known, `lastReviewer`, in that order. `build.id` is a deterministic hash of the final HTML documents the build renders, layouts included, so evidence can be joined to the build that produced them. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes. App and asset pages are left out.",
   "type": "object",
   "required": [
     "version",
@@ -27,7 +27,7 @@
           "const": "sha256"
         },
         "id": {
-          "description": "SHA-256 over every doc page's key, Markdown hash, and HTML hash, sorted by URL. Changing a page's URL, source, Markdown, or HTML changes it.",
+          "description": "SHA-256 over every doc page's key, Markdown hash, and final HTML hash, sorted by URL. The HTML is the document the build writes, layout included, so changing a page's URL, source, Markdown, or layout-rendered HTML changes it.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
@@ -96,7 +96,7 @@
               ]
             },
             "drift": {
-              "description": "`measured`, `missing` when no drift data or root was available, or `unknown` when a check was available but gave no answer.",
+              "description": "`measured`, `missing` when no drift data or root was available, or `unknown` when a source existed but gave no usable answer (a malformed data entry, or a check that named no count).",
               "enum": [
                 "measured",
                 "missing",
@@ -104,7 +104,7 @@
               ]
             },
             "review": {
-              "description": "`measured`, `missing` when no reviewer data or root was available, or `unknown` when the source named no readable date.",
+              "description": "`measured`, `missing` when no reviewer data or root was available, or `unknown` when a data entry or git named no readable date.",
               "enum": [
                 "measured",
                 "missing",

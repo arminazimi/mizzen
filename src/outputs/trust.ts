@@ -1,5 +1,5 @@
 import type { Page, Site } from "../contracts/content.ts";
-import type { Output, OutputFile } from "../contracts/output.ts";
+import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 import { compareClaims } from "../drift/compare.ts";
 import { examplesOf } from "../markdown/plugins/example-fence.ts";
 import { reviewers, UNKNOWN as REVIEW_UNKNOWN, type Review } from "../model/reviewers.ts";
@@ -56,8 +56,9 @@ import { hashOf } from "./build-hash.ts";
  * order. A page's `key` is the SHA-256 of its URL, a NUL, and its source file: two builds of the same
  * page carry the same key, and the entry also carries the URL and source file it belongs to, so no
  * consumer has to derive them from the filesystem. `build.id` is the SHA-256 of one line per doc page
- * (page key, Markdown hash, HTML hash), sorted by URL: the same rendered pages share one build
- * identifier, and changing a page's URL, source, Markdown, or HTML changes it.
+ * (page key, Markdown hash, final HTML hash), sorted by URL: the hash is over the document the build
+ * writes, layout included, so the same rendered pages share one build identifier, and changing a page's
+ * URL, source, Markdown, or final HTML changes it.
  *
  * `level` is `verified`, `review-due`, or `at-risk`, exactly as N12's {@link trustScore} decides.
  * `reasons` always has three entries, in the fixed order examples, drift, review. `lastReviewer` is
@@ -71,9 +72,10 @@ import { hashOf } from "./build-hash.ts";
  * - `examples`: `measured` (the page's examples have counts), `none` (the page declares no `test`
  *   fence), or `unknown` (the page declares examples but their result is unavailable).
  * - `drift`: `measured` (a finding count exists, including zero), `missing` (no drift data and no root
- *   to check), or `unknown` (the check was available but gave no answer).
+ *   to check), or `unknown` (a source existed but gave no usable answer: a malformed data entry, or a
+ *   check that named no count).
  * - `review`: `measured` (a review date exists), `missing` (no reviewer data and no root to ask), or
- *   `unknown` (git was available but names no date for the page).
+ *   `unknown` (a source existed but named no readable date).
  *
  * A signal that is not `measured` also has an explaining reason in `reasons`, so no page is silently
  * treated as healthy. `examples: "none"` is known evidence, not a gap: the page has no examples to run.
@@ -90,13 +92,15 @@ import { hashOf } from "./build-hash.ts";
  *   cannot know whether they pass, so it never claims they do. A page with no `test` fence keeps N12's
  *   neutral `examples.none`; it is not penalized for having no examples.
  * - **Drift.** First the caller's `drift` option, then `site.data.drift`. A value is either a bare
- *   finding count (`{ "/guide/": 0 }`) or an entry with `findings`. Without data, and when a root is
- *   known, {@link compareClaims} counts the diagnostics for each page's source file. Without either,
- *   N12's `drift.unknown` makes the page `at-risk`.
+ *   finding count (`{ "/guide/": 0 }`) or an entry with `findings`. An entry that is not a count is
+ *   still a source: it reads as `unknown`, not `missing`. Without data, and when a root is known,
+ *   {@link compareClaims} counts the diagnostics for each page's source file. Without either, N12's
+ *   `drift.unknown` makes the page `at-risk`.
  * - **Review.** First the caller's `reviewers` option, then `site.data.reviewers`, with `{ date,
- *   author }` per URL or an `{ pages: [...] }` list. Without an entry, and when a root is known, N13's
- *   {@link reviewers} reads the last commit of the page's source file. The review age is whole days
- *   from that commit to `asOf`; without a date or `asOf`, it is `"unknown"` and the page is
+ *   author }` per URL or an `{ pages: [...] }` list. An entry whose date is missing or unreadable is
+ *   still a source: it reads as `unknown`, not `missing`. Without a usable entry, and when a root is
+ *   known, N13's {@link reviewers} reads the last commit of the page's source file. The review age is
+ *   whole days from that commit to `asOf`; without a date or `asOf`, it is `"unknown"` and the page is
  *   `review-due`, never silently `verified`.
  *
  * `asOf` is the caller's option, or `SOURCE_DATE_EPOCH` (seconds since the Unix epoch) when the output
@@ -183,7 +187,7 @@ export interface TrustPageEntry extends TrustEntry {
 export interface TrustBuild {
   /** The digest the `id` was made with. */
   readonly algorithm: "sha256";
-  /** SHA-256 over every doc page's key, Markdown hash, and HTML hash, sorted by URL. */
+  /** SHA-256 over every doc page's key, Markdown hash, and rendered HTML hash, sorted by URL. */
   readonly id: string;
   /** How many rendered content pages the build has. */
   readonly pages: number;
@@ -226,6 +230,11 @@ export interface TrustReportOptions {
   readonly reviewers?: unknown;
   /** Review-due threshold overrides. Default: N12's threshold. */
   readonly thresholds?: TrustThresholds;
+  /**
+   * The final HTML document of each doc page, by URL, as `ctx.renderPage` returns it. Default: the page's
+   * Markdown-rendered body (`page.html`), which is not the document a layout writes.
+   */
+  readonly html?: Readonly<Record<string, string>>;
 }
 
 /** Compares by code point, never by locale. */
@@ -285,27 +294,37 @@ function examplesIndexOf(value: unknown): Map<string, TrustExamples> {
   return index;
 }
 
-/** The drift finding counts, by URL, from a bare number or an entry's `findings`. */
-function driftIndexOf(value: unknown): Map<string, number> {
-  const index = new Map<string, number>();
+/**
+ * The drift finding counts, by URL, from a bare number or an entry's `findings`. An entry whose value is
+ * not a count still has a key, with `undefined`, so it reads as a source that gave no answer.
+ */
+function driftIndexOf(value: unknown): Map<string, number | undefined> {
+  const index = new Map<string, number | undefined>();
   for (const [url, entry] of urlPairs(value)) {
-    const findings = numberOf(isRecord(entry) ? entry.findings : entry);
-    if (findings !== undefined) index.set(url, findings);
+    index.set(url, numberOf(isRecord(entry) ? entry.findings : entry));
   }
   return index;
 }
 
-/** The last reviews, by URL, from `{ date, author }` entries; an entry without both is skipped. */
-function reviewIndexOf(value: unknown): Map<string, Review> {
-  const index = new Map<string, Review>();
+/**
+ * The last reviews, by URL, from `{ date, author }` entries. An entry without both, or with an unreadable
+ * date, still has a key, with `undefined`, so it reads as a source that gave no answer.
+ */
+function reviewIndexOf(value: unknown): Map<string, Review | undefined> {
+  const index = new Map<string, Review | undefined>();
   for (const [url, entry] of urlPairs(value)) {
-    if (!isRecord(entry)) continue;
+    if (!isRecord(entry)) {
+      index.set(url, undefined);
+      continue;
+    }
     const author = typeof entry.author === "string" ? entry.author.trim() : "";
     const text = typeof entry.date === "string" ? entry.date.trim() : "";
-    if (author === "" || text === "") continue;
+    if (author === "" || text === "") {
+      index.set(url, undefined);
+      continue;
+    }
     const date = new Date(text);
-    if (Number.isNaN(date.getTime())) continue;
-    index.set(url, { date: date.toISOString(), author });
+    index.set(url, Number.isNaN(date.getTime()) ? undefined : { date: date.toISOString(), author });
   }
   return index;
 }
@@ -384,11 +403,15 @@ function pageKeyOf(page: Page): string {
   return hashOf(`${page.url}\0${page.source.file}`);
 }
 
-/** The build identifier: one line per rendered page, sorted by URL, over the page's identity and content. */
-function buildIdOf(pages: readonly Page[]): string {
+/**
+ * The build identifier: one line per rendered page, sorted by URL, over the page's identity, Markdown,
+ * and final HTML. The final HTML is the document the build writes, layout included; the fallback is the
+ * Markdown-rendered body for callers that have no rendered document.
+ */
+function buildIdOf(pages: readonly Page[], html: Readonly<Record<string, string>> | undefined): string {
   return hashOf(
     pages
-      .map((page) => `${pageKeyOf(page)}\0${hashOf(page.markdown)}\0${hashOf(page.html)}\n`)
+      .map((page) => `${pageKeyOf(page)}\0${hashOf(page.markdown)}\0${hashOf(html?.[page.url] ?? page.html)}\n`)
       .join(""),
   );
 }
@@ -461,7 +484,7 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
   const root = options.root;
 
   const driftCounts =
-    root !== undefined && pages.some((page) => !driftData.has(page.url))
+    root !== undefined && pages.some((page) => driftData.get(page.url) === undefined)
       ? await driftCountsOf(pages, root)
       : undefined;
 
@@ -479,9 +502,13 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
       ...(drift === undefined ? {} : { drift }),
       review,
       ...(asOf === undefined ? {} : { asOf }),
-      // A root means the check could have run; without one, the signal was never available at all.
-      ...(drift === undefined ? { driftState: root === undefined ? "missing" : "unknown" } : {}),
-      ...(review === REVIEW_UNKNOWN ? { reviewState: root === undefined ? "missing" : "unknown" } : {}),
+      // A root or a data entry means a source existed; without either, the signal was never available at all.
+      ...(drift === undefined
+        ? { driftState: driftData.has(page.url) || root !== undefined ? "unknown" : "missing" }
+        : {}),
+      ...(review === REVIEW_UNKNOWN
+        ? { reviewState: reviewData.has(page.url) || root !== undefined ? "unknown" : "missing" }
+        : {}),
     };
     const entry = trustEntryOf(signals, options.thresholds === undefined ? {} : { thresholds: options.thresholds });
     body[page.url] = {
@@ -497,7 +524,7 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
 
   const report: TrustReport = {
     version: TRUST_VERSION,
-    build: { algorithm: "sha256", id: buildIdOf(pages), pages: pages.length },
+    build: { algorithm: "sha256", id: buildIdOf(pages, options.html), pages: pages.length },
     pages: body,
   };
   return [{ path: "trust.json", contents: `${JSON.stringify(report, null, 2)}\n` }];
@@ -506,14 +533,20 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
 /**
  * The output that writes `trust.json`. Its root comes from `MIZZEN_SITE_ROOT` (or the working directory)
  * and its `asOf` from `SOURCE_DATE_EPOCH`; see the module comment for the shape and the data channels.
+ * The build identity is made from the documents the theme renders, so it follows the layout.
  */
 export const trust: Output = {
   name: "trust",
-  async run(site: Site): Promise<readonly OutputFile[]> {
+  async run(site: Site, ctx: OutputContext): Promise<readonly OutputFile[]> {
+    const html: Record<string, string> = {};
+    for (const page of site.pages) {
+      if (page.kind === "doc") html[page.url] = await ctx.renderPage(page);
+    }
     const asOf = trustAsOf();
     return trustReport(site, {
       root: trustRoot(),
       ...(asOf === undefined ? {} : { asOf }),
+      html,
     });
   },
 };

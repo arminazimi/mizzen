@@ -264,12 +264,6 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     return rendered.html.replace(/<\/head>/i, () => `${preloads.join("")}${links}</head>`);
   };
 
-  const renderOne = async (page: Page): Promise<string> => {
-    const rendered = renderOnePage(registry, site, page, options.defaultLayout);
-    for (const d of rendered.diagnostics) diagnostics.report(d);
-    return withCss(rendered);
-  };
-
   const files = await discover(sourceDir, { include: site.config.include, exclude: site.config.exclude });
 
   // With one worker, pages render in this process exactly as before. With more, the pool starts rendering the doc
@@ -289,11 +283,19 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     pool.prefetch(site.pages.filter((page) => page.kind === "doc"));
   }
 
+  // Outputs may ask for the same page: render it once and report its diagnostics once.
+  const renderedHtml = new Map<string, Promise<string>>();
   const renderPaged = async (page: Page): Promise<string> => {
-    if (pool === undefined) return renderOne(page);
-    const rendered = await pool.render(page);
-    for (const d of rendered.diagnostics) diagnostics.report(d);
-    return withCss(rendered);
+    const known = renderedHtml.get(page.url);
+    if (known !== undefined) return known;
+    const pending = (async () => {
+      const rendered =
+        pool === undefined ? renderOnePage(registry, site, page, options.defaultLayout) : await pool.render(page);
+      for (const d of rendered.diagnostics) diagnostics.report(d);
+      return withCss(rendered);
+    })();
+    renderedHtml.set(page.url, pending);
+    return pending;
   };
 
   const ctx: OutputContext = {

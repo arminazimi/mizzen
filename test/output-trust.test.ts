@@ -258,6 +258,43 @@ test("the build identifier is identical for equivalent builds and changes with p
   assert.notEqual((first.build as Record<string, unknown>).id, (changed.build as Record<string, unknown>).id);
 });
 
+test("invalid drift and reviewer data are unknown, not missing, even without a root", async () => {
+  const model = site([page("/guide/install/")], {
+    drift: { "/guide/install/": "many" },
+    reviewers: { "/guide/install/": { date: "not-a-date", author: "Ada" } },
+  });
+
+  const entry = pagesOf(await reportOf(model))["/guide/install/"]!;
+  assert.deepEqual(entry.evidence, { examples: "none", drift: "unknown", review: "unknown" });
+  assert.deepEqual(
+    (entry.reasons as Array<Record<string, unknown>>).map((reason) => reason.code),
+    ["examples.none", "drift.unknown", "review.unknown"],
+  );
+  assert.equal(entry.level, "at-risk");
+});
+
+test("invalid data still falls back to a healthy git answer when a root is available", { skip: !hasGit() }, async () => {
+  const root = repository([
+    { path: "guide/install.md", date: "2026-10-01T00:00:00Z", author: "Ada Lovelace", text: "# Install\n" },
+  ]);
+  try {
+    const model = site([page("/guide/install/")], {
+      examples: { "/guide/install/": { passed: 2, failed: 0 } },
+      drift: { "/guide/install/": "many" },
+      reviewers: { "/guide/install/": { date: "not-a-date", author: "Ada" } },
+    });
+    const entry = pagesOf(await reportOf(model, { root, asOf: "2026-10-10T00:00:00.000Z" }))[
+      "/guide/install/"
+    ]!;
+
+    assert.deepEqual(entry.evidence, { examples: "measured", drift: "measured", review: "measured" });
+    assert.equal(entry.lastReviewer, "Ada Lovelace");
+    assert.equal(entry.level, "verified");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("evidence distinguishes a missing source from an unknown answer", async () => {
   const unknown = trustEntryOf({
     driftState: "unknown",
@@ -510,5 +547,35 @@ test("the output runs by default and outputs: { trust: false } switches it off",
     rmSync(offRoot, { recursive: true, force: true });
     rmSync(on.parent, { recursive: true, force: true });
     rmSync(off.parent, { recursive: true, force: true });
+  }
+});
+
+test("build.id follows the final layout HTML and stays stable for equivalent builds", async () => {
+  const root = tree({ "a.md": "---\ntitle: A\n---\n# A\n" });
+  const first = outFolder();
+  const second = outFolder();
+  const otherLayout = outFolder();
+  const previousRoot = process.env.MIZZEN_SITE_ROOT;
+  try {
+    process.env.MIZZEN_SITE_ROOT = root;
+    const doc = await build({ root, out: first.out, themeRoot: THEME, defaultLayout: "doc" });
+    await build({ root, out: second.out, themeRoot: THEME, defaultLayout: "doc" });
+    const home = await build({ root, out: otherLayout.out, themeRoot: THEME, defaultLayout: "home" });
+
+    assert.ok(doc.files.includes("trust.json"));
+    assert.ok(home.files.includes("trust.json"));
+    const docHtml = readFileSync(join(first.out, "a", "index.html"), "utf8");
+    const homeHtml = readFileSync(join(otherLayout.out, "a", "index.html"), "utf8");
+    assert.notEqual(docHtml, homeHtml, "the layouts write different documents");
+
+    const idOf = (dir: string) =>
+      (JSON.parse(readFileSync(join(dir, "trust.json"), "utf8")) as { build: { id: string } }).build.id;
+    assert.equal(idOf(first.out), idOf(second.out), "equivalent builds share one id");
+    assert.notEqual(idOf(first.out), idOf(otherLayout.out), "a different layout changes the id");
+  } finally {
+    if (previousRoot === undefined) delete process.env.MIZZEN_SITE_ROOT;
+    else process.env.MIZZEN_SITE_ROOT = previousRoot;
+    rmSync(root, { recursive: true, force: true });
+    for (const folder of [first, second, otherLayout]) rmSync(folder.parent, { recursive: true, force: true });
   }
 });
