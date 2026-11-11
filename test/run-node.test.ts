@@ -57,6 +57,26 @@ test("stderr is captured separately from stdout", async () => {
   assert.equal(result.stderr, "boom\n");
 });
 
+test("inherited Node coverage stays inside the example folder", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "mizzen-node-coverage-"));
+  const coverage = join(parent, "outside");
+  const previous = process.env.NODE_V8_COVERAGE;
+  process.env.NODE_V8_COVERAGE = coverage;
+  try {
+    const result = await runNodeExample({ lang: "js", code: "console.log(process.env.NODE_V8_COVERAGE);\n" });
+    assert.equal(result.ok, true, result.stderr);
+    assert.equal(result.stderr, "");
+    const seen = result.stdout.trim();
+    assert.notEqual(seen, coverage);
+    assert.equal(existsSync(coverage), false, "no coverage is written outside the run folder");
+    assert.equal(existsSync(seen), false, "the run folder and its coverage are removed");
+  } finally {
+    if (previous === undefined) delete process.env.NODE_V8_COVERAGE;
+    else process.env.NODE_V8_COVERAGE = previous;
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("a timeout kills the example and reports a timeout instead of hanging", async () => {
   const startedAt = Date.now();
   const result = await runNodeExample({
