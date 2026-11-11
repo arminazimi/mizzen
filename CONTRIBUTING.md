@@ -11,6 +11,7 @@ git clone https://github.com/velella-sh/lateen.git
 git clone https://github.com/velella-sh/mizzen.git
 cd mizzen
 npm ci
+(cd ../lateen && npm ci)
 ```
 
 Lateen is checked out beside this repository because the tests and the docs site build with both.
@@ -22,7 +23,7 @@ npm run typecheck
 npm test
 ```
 
-A change to behavior needs a test beside the others in `test/`. A change to the docs site is checked with `node ../mizzen/bin/mizzen.ts check site` and must report 0 errors.
+A change to behavior needs a test beside the others in `test/`. A change to the docs site is checked with `node bin/mizzen.ts check site` and must report 0 errors.
 
 ## Ground rules
 

@@ -61,6 +61,6 @@ The theme root is picked in this order:
 
 1. `--theme <dir>`, resolved from the current working directory.
 2. `theme.name` in `mizzen.yml`: a folder relative to the site root, an absolute path, or a package name resolved from the site and then from the current directory.
-3. The `theme` folder beside this package, when it exists.
+3. A `lateen` checkout beside this repository (`../lateen`), when it exists.
 
 A page with no layout in its front matter or in `defaults` gets the layout `doc` from the CLI. A programmatic build has no default unless it passes `defaultLayout`.
