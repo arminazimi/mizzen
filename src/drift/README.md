@@ -25,5 +25,9 @@ same repository gives the same answer.
   `drift.missing-symbol`, `drift.moved-symbol`, `drift.line-out-of-range`, or `drift.outside-root` at the
   reference's own span. For a TypeScript target, the cited line is matched against N08's exported symbols
   within the tolerance (default 5), with a symbol claim read from the inline code of the reference's
-  paragraph. The claim rule and the order of the diagnostics are in the module's header comment; the cases
-  are in `../../test/drift-compare.test.ts`.
+  paragraph. `comparePages` returns the same findings per page together with a `DriftIdentity`: the hash
+  of the page content (Markdown, body line, and tolerance) and of every cited source, or `missing`/`outside`
+  for one that could not be read. `driftContentOf(page, tolerance?)` gives the content half alone. Stored
+  findings can be checked against that identity, so changed content or sources invalidate their evidence.
+  The claim rule and the order of the diagnostics are in the module's header comment; the cases are in
+  `../../test/drift-compare.test.ts`.

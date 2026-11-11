@@ -120,6 +120,23 @@ test("bodyLine moves every span to the line in the source file", async () => {
   assert.equal(ref?.pos.endLine, 10);
 });
 
+test("a reference keeps its path and line when the page body moves down the file", async () => {
+  const body = "See src/a.ts:12.";
+  const [before] = await refsOf(body, "guide/setup.md", 1);
+  const [after] = await refsOf(body, "guide/setup.md", 40);
+  assert.equal(after?.path, before?.path);
+  assert.equal(after?.line, before?.line);
+  assert.equal(after?.pos.line, 40);
+  assert.equal(after?.pos.endLine, 40);
+});
+
+test("a reference resolves from the page's current folder after the page is renamed", async () => {
+  const [before] = await refsOf("src/a.ts:1", "old/guide/setup.md");
+  const [after] = await refsOf("src/a.ts:1", "new/guide/setup.md");
+  assert.equal(before?.path, "old/guide/src/a.ts");
+  assert.equal(after?.path, "new/guide/src/a.ts");
+});
+
 test("prose that is not a path, URLs, and invalid lines are not references", async () => {
   const prose = await refsOf("note: 12 and src/a.ts:0 and src/a.ts:12bar");
   assert.equal(prose.length, 0);
