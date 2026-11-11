@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { Page } from "../src/contracts/content.ts";
 import type { Diagnostic } from "../src/contracts/index.ts";
-import { compareClaims } from "../src/drift/compare.ts";
+import { compareClaims, comparePages, driftContentOf } from "../src/drift/compare.ts";
 import { codeRefsOf } from "../src/drift/code-refs.ts";
 
 /** A site root under the OS temp folder; the caller removes it. */
@@ -242,5 +242,107 @@ test("diagnostics are deterministic: page order, then line and message", async (
     assert.ok(first[3]!.message.includes("src/zzz.ts"));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a comparison carries an identity of the page content and every cited source", async () => {
+  const root = site();
+  try {
+    write(root, "src/build.ts", source());
+    const model = page("setup.md", "See `buildDocs()` at src/build.ts:2 and src/notes.txt:1.");
+    const [comparison] = await comparePages([model], { root });
+    assert.equal(comparison?.file, "setup.md");
+    assert.equal(comparison?.references.length, 2);
+    assert.equal(comparison?.identity.content, driftContentOf(model));
+    assert.match(comparison?.identity.content ?? "", /^[0-9a-f]{64}$/);
+    assert.deepEqual(Object.keys(comparison?.identity.sources ?? {}), ["src/build.ts", "src/notes.txt"]);
+    assert.match(comparison?.identity.sources["src/build.ts"] ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(comparison?.identity.sources["src/notes.txt"], "missing");
+    assert.deepEqual(comparison?.diagnostics.map((diagnostic) => diagnostic.id), ["drift.missing-file"]);
+
+    const [again] = await comparePages([model], { root });
+    assert.deepEqual(again?.identity, comparison?.identity);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the identity changes with the page content, the tolerance, or a source's bytes", async () => {
+  const root = site();
+  try {
+    write(root, "src/build.ts", source());
+    const model = page("setup.md", "See src/build.ts:2.");
+    const before = (await comparePages([model], { root }))[0]!.identity;
+
+    const moved = (await comparePages([page("setup.md", "An intro line.\n\nSee src/build.ts:2.")], { root }))[0]!.identity;
+    assert.notEqual(moved.content, before.content);
+    assert.deepEqual(moved.sources, before.sources);
+
+    const wide = (await comparePages([model], { root, tolerance: 2 }))[0]!.identity;
+    assert.notEqual(wide.content, before.content);
+
+    write(root, "src/build.ts", `${source()}\n// changed\n`);
+    const changed = (await comparePages([model], { root }))[0]!.identity;
+    assert.equal(changed.content, before.content);
+    assert.notEqual(changed.sources["src/build.ts"], before.sources["src/build.ts"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a finding keeps the reference's moved line and names the declaration's current line", async () => {
+  const root = site();
+  try {
+    write(root, "src/build.ts", source());
+    const before = page("setup.md", "See `loadConfig()` at src/build.ts:12.");
+    const [firstReference] = await codeRefsOf(before);
+    const after = page("setup.md", "# Guide\n\nIntro.\n\nSee `loadConfig()` at src/build.ts:12.");
+    const [movedReference] = await codeRefsOf(after);
+    assert.equal(movedReference?.pos.line, (firstReference?.pos.line ?? 0) + 4);
+    assert.equal(movedReference?.line, firstReference?.line);
+
+    const diagnostics = await compare(root, [after]);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0]?.id, "drift.moved-symbol");
+    assert.deepEqual(diagnostics[0]?.pos, movedReference?.pos);
+    assert.match(diagnostics[0]?.message ?? "", /declares "loadConfig" at line 6/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a renamed or deleted target is reported at the path the page still cites", async () => {
+  const root = site();
+  try {
+    write(root, "src/new.ts", source());
+    const model = page("guide/setup.md", "See `buildDocs()` at src/old.ts:2.");
+    const [comparison] = await comparePages([model], { root });
+
+    assert.equal(comparison?.identity.sources["guide/src/old.ts"], "missing");
+    assert.equal(comparison?.diagnostics.length, 1);
+    assert.equal(comparison?.diagnostics[0]?.id, "drift.missing-file");
+    assert.match(comparison?.diagnostics[0]?.message ?? "", /guide\/src\/old\.ts/);
+    assert.deepEqual(comparison?.diagnostics[0]?.pos, comparison?.references[0]?.pos);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unresolvable reference is marked outside and contributes no source bytes", async () => {
+  const root = site();
+  const outside = mkdtempSync(join(tmpdir(), "drift-outside-"));
+  try {
+    writeFileSync(join(outside, "secret.ts"), "export function secret() {}\n");
+    mkdirSync(join(root, "guide", "src"), { recursive: true });
+    symlinkSync(join(outside, "secret.ts"), join(root, "guide", "src", "secret.ts"));
+
+    const model = page("guide/setup.md", "See src/secret.ts:1.");
+    const [comparison] = await comparePages([model], { root });
+    assert.equal(comparison?.identity.sources["guide/src/secret.ts"], "outside");
+    assert.equal(comparison?.diagnostics.length, 1);
+    assert.equal(comparison?.diagnostics[0]?.id, "drift.outside-root");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
