@@ -2,26 +2,29 @@
  * A whole-build cache for `mizzen build` (#1060): the output of a build is kept in `.mizzen/cache` and copied back
  * when every input that shaped it is unchanged.
  *
- * The key is one SHA-256 of the site's config file, every discovered source file (pages, assets, app pages, and
- * `_data`), the navigation file, every file of the theme, every file of the outputs folder, the `defaultLayout` and
- * `themeFiles` options, the engine's version, and {@link CACHE_FORMAT}. Paths and bytes count; timestamps do not. Config
- * and navigation are part of the same hash as the pages, so changing either misses the cache for every page.
+ * The key is one SHA-256 of the site's config file and its resolved config values, every discovered source file (pages,
+ * assets, app pages, and `_data`), the navigation file, every file of the theme, every file of the outputs folder, the
+ * `defaultLayout` and `themeFiles` options, the engine's version, the runtime's version, and {@link CACHE_FORMAT}.
+ * Paths and bytes count; timestamps do not. Config and navigation are part of the same hash as the pages, so changing
+ * either misses the cache for every page.
  *
- * The entry holds a copy of the finished output folder and `manifest.json` with the file list, each file's hash, and the
- * build's diagnostics. A hit is verified file by file before it is restored, so a corrupt or half-written entry is a
- * miss, never bad output. Every failure here is swallowed by {@link restoreCache} and {@link writeCache}: a cache that
- * cannot be read or written leaves the build to run cold.
+ * The entry holds a copy of the finished output folder and `manifest.json` with the file list, each file's hash, a
+ * checksum of the manifest itself, and the build's diagnostics. A hit is verified file by file before it is restored,
+ * so a corrupt or half-written entry is a miss, never bad output. {@link restoreCache} reports whether an unusable
+ * entry was missing, corrupt, or written by an incompatible version. Every failure here is swallowed by
+ * {@link restoreCache} and {@link writeCache}: a cache that cannot be read or written leaves the build to run cold.
  *
  */
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { CONFIG_FILE } from "../config/load.ts";
 import type { Diagnostic, SiteConfig } from "../contracts/index.ts";
 import { discover } from "../content/discover.ts";
 import { version } from "../index.ts";
 
 /** Bumped when the meaning of an entry changes, so an entry written by an older engine is never trusted. */
-export const CACHE_FORMAT = 1;
+export const CACHE_FORMAT = 2;
 
 /** Folder under a site root that holds the cache, relative to the root. */
 export const CACHE_DIR = ".mizzen/cache";
@@ -48,6 +51,10 @@ export interface CacheKeyOptions {
   readonly defaultLayout?: string;
   /** Theme files copied into the output. */
   readonly themeFiles?: readonly string[];
+  /** The engine version folded into the key. Default: the engine's `version`. */
+  readonly engineVersion?: string;
+  /** The runtime folded into the key. Default: the running Node and ICU versions. */
+  readonly runtimeVersion?: string;
 }
 
 /** The file list and diagnostics of a cache hit. */
@@ -60,6 +67,15 @@ export interface CacheRestore {
   readonly diagnostics: readonly Diagnostic[];
 }
 
+/** Why an entry could not be used: no entry, unreadable bytes, or an entry this engine must not read. */
+export type CacheMissReason = "missing" | "corrupt" | "incompatible";
+
+/** What {@link restoreCache} takes besides the entry's identity. */
+export interface RestoreOptions {
+  /** Called with the reason a hit was not used. Reporting never changes the restored output. */
+  readonly onMiss?: (reason: CacheMissReason) => void;
+}
+
 /** What a cache entry records. */
 interface CacheManifest {
   readonly version: number;
@@ -68,7 +84,12 @@ interface CacheManifest {
   readonly files: readonly string[];
   readonly hashes: Readonly<Record<string, string>>;
   readonly diagnostics: readonly Diagnostic[];
+  /** SHA-256 of every other field, so a corrupted manifest is a miss rather than stale diagnostics. */
+  readonly checksum: string;
 }
+
+/** The part of a manifest a hit relies on; {@link checksumOf} covers exactly this. */
+type CachePayload = Omit<CacheManifest, "checksum">;
 
 /** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
@@ -78,6 +99,34 @@ function byCodePoint(a: string, b: string): number {
 /** SHA-256 of the bytes, as 64 lowercase hex characters. */
 function hashOf(bytes: string | Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** JSON with object keys sorted at every level, so equal config values always hash the same. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort(byCodePoint)
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** SHA-256 of the manifest's payload; the file list, hashes, and diagnostics are as much an entry as its output. */
+function checksumOf(payload: CachePayload): string {
+  return hashOf(
+    JSON.stringify({
+      version: payload.version,
+      key: payload.key,
+      engine: payload.engine,
+      files: payload.files,
+      hashes: payload.hashes,
+      diagnostics: payload.diagnostics,
+    }),
+  );
 }
 
 /** True for a path an entry may name: relative, `/`-separated, and with no empty, `.`, or `..` segment. */
@@ -134,10 +183,13 @@ interface KeyInput {
 /**
  * The cache key of a build: SHA-256 of everything that shapes the output. Config and navigation are part of the same
  * hash, so a change to either invalidates every page. Files are read in parallel but hashed in a fixed order; a missing
- * file adds a marker, so its appearance changes the key too.
+ * file adds no digest, so its appearance changes the key, and a file of empty bytes never stands in for a missing one.
  */
 export async function cacheKey(options: CacheKeyOptions): Promise<string> {
-  const inputs: KeyInput[] = [{ label: "config", path: join(options.root, "mizzen.yml") }];
+  const engine = options.engineVersion ?? version;
+  const runtime = options.runtimeVersion ?? `${process.versions.node}/${process.versions.icu ?? ""}`;
+  const themeFiles = [...new Set(options.themeFiles ?? [])].sort(byCodePoint);
+  const inputs: KeyInput[] = [{ label: "config", path: join(options.root, CONFIG_FILE) }];
 
   const files = await discover(options.sourceDir, {
     include: options.config.include,
@@ -157,25 +209,24 @@ export async function cacheKey(options: CacheKeyOptions): Promise<string> {
     inputs.push({ label: `outputs/${path}`, path: join(options.outputsDir, path) });
   }
 
-  const contents: Array<Uint8Array | "missing"> = new Array(inputs.length);
+  const digests: string[] = new Array(inputs.length);
   await inBatches(inputs, 32, async (input, index) => {
     try {
-      contents[index] = await readFile(input.path);
+      digests[index] = hashOf(await readFile(input.path));
     } catch {
-      contents[index] = "missing";
+      digests[index] = "";
     }
   });
 
   const hash = createHash("sha256");
   hash.update("mizzen-cache\0");
-  hash.update(`${CACHE_FORMAT}\0${version}\0`);
+  hash.update(`${CACHE_FORMAT}\0${engine}\0${runtime}\0`);
+  // The config values matter as well as the file: a missing config takes its title from the folder name.
+  hash.update(`config\0${canonicalJson(options.config)}\0`);
   hash.update(`defaultLayout\0${options.defaultLayout ?? ""}\0`);
-  hash.update(`themeFiles\0${[...(options.themeFiles ?? [])].sort(byCodePoint).join("\0")}\0`);
+  hash.update(`themeFiles\0${themeFiles.join("\0")}\0`);
   for (let index = 0; index < inputs.length; index++) {
-    hash.update(inputs[index]!.label);
-    hash.update("\0");
-    hash.update(contents[index]!);
-    hash.update("\0");
+    hash.update(`${inputs[index]!.label}\0${digests[index]!}\0`);
   }
   return hash.digest("hex");
 }
@@ -184,8 +235,9 @@ export async function cacheKey(options: CacheKeyOptions): Promise<string> {
 function isManifest(value: unknown): value is CacheManifest {
   if (typeof value !== "object" || value === null) return false;
   const manifest = value as Partial<CacheManifest>;
-  if (manifest.version !== CACHE_FORMAT || typeof manifest.key !== "string") return false;
-  if (typeof manifest.engine !== "string" || manifest.engine !== version) return false;
+  if (typeof manifest.version !== "number" || typeof manifest.key !== "string" || !KEY.test(manifest.key)) return false;
+  if (typeof manifest.engine !== "string") return false;
+  if (typeof manifest.checksum !== "string" || !KEY.test(manifest.checksum)) return false;
   if (!Array.isArray(manifest.files) || !manifest.files.every((file): file is string => typeof file === "string")) return false;
   if (typeof manifest.hashes !== "object" || manifest.hashes === null) return false;
   if (!Array.isArray(manifest.diagnostics)) return false;
@@ -201,51 +253,77 @@ function isManifest(value: unknown): value is CacheManifest {
   );
 }
 
-/** Reads and checks the shape of an entry; `undefined` for a missing, corrupt, or stale one. */
-async function readEntry(cacheRoot: string, key: string): Promise<{ dir: string; manifest: CacheManifest } | undefined> {
-  if (!KEY.test(key)) return undefined;
+/** An entry that can be restored, or why there is none. */
+type EntryRead =
+  | { readonly entry: { readonly dir: string; readonly manifest: CacheManifest } }
+  | { readonly reason: CacheMissReason };
+
+/** Reads and checks an entry. A missing folder is a miss, bad bytes are corruption, and another format is incompatible. */
+async function readEntry(cacheRoot: string, key: string): Promise<EntryRead> {
+  if (!KEY.test(key)) return { reason: "missing" };
   const dir = join(cacheRoot, key);
-  let manifest: CacheManifest;
+  let text: string;
   try {
-    const parsed: unknown = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8"));
-    if (!isManifest(parsed) || parsed.key !== key) return undefined;
-    manifest = parsed;
-  } catch {
-    return undefined;
+    text = await readFile(join(dir, "manifest.json"), "utf8");
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    return { reason: code === "ENOENT" || code === "ENOTDIR" ? "missing" : "corrupt" };
   }
 
-  for (const file of manifest.files) {
-    if (!isInside(file)) return undefined;
-    const expected = manifest.hashes[file];
-    if (typeof expected !== "string" || !KEY.test(expected)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { reason: "corrupt" };
   }
-  return { dir, manifest };
+  if (typeof parsed !== "object" || parsed === null) return { reason: "corrupt" };
+  const manifest = parsed as Partial<CacheManifest>;
+  if (manifest.version !== CACHE_FORMAT || manifest.engine !== version) return { reason: "incompatible" };
+  if (!isManifest(parsed) || parsed.key !== key) return { reason: "corrupt" };
+  if (parsed.checksum !== checksumOf(parsed)) return { reason: "corrupt" };
+
+  for (const file of parsed.files) {
+    if (!isInside(file)) return { reason: "corrupt" };
+    const expected = parsed.hashes[file];
+    if (typeof expected !== "string" || !KEY.test(expected)) return { reason: "corrupt" };
+  }
+  return { entry: { dir, manifest: parsed } };
 }
 
 /**
  * Copies the entry for `key` into a fresh staging folder beside `out`, checking every file against its hash as it
  * reads it, so a corrupt or half-written entry is a miss rather than bad output. Returns `undefined` when there is no
- * usable entry; the caller then builds cold.
+ * usable entry, reporting why; the caller then builds cold.
  */
-export async function restoreCache(cacheRoot: string, key: string, out: string): Promise<CacheRestore | undefined> {
-  const entry = await readEntry(cacheRoot, key);
-  if (entry === undefined) return undefined;
+export async function restoreCache(
+  cacheRoot: string,
+  key: string,
+  out: string,
+  options: RestoreOptions = {},
+): Promise<CacheRestore | undefined> {
+  const read = await readEntry(cacheRoot, key);
+  if ("reason" in read) {
+    options.onMiss?.(read.reason);
+    return undefined;
+  }
 
   const parent = dirname(out);
   await mkdir(parent, { recursive: true });
   const staging = await mkdtemp(join(parent, `.${basename(out)}-build-`));
   try {
-    const source = join(entry.dir, "out");
-    const directories = new Set(entry.manifest.files.map((file) => dirname(join(staging, file))));
+    const source = join(read.entry.dir, "out");
+    const files = read.entry.manifest.files;
+    const directories = new Set(files.map((file) => dirname(join(staging, file))));
     await Promise.all([...directories].map((dir) => mkdir(dir, { recursive: true })));
-    await inBatches(entry.manifest.files, 32, async (file) => {
+    await inBatches(files, 32, async (file) => {
       const bytes = await readFile(join(source, file));
-      if (hashOf(bytes) !== entry.manifest.hashes[file]) throw new Error(`cache: "${file}" does not match its hash`);
+      if (hashOf(bytes) !== read.entry.manifest.hashes[file]) throw new Error(`cache: "${file}" does not match its hash`);
       await writeFile(join(staging, file), bytes);
     });
-    return { staging, files: [...entry.manifest.files].sort(byCodePoint), diagnostics: entry.manifest.diagnostics };
+    return { staging, files: [...files].sort(byCodePoint), diagnostics: read.entry.manifest.diagnostics };
   } catch {
     await rm(staging, { recursive: true, force: true });
+    options.onMiss?.("corrupt");
     return undefined;
   }
 }
@@ -282,8 +360,9 @@ async function prune(cacheRoot: string, keep: string): Promise<void> {
 }
 
 /**
- * Records a finished build under `key`, with its files and diagnostics. Never throws: a cache that cannot be written
- * only costs the next build its speed.
+ * Records a finished build under `key`, with its files and diagnostics. The write is atomic and complete or absent:
+ * a file list that does not match `source` writes no entry at all. Never throws: a cache that cannot be written only
+ * costs the next build its speed.
  */
 export async function writeCache(
   cacheRoot: string,
@@ -299,7 +378,7 @@ export async function writeCache(
     await inBatches(sorted, 32, async (file) => {
       hashes[file] = hashOf(await readFile(join(source, file)));
     });
-    const manifest: CacheManifest = {
+    const payload: CachePayload = {
       version: CACHE_FORMAT,
       key,
       engine: version,
@@ -307,6 +386,7 @@ export async function writeCache(
       hashes,
       diagnostics,
     };
+    const manifest: CacheManifest = { ...payload, checksum: checksumOf(payload) };
     await writeEntry(cacheRoot, key, manifest, source);
     await prune(cacheRoot, key);
   } catch {
