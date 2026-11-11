@@ -238,6 +238,7 @@ Each `*.ts` file in an outputs folder is one unit. The pipeline finds them by li
 | `reading-time` | `reading-time.json`, the word count and reading minutes of each doc page. |
 | `redirects` | One HTML redirect page per old path, and `_redirects` for hosts that read it. |
 | `related` | `related.json`, the few pages each doc page is most related to. |
+| `review-coverage` | `review-coverage.json`, each doc page's review policy, reviewers, last review, and coverage state. |
 | `robots` | `robots.txt`, with the sitemap address when the config has `url`. |
 | `search` | `pagefind/`, a static search index. |
 | `search-synonyms` | `pagefind.yml`, the search synonyms from `_data/search-synonyms.yml`. |

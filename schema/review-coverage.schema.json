@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mizzen review coverage report",
+  "description": "`review-coverage.json` in the output folder: the resolved review policy, any policy diagnostics, and one entry per rendered content page, keyed by the page URL including `base`. Each entry names its stable `key`, `url`, `source`, the matched policy, a state, the commits inside the window, the distinct mailmap reviewers, and, when known, the last review. Keys are sorted by code point. No unknown state is written as satisfied: `untracked`, `unavailable`, and `no-as-of` have no reviewers or commits, and `overdue` has no commits in the window. Two builds with the same model, policy, root, history, and `SOURCE_DATE_EPOCH` write the same bytes.",
+  "type": "object",
+  "required": [
+    "version",
+    "asOf",
+    "policy",
+    "diagnostics",
+    "pages"
+  ],
+  "properties": {
+    "version": {
+      "description": "The shape version of `review-coverage.json`.",
+      "const": 1
+    },
+    "asOf": {
+      "description": "The explicit instant the review windows end, in UTC ISO 8601, or `null` when none was supplied. The clock is never read.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "policy": {
+      "description": "The resolved policy: the default for pages no rule matches, and the valid rules in declaration order.",
+      "type": "object",
+      "required": [
+        "default",
+        "rules"
+      ],
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/policy"
+        },
+        "rules": {
+          "description": "Valid path rules in declaration order; an invalid rule is left out and explained by a diagnostic.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "diagnostics": {
+      "description": "Every invalid policy finding, in discovery order. An invalid rule is never applied as written.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/diagnostic"
+      }
+    },
+    "pages": {
+      "description": "One entry per rendered content page, keyed by the page URL including `base`, in code-point order.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^/"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "policy": {
+      "type": "object",
+      "required": [
+        "windowDays",
+        "minReviewers"
+      ],
+      "properties": {
+        "windowDays": {
+          "description": "Whole days a review stays fresh. A review older than this is overdue.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "minReviewers": {
+          "description": "Distinct mailmap author names required inside the window.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "rule": {
+      "description": "One path rule: a policy for a source path and everything below it. The most specific matching path wins; the later rule wins a tie.",
+      "type": "object",
+      "required": [
+        "path",
+        "windowDays",
+        "minReviewers"
+      ],
+      "properties": {
+        "path": {
+          "description": "Root-relative source path, using `/`, with no leading or trailing slash.",
+          "type": "string",
+          "minLength": 1
+        },
+        "windowDays": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minReviewers": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "description": "A stable identifier for one policy problem.",
+          "enum": [
+            "review-policy.invalid",
+            "review-policy.invalid-default",
+            "review-policy.invalid-rules",
+            "review-policy.invalid-rule"
+          ]
+        },
+        "message": {
+          "description": "The sentence a maintainer reads.",
+          "type": "string",
+          "minLength": 1
+        },
+        "rule": {
+          "description": "The 1-based position of the rule in `rules`, when the finding is about one rule.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "commit": {
+      "type": "object",
+      "required": [
+        "date",
+        "author"
+      ],
+      "properties": {
+        "date": {
+          "description": "The committer instant in UTC ISO 8601, the same canonical string on every machine.",
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "author": {
+          "description": "The mailmap author name; aliases that map to one name are one reviewer.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "key",
+        "url",
+        "source",
+        "policy",
+        "state",
+        "reviewers",
+        "commits"
+      ],
+      "properties": {
+        "key": {
+          "description": "Stable page key: SHA-256 of the page's URL, a NUL, and its source file, the same key `trust.json` uses.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "url": {
+          "description": "Output URL, including `base`.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "source": {
+          "description": "The source file, relative to the site root, with forward slashes.",
+          "type": "string",
+          "minLength": 1
+        },
+        "policy": {
+          "description": "The policy this page was evaluated against, and the rule path that selected it (`null` for the default).",
+          "type": "object",
+          "required": [
+            "windowDays",
+            "minReviewers",
+            "path"
+          ],
+          "properties": {
+            "windowDays": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "minReviewers": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "path": {
+              "description": "The matched rule path, or `null` for the default policy.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "state": {
+          "description": "`satisfied` has a fresh review and enough distinct reviewers; `insufficient` has a fresh review with too few; `overdue` has history but no review inside the window; `untracked` has no commit; `unavailable` could not be read; `no-as-of` had no explicit instant to measure from. No unknown state is satisfied.",
+          "enum": [
+            "satisfied",
+            "insufficient",
+            "overdue",
+            "untracked",
+            "unavailable",
+            "no-as-of"
+          ]
+        },
+        "lastReview": {
+          "description": "The last commit that ever named the page, even outside the window; absent when no commit is known.",
+          "$ref": "#/$defs/commit"
+        },
+        "reviewers": {
+          "description": "Distinct mailmap author names inside the window, in code-point order. Empty for every state that cannot confirm a review.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "commits": {
+          "description": "Every commit inside the page's window, newest first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/commit"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

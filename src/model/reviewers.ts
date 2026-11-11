@@ -161,3 +161,165 @@ export function reviewCoverage(root: string, pageFile: string): ReviewCoverage {
   if (reviews === undefined) return "unavailable";
   return reviews.has(found.path) ? "recorded" : "untracked";
 }
+
+/** One commit that names a page, with the two facts a review policy counts. */
+export interface ReviewCommit {
+  /** The committer instant in UTC ISO 8601, canonical like {@link Review.date}. */
+  readonly date: string;
+  /** The mailmap author name (`%aN`). Two spellings that map to one name are one reviewer. */
+  readonly author: string;
+}
+
+/** The closed window a review policy asks about: `since` and `until` are both included. */
+export interface ReviewWindow {
+  /** The first instant included in the window. */
+  readonly since: Date;
+  /** The last instant included in the window; the explicit as-of. */
+  readonly until: Date;
+}
+
+/** What git knows about one page inside a review window. */
+export interface PageReviewHistory {
+  /** `recorded` when any commit names the page, `untracked` when none does, `unavailable` when git could not answer. */
+  readonly coverage: ReviewCoverage;
+  /** Commits in the window, newest first. Empty when the page is untracked, unavailable, or only older. */
+  readonly commits: readonly ReviewCommit[];
+  /** The distinct mailmap author names in `commits`, in code-point order. */
+  readonly reviewers: readonly string[];
+  /** The last commit that names the page, when one exists; it can be older than the window. */
+  readonly lastReview?: ReviewCommit;
+}
+
+/** What one bounded root log found: commits per path, so later pages of the same root read it from memory. */
+interface WindowHistory {
+  /** Commits per root-relative path, or `undefined` when git did not answer. */
+  readonly commits: Map<string, ReviewCommit[]> | undefined;
+}
+
+/** One bounded history per root and window, so two pages with the same window pay for one `git log`. */
+const WINDOWS = new Map<string, WindowHistory>();
+
+/** Compares commits newest first, then by author, so a fixed repository always returns the same order. */
+function newestFirst(a: ReviewCommit, b: ReviewCommit): number {
+  if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+  return a.author < b.author ? -1 : a.author > b.author ? 1 : 0;
+}
+
+/**
+ * Reads every commit in `[since, until]` under `root` with one bounded `git log`, newest first. The lower
+ * boundary is widened by one second for git's date parsing and the result is filtered exactly, so a commit
+ * on either boundary is included. A failure, including a missing git, is `undefined`: the window was not
+ * read, which is not the same as a window with no commits.
+ */
+function readWindow(root: string, since: number, until: number): Map<string, ReviewCommit[]> | undefined {
+  let text: string;
+  try {
+    // `--relative` with `-- .` limits the log to `root`. `--since-as-filter` drops older commits without
+    // stopping at the first old one, so a commit with a skewed date cannot hide newer ancestors. The upper
+    // bound is applied in memory rather than with `--until`, which also assumes date-ordered history.
+    // shortcut: --since-as-filter needs Git 2.37+; older git reads the window as unavailable, never wrong.
+    text = execFileSync(
+      "git",
+      [
+        "log",
+        "--relative",
+        "--format=%x01%cI%x02%aN",
+        "--name-only",
+        "-z",
+        `--since-as-filter=${new Date(since - 1000).toISOString()}`,
+        "--",
+        ".",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+  } catch {
+    return undefined;
+  }
+
+  const commits = new Map<string, ReviewCommit[]>();
+
+  // Each record is `\x01 date \x02 author NUL \n file NUL file NUL ...`; the author never holds a NUL or \x01.
+  for (const record of text.split("\x01")) {
+    const [head = "", ...files] = record.split("\0");
+    const [date = "", author = ""] = head.split("\x02");
+    const trimmedAuthor = author.trim();
+    const instant = canonicalInstant(date);
+    if (instant === undefined || trimmedAuthor === "") continue;
+    const millis = new Date(instant).getTime();
+    if (millis < since || millis > until) continue;
+
+    for (const file of files) {
+      const path = file.replace(/^\r?\n/, "");
+      if (path === "") continue;
+      const list = commits.get(path);
+      if (list === undefined) commits.set(path, [{ date: instant, author: trimmedAuthor }]);
+      else list.push({ date: instant, author: trimmedAuthor });
+    }
+  }
+
+  for (const list of commits.values()) list.sort(newestFirst);
+  return commits;
+}
+
+/** The bounded history of one root and window, read once and cached for the life of the process. */
+function windowAt(root: string, since: number, until: number): Map<string, ReviewCommit[]> | undefined {
+  const key = `${root}\0${since}\0${until}`;
+  const found = WINDOWS.get(key);
+  if (found !== undefined) return found.commits;
+  const commits = readWindow(root, since, until);
+  WINDOWS.set(key, { commits });
+  return commits;
+}
+
+/** The distinct author names of a commit list, in code-point order. */
+function authorsOf(commits: readonly ReviewCommit[]): readonly string[] {
+  return [...new Set(commits.map((commit) => commit.author))].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * What git knows about `pageFile` inside `window`: the commits in the window, the distinct mailmap authors
+ * among them, and the last review even when it is older than the window. The window is read with one
+ * bounded `git log` per root, shared by every page asking about the same window. A page with no commit in
+ * the window is classified by the per-root last-commit cache {@link reviewers} already keeps: a page with
+ * an older commit is `recorded` (the caller can call it overdue), and a page no commit names is
+ * `untracked`. A path outside the root, a root outside a work tree, and a failed log all read
+ * `unavailable`, never as an empty history that would pass.
+ *
+ * The dates come from `%cI` and the names from `%aN`, so the repository's `.mailmap` decides identity. A
+ * fixed root and window give the same answer, and each root and window is read once per process.
+ */
+export function reviewHistory(root: string, pageFile: string, window: ReviewWindow): PageReviewHistory {
+  const since = window.since.getTime();
+  const until = window.until.getTime();
+  if (!Number.isFinite(since) || !Number.isFinite(until) || since > until) {
+    return { coverage: "unavailable", commits: [], reviewers: [] };
+  }
+
+  const found = historyOf(root, pageFile);
+  if (found === undefined) return { coverage: "unavailable", commits: [], reviewers: [] };
+
+  const byPath = windowAt(found.base, since, until);
+  if (byPath === undefined) return { coverage: "unavailable", commits: [], reviewers: [] };
+
+  const commits = byPath.get(found.path) ?? [];
+  if (commits.length > 0) {
+    return {
+      coverage: "recorded",
+      commits,
+      reviewers: authorsOf(commits),
+      lastReview: commits[0]!,
+    };
+  }
+
+  // Nothing in the window: one cached read of the whole root still says whether any commit ever names it.
+  const last = reviewers(found.base, found.path);
+  if (last !== UNKNOWN) {
+    return { coverage: "recorded", commits: [], reviewers: [], lastReview: last };
+  }
+  return { coverage: reviewCoverage(found.base, found.path), commits: [], reviewers: [] };
+}
