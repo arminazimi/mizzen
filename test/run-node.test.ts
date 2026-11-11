@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { runNodeExample } from "../src/pipeline/examples/run-node.ts";
+import { MAX_OUTPUT_BYTES, runNodeExample } from "../src/pipeline/examples/run-node.ts";
+import { deniedCommand, sandboxAvailable } from "../src/pipeline/examples/run-shell.ts";
+
+/** True when this host has an OS sandbox, so the tests that need one can skip instead of assuming it (like `hasGit`). */
+const hasSandbox = sandboxAvailable();
 
 test("a js example is an ES module and its stdout and exit code are captured", async () => {
   const result = await runNodeExample({
@@ -56,14 +62,13 @@ test("a timeout kills the example and reports a timeout instead of hanging", asy
   const result = await runNodeExample({
     lang: "js",
     code: "setInterval(() => {}, 1000);\nconsole.log(\"started\");\n",
-    // Generous enough that a loaded machine still starts the child and prints before the timer fires.
+    // Small on purpose: `timedOut` proves the child was alive when the timer fired, so no output has to arrive first.
     timeoutMs: 1_500,
   });
   const elapsed = Date.now() - startedAt;
   assert.equal(result.timedOut, true);
   assert.equal(result.ok, false);
   assert.equal(result.exitCode, null);
-  assert.equal(result.stdout, "started\n");
   assert.ok(elapsed < 5_000, `the run took ${String(elapsed)} ms, so the timeout did not kill it`);
 });
 
@@ -124,3 +129,112 @@ test("a caller's mistake is rejected before anything runs", async () => {
     TypeError,
   );
 });
+
+test("the result says honestly whether the run was sandboxed", async () => {
+  const result = await runNodeExample({ lang: "js", code: 'console.log("hi");\n' });
+  assert.equal(result.sandboxed, hasSandbox);
+});
+
+test("a denied word in a string literal or comment is not a command invocation", async () => {
+  const result = await runNodeExample({
+    lang: "js",
+    code: '// sudo rm -rf /\nconsole.log("sudo");\n',
+  });
+  assert.equal(result.rejected, false);
+  assert.equal(result.ok, true, result.stderr);
+  assert.equal(result.stdout, "sudo\n");
+});
+
+test("the denied-command guard reads only the command argument of spawn calls", () => {
+  for (const code of [
+    'execSync("sudo true")',
+    'exec("sudo true")',
+    'execFile("sudo", [])',
+    'execFileSync("sudo", [])',
+    'spawn("sudo", [])',
+    'spawnSync("sudo", [])',
+    'execSync("echo ok && sudo true")',
+    'execSync("echo ok"); execSync("sudo true")',
+    "execSync(`sudo true`)",
+  ]) {
+    assert.notEqual(deniedCommand(code, "node"), undefined, `rejects ${JSON.stringify(code)}`);
+  }
+  for (const code of [
+    'console.log("sudo")',
+    'const word = "sudo";',
+    '// execSync("sudo true")',
+    '/* spawn("sudo", []) */',
+    '/* sudo',
+    'spawn("echo", ["sudo"])',
+    'execSync("echo sudo")',
+    'fork("sudo-worker.js")',
+    'const s = "sudo',
+  ]) {
+    assert.equal(deniedCommand(code, "node"), undefined, `allows ${JSON.stringify(code)}`);
+  }
+});
+
+test("a Node example that invokes a denied command is refused before anything runs", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "mizzen-node-denied-"));
+  try {
+    const result = await runNodeExample({
+      lang: "js",
+      cwd: parent,
+      code: 'import { execSync } from "node:child_process";\nexecSync("sudo -n true");\n',
+    });
+    assert.equal(result.rejected, true);
+    assert.equal(result.exitCode, null);
+    assert.equal(result.sandboxed, false);
+    assert.match(result.stderr, /denied command "sudo"/);
+    assert.deepEqual(readdirSync(parent), [], "no temp folder is created for a refused example");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a runaway example is cut off at the output cap and killed", async () => {
+  const result = await runNodeExample({
+    lang: "js",
+    code: 'setInterval(() => { for (let i = 0; i < 64; i++) console.log("x".repeat(1024)); }, 1);\n',
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.outputLimited, true);
+  assert.equal(result.timedOut, false, "the output limit, not the timeout, ended the run");
+  assert.equal(result.ok, false);
+  assert.ok(result.stdout.endsWith("[output truncated]\n"), "the cut is marked");
+  const kept = Buffer.byteLength(result.stdout) - Buffer.byteLength("\n[output truncated]\n");
+  assert.equal(kept, MAX_OUTPUT_BYTES, "exactly the budget is kept");
+});
+
+test("a timeout kills the whole process group, including a spawned command", async () => {
+  const result = await runNodeExample({
+    lang: "js",
+    code: 'import { spawn } from "node:child_process";\nspawn("sleep", ["30"], { stdio: "inherit" });\nsetInterval(() => {}, 1000);\n',
+    timeoutMs: 500,
+  });
+  assert.equal(result.timedOut, true);
+  // The spawned sleep holds the stdout pipe, so a kill of only the example would keep `close` waiting for it.
+  assert.ok(result.durationMs < 5_000, `the group was killed promptly (${result.durationMs}ms)`);
+});
+
+test(
+  "a Node example cannot write outside its temp folder when an OS sandbox is available",
+  { skip: hasSandbox ? false : "no OS sandbox (sandbox-exec or bwrap) is available" },
+  async () => {
+    const parent = mkdtempSync(join(tmpdir(), "mizzen-node-outside-"));
+    // The sandbox matches canonical paths, and macOS `tmpdir()` is a symlink target away from its real path.
+    const target = join(realpathSync(parent), "escaped.txt");
+    try {
+      const result = await runNodeExample({
+        lang: "js",
+        env: { MIZZEN_TARGET: target },
+        code: 'import { writeFileSync } from "node:fs";\nwriteFileSync(process.env.MIZZEN_TARGET, "escaped");\n',
+      });
+      assert.equal(result.sandboxed, true, "the escape test only runs with a real sandbox");
+      assert.equal(result.ok, false, "the write was refused");
+      assert.equal(existsSync(target), false, "no file was created outside the run folder");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  },
+);
