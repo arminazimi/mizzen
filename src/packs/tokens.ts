@@ -25,9 +25,14 @@
  *   word, and indentation is not counted separately.
  *
  * The estimate was measured against the `cl100k_base` vocabulary, a common reference tokenizer, on the corpus in
- * `packages/engine/test/packs-tokens.test.ts`: English, Persian, TypeScript, and Chinese come out within
+ * `test/packs-tokens.test.ts`: English, Persian, TypeScript, and Chinese come out within
  * {@link TOKEN_ERROR_MARGIN} of the reference count, and the test fails outside that margin. Other vocabularies
  * differ, especially for rare scripts, so treat the margin as a planning budget rather than a guarantee.
+ *
+ * The error is script-dependent rather than a fixed bias: English and TypeScript are counted a few percent high
+ * on that corpus, while Persian and Han are counted a few percent low, so no constant correction removes it. A
+ * hard limit should reserve {@link TOKEN_ERROR_MARGIN} above the estimate; {@link TokenEstimate.upper} reports
+ * that planning bound, and {@link TokenEstimate.margin} reports the fraction it adds.
  */
 
 /** How far the estimate may sit from the reference count on the test corpus, as a fraction. */
@@ -36,12 +41,16 @@ export const TOKEN_ERROR_MARGIN = 0.15;
 /** The name the estimate reports as its method: script-aware counting, no tokenizer. */
 export const TOKEN_METHOD = "script-aware";
 
-/** A token estimate and the method that produced it. */
+/** A token estimate, the method that produced it, and how far it may be off. */
 export interface TokenEstimate {
   /** Estimated tokens: a non-negative integer. */
   readonly tokens: number;
   /** Always {@link TOKEN_METHOD}; lets a reader record how a number was made. */
   readonly method: string;
+  /** The relative error margin the estimate carries: {@link TOKEN_ERROR_MARGIN}. */
+  readonly margin: number;
+  /** A planning upper bound: {@link tokens} grown by {@link margin}, rounded up. Reserve it for a hard limit. */
+  readonly upper: number;
 }
 
 /** Characters per token inside a word, per script. Higher means cheaper text. */
@@ -122,5 +131,5 @@ export function estimateTokens(text: string): TokenEstimate {
       tokens += Math.ceil(characters(run) / SYMBOLS_PER_TOKEN);
     }
   }
-  return { tokens, method: TOKEN_METHOD };
+  return { tokens, method: TOKEN_METHOD, margin: TOKEN_ERROR_MARGIN, upper: Math.ceil(tokens * (1 + TOKEN_ERROR_MARGIN)) };
 }
