@@ -12,10 +12,14 @@
  * `edit.generated-target` error, never a guess.
  */
 import type { Heading, Page, Site, SourcePos } from "../contracts/index.ts";
-import { PatchError, sliceBySpan, type Patch, type PatchSpan } from "./patch.ts";
+import { hashSource, PatchError, sliceBySpan, type Patch, type PatchSpan } from "./patch.ts";
 
 /** Why a heading edit could not be planned. Each code names one situation, so a caller can act on it. */
-export type EditPlanErrorCode = "edit.unknown-page" | "edit.generated-target" | "edit.source-mismatch";
+export type EditPlanErrorCode =
+  | "edit.unknown-page"
+  | "edit.generated-target"
+  | "edit.ambiguous-target"
+  | "edit.source-mismatch";
 
 /** A refused edit plan. `url` and `headingId` echo the request, so a caller can report it. */
 export class EditPlanError extends Error {
@@ -109,9 +113,14 @@ function looksLikeHeading(expected: string, depth: number): boolean {
  * node and a line ending after it are left alone; a line ending inside the span (setext headings)
  * is carried through.
  *
+ * The patch carries the SHA-256 of `source`, so applying it to a file that changed after planning
+ * is refused with `hash-mismatch` before the span is touched.
+ *
  * Throws an {@link EditPlanError}:
  * - `edit.unknown-page` when no page has the URL;
  * - `edit.generated-target` when the heading id is not a source heading, or has no usable position;
+ * - `edit.ambiguous-target` when more than one source heading has the id, so the edit names no
+ *   single span;
  * - `edit.source-mismatch` when the span in `source` does not hold a heading of that depth (usually
  *   because the caller passed another page's text).
  */
@@ -125,7 +134,15 @@ export function planHeadingEdit(options: PlanHeadingEditOptions): Patch {
     });
   }
 
-  const heading: Heading | undefined = page.headings.find((candidate) => candidate.id === headingId);
+  const matches = page.headings.filter((candidate) => candidate.id === headingId);
+  if (matches.length > 1) {
+    throw new EditPlanError(
+      "edit.ambiguous-target",
+      `Heading id ${JSON.stringify(headingId)} names ${matches.length} source headings of ${JSON.stringify(url)}; the edit is ambiguous.`,
+      { url, headingId },
+    );
+  }
+  const heading: Heading | undefined = matches[0];
   if (heading === undefined) {
     throw new EditPlanError(
       "edit.generated-target",
@@ -177,5 +194,6 @@ export function planHeadingEdit(options: PlanHeadingEditOptions): Patch {
     span,
     expected,
     replacement: `${"#".repeat(heading.depth)} ${newText}${newline}`,
+    beforeHash: hashSource(source),
   };
 }

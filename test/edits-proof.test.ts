@@ -133,6 +133,50 @@ test("the same input gives the same bytes, whatever order the files came in", ()
   assert.equal(JSON.stringify(JSON.parse(bytes), null, 2) + "\n", bytes, "two spaces, no reordering");
 });
 
+test("records the resulting spans, sorted, with the SHA-256 of the text each covers", () => {
+  const after = "# New\n\nBody\n";
+  const record = createProof(
+    input({
+      after: { "docs/a.md": after },
+      spans: {
+        "docs/a.md": [
+          { line: 3, column: 1, endLine: 3, endColumn: 4 },
+          { line: 1, column: 3, endLine: 1, endColumn: 5 },
+        ],
+      },
+    }),
+  );
+
+  assert.deepEqual(record.files[0]?.spans, [
+    { line: 1, column: 3, endLine: 1, endColumn: 5, hash: hash("New") },
+    { line: 3, column: 1, endLine: 3, endColumn: 4, hash: hash("Body") },
+  ]);
+  assert.equal("spans" in createProof(input()), false, "no spans are recorded when none are given");
+});
+
+test("refuses a resulting span that is outside the after text or has no text to hash", () => {
+  assert.throws(
+    () =>
+      createProof(
+        input({
+          after: { "docs/a.md": "# New\n" },
+          spans: { "docs/a.md": [{ line: 9, column: 1, endLine: 9, endColumn: 2 }] },
+        }),
+      ),
+    (error: unknown) => error instanceof ProofError && error.code === "invalid-span",
+  );
+  assert.throws(
+    () =>
+      createProof(
+        input({
+          after: { "docs/a.md": null },
+          spans: { "docs/a.md": [{ line: 1, column: 1, endLine: 1, endColumn: 1 }] },
+        }),
+      ),
+    (error: unknown) => error instanceof ProofError && error.code === "invalid-span",
+  );
+});
+
 test("the record validates against the schema embedded in the module", () => {
   const record = createProof(
     input({
@@ -141,6 +185,7 @@ test("the record validates against the schema embedded in the module", () => {
         findings: [{ id: "ae.meta", severity: "warning", message: "Missing description.", file: "docs/a.md", line: 1 }],
       },
       examples: { rerun: ["node/a"], passed: 1, failed: 0 },
+      spans: { "docs/a.md": [{ line: 1, column: 1, endLine: 1, endColumn: 3 }] },
     }),
   );
 

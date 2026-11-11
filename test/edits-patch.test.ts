@@ -1,12 +1,21 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
+  applyFilePatches,
   applyPatch,
+  applyPatches,
+  EditFileError,
   formatPatchSpan,
   hashSource,
   PatchError,
   sliceBySpan,
   spanToOffsets,
+  writeFilePatches,
+  type EditFile,
+  type FilePatches,
   type Patch,
   type PatchSpan,
 } from "../src/edits/patch.ts";
@@ -18,6 +27,11 @@ function span(line: number, column: number, endLine: number, endColumn: number, 
 
 function patch(source: string, at: PatchSpan, replacement: string, expected?: string): Patch {
   return expected === undefined ? { span: at, replacement } : { span: at, replacement, expected };
+}
+
+/** A patch that carries both preconditions, as a plan does. */
+function planned(source: string, at: PatchSpan, replacement: string, expected: string): Patch {
+  return { span: at, replacement, expected, beforeHash: hashSource(source) };
 }
 
 test("applies a replacement on an ASCII span and keeps the rest byte for byte", () => {
@@ -207,6 +221,267 @@ test("applyPatch is pure and deterministic", () => {
   const second = applyPatch(source, at);
   assert.equal(first, second);
   assert.equal(source, "alpha beta\n");
+});
+
+test("applies a set of non-overlapping patches in one pass, whatever order they come in", () => {
+  const source = "one two three\n";
+  const result = applyPatches(source, [
+    patch(source, span(1, 9, 1, 13), "THREE", "three"),
+    patch(source, span(1, 5, 1, 7), "TWO", "two"),
+  ]);
+
+  assert.equal(result.text, "one TWO THREE\n");
+  assert.equal(source, "one two three\n", "the source is not mutated");
+  assert.deepEqual(result.spans, [span(1, 5, 1, 7), span(1, 9, 1, 13)]);
+});
+
+test("adjacent spans are not an overlap, and a deletion leaves no resulting span", () => {
+  assert.equal(
+    applyPatches("ab\n", [patch("ab\n", span(1, 1, 1, 1), "x", "a"), patch("ab\n", span(1, 2, 1, 2), "y", "b")]).text,
+    "xy\n",
+  );
+
+  const deleted = applyPatches("abc\n", [{ span: span(1, 2, 1, 2), replacement: "" }]);
+  assert.equal(deleted.text, "ac\n");
+  assert.deepEqual(deleted.spans, []);
+});
+
+test("records where a multi-line replacement lands in the result", () => {
+  const result = applyPatches("a\nb\n", [{ span: span(1, 1, 1, 1), replacement: "x\ny" }]);
+  assert.equal(result.text, "x\ny\nb\n");
+  assert.deepEqual(result.spans, [span(1, 1, 2, 1)]);
+});
+
+test("refuses overlapping spans and the same span twice, naming both spans", () => {
+  const source = "abcdef\n";
+  assert.throws(
+    () =>
+      applyPatches(source, [
+        patch(source, span(1, 1, 1, 3), "x"),
+        patch(source, span(1, 3, 1, 5), "y"),
+      ]),
+    (error: unknown) => {
+      assert.ok(error instanceof PatchError);
+      assert.equal(error.code, "overlapping-spans");
+      assert.match(error.message, /1:1-1:3/);
+      assert.match(error.message, /1:3-1:5/);
+      assert.equal(error.span.line, 1);
+      return true;
+    },
+  );
+
+  assert.throws(
+    () =>
+      applyPatches(source, [
+        patch(source, span(1, 1, 1, 3), "x"),
+        patch(source, span(1, 1, 1, 3), "y"),
+      ]),
+    (error: unknown) => error instanceof PatchError && error.code === "ambiguous-span",
+  );
+});
+
+test("a stale hash on any patch refuses the whole set before it produces text", () => {
+  const source = "one two\n";
+  assert.throws(
+    () =>
+      applyPatches(source, [
+        patch(source, span(1, 1, 1, 3), "ONE", "one"),
+        { span: span(1, 5, 1, 7), expected: "two", replacement: "TWO", beforeHash: hashSource("other\n") },
+      ]),
+    (error: unknown) => error instanceof PatchError && error.code === "hash-mismatch",
+  );
+});
+
+test("applies a whole edit set across files, with hashes and resulting spans per file", () => {
+  const files: FilePatches[] = [
+    { file: "docs/a.md", source: "# Old\n", patches: [patch("# Old\n", span(1, 3, 1, 5, "docs/a.md"), "New", "Old")] },
+    { file: "docs/b.md", source: "body\n", patches: [patch("body\n", span(1, 1, 1, 4, "docs/b.md"), "text", "body")] },
+  ];
+  const results = applyFilePatches(files);
+
+  assert.deepEqual(
+    results.map((result) => result.after),
+    ["# New\n", "text\n"],
+  );
+  assert.equal(results[0]?.beforeHash, hashSource("# Old\n"));
+  assert.equal(results[0]?.afterHash, hashSource("# New\n"));
+  assert.deepEqual(results[0]?.spans, [span(1, 3, 1, 5)]);
+  assert.deepEqual(results[1]?.spans, [span(1, 1, 1, 4)]);
+});
+
+test("one refused file refuses the whole set and names the file", () => {
+  const files: FilePatches[] = [
+    { file: "docs/a.md", source: "# Old\n", patches: [patch("# Old\n", span(1, 3, 1, 5), "New", "Old")] },
+    {
+      file: "docs/b.md",
+      source: "body\n",
+      patches: [
+        { span: span(1, 1, 1, 4, "docs/b.md"), expected: "body", replacement: "text", beforeHash: "0".repeat(64) },
+      ],
+    },
+  ];
+
+  assert.throws(
+    () => applyFilePatches(files),
+    (error: unknown) => error instanceof PatchError && error.code === "hash-mismatch" && error.span.file === "docs/b.md",
+  );
+});
+
+test("refuses a duplicate file and a patch that names another file", () => {
+  const files: FilePatches[] = [
+    { file: "docs/a.md", source: "# Old\n", patches: [] },
+    { file: "docs/a.md", source: "# Old\n", patches: [] },
+  ];
+  assert.throws(
+    () => applyFilePatches(files),
+    (error: unknown) =>
+      error instanceof EditFileError && error.code === "duplicate-file" && error.file === "docs/a.md",
+  );
+
+  assert.throws(
+    () =>
+      applyFilePatches([
+        {
+          file: "docs/a.md",
+          source: "# Old\n",
+          patches: [patch("# Old\n", span(1, 3, 1, 5, "docs/b.md"), "New", "Old")],
+        },
+      ]),
+    (error: unknown) =>
+      error instanceof EditFileError && error.code === "file-mismatch" && error.file === "docs/a.md",
+  );
+});
+
+/** A temporary tree holding `files`, removed by the caller. */
+function tree(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), "edits-patch-"));
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  }
+  return root;
+}
+
+/** The bytes of a tree, keyed by relative path, for a byte-for-byte comparison. */
+function snapshot(root: string, paths: readonly string[]): Record<string, string> {
+  return Object.fromEntries(paths.map((path) => [path, readFileSync(join(root, path), "utf8")]));
+}
+
+test("writes a whole edit set, and a stale hash in one file leaves every file byte-identical", async () => {
+  const root = tree({ "docs/a.md": "# Old\n", "docs/b.md": "body\n" });
+  const before = snapshot(root, ["docs/a.md", "docs/b.md"]);
+  try {
+    const edit: EditFile[] = [
+      { file: "docs/a.md", patches: [planned(before["docs/a.md"]!, span(1, 3, 1, 5, "docs/a.md"), "New", "Old")] },
+      { file: "docs/b.md", patches: [planned(before["docs/b.md"]!, span(1, 1, 1, 4, "docs/b.md"), "text", "body")] },
+    ];
+    const results = await writeFilePatches(root, edit);
+    assert.deepEqual(
+      results.map((result) => result.after),
+      ["# New\n", "text\n"],
+    );
+    assert.equal(readFileSync(join(root, "docs/a.md"), "utf8"), "# New\n");
+    assert.equal(readFileSync(join(root, "docs/b.md"), "utf8"), "text\n");
+    assert.deepEqual(readdirSync(join(root, "docs")), ["a.md", "b.md"], "no staging folder is left");
+
+    const stale: EditFile[] = [
+      { file: "docs/a.md", patches: [planned("# New\n", span(1, 3, 1, 5, "docs/a.md"), "Newer", "New")] },
+      { file: "docs/b.md", patches: [{ ...edit[1]!.patches[0]!, beforeHash: "0".repeat(64) }] },
+    ];
+    await assert.rejects(
+      writeFilePatches(root, stale),
+      (error: unknown) => error instanceof PatchError && error.code === "hash-mismatch",
+    );
+    assert.deepEqual(
+      snapshot(root, ["docs/a.md", "docs/b.md"]),
+      { "docs/a.md": "# New\n", "docs/b.md": "text\n" },
+      "the second refusal changed nothing",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a refused multi-file edit leaves the original tree byte-for-byte intact", async () => {
+  const root = tree({ "docs/a.md": "# Old\n", "docs/b.md": "body\n" });
+  const before = snapshot(root, ["docs/a.md", "docs/b.md"]);
+  try {
+    await assert.rejects(
+      writeFilePatches(root, [
+        { file: "docs/a.md", patches: [planned(before["docs/a.md"]!, span(1, 3, 1, 5, "docs/a.md"), "New", "Old")] },
+        {
+          file: "docs/b.md",
+          patches: [
+            { span: span(1, 1, 1, 4, "docs/b.md"), expected: "other", replacement: "text", beforeHash: hashSource(before["docs/b.md"]!) },
+          ],
+        },
+      ]),
+      (error: unknown) => error instanceof PatchError && error.code === "expected-mismatch",
+    );
+    assert.deepEqual(snapshot(root, ["docs/a.md", "docs/b.md"]), before);
+    assert.deepEqual(readdirSync(join(root, "docs")), ["a.md", "b.md"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("writing requires the source hash and the exact expected text by default", async () => {
+  const root = tree({ "docs/a.md": "# Old\n" });
+  try {
+    await assert.rejects(
+      writeFilePatches(root, [
+        { file: "docs/a.md", patches: [{ span: span(1, 1, 1, 5, "docs/a.md"), replacement: "# New" }] },
+      ]),
+      (error: unknown) => error instanceof PatchError && error.code === "missing-hash",
+    );
+    await assert.rejects(
+      writeFilePatches(
+        root,
+        [
+          {
+            file: "docs/a.md",
+            patches: [{ span: span(1, 1, 1, 5, "docs/a.md"), replacement: "# New", beforeHash: hashSource("# Old\n") }],
+          },
+        ],
+        { requireHash: true, requireExpected: true },
+      ),
+      (error: unknown) => error instanceof PatchError && error.code === "missing-expected",
+    );
+    assert.equal(readFileSync(join(root, "docs/a.md"), "utf8"), "# Old\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("refuses a file outside the site root, a missing file, and the same file spelled twice", async () => {
+  const parent = tree({ "outside.md": "# Old\n", "site/docs/a.md": "# Old\n" });
+  const site = join(parent, "site");
+  const edits = (file: string): EditFile[] => [
+    { file, patches: [planned("# Old\n", span(1, 3, 1, 5), "New", "Old")] },
+  ];
+  try {
+    await assert.rejects(
+      writeFilePatches(site, edits("../outside.md")),
+      (error: unknown) =>
+        error instanceof EditFileError && error.code === "path-escape" && error.file === "../outside.md",
+    );
+    assert.equal(readFileSync(join(parent, "outside.md"), "utf8"), "# Old\n");
+
+    await assert.rejects(
+      writeFilePatches(site, edits("docs/missing.md")),
+      (error: unknown) =>
+        error instanceof EditFileError && error.code === "source-missing" && error.file === "docs/missing.md",
+    );
+
+    await assert.rejects(
+      writeFilePatches(site, [...edits("docs/a.md"), ...edits("./docs/a.md")]),
+      (error: unknown) =>
+        error instanceof EditFileError && error.code === "duplicate-file" && error.file === "docs/a.md",
+    );
+    assert.equal(readFileSync(join(site, "docs/a.md"), "utf8"), "# Old\n");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test("requireExpected and requireHash refuse a patch that carries neither", () => {

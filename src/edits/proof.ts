@@ -4,8 +4,9 @@
  * An edit is reviewable only when the reviewer can see what the files held before it, what they
  * hold after it, and how the checks that follow an edit ended. This module writes that record as
  * one JSON file: every touched path relative to the site root (and so repository-relative when the
- * site is the repository), the SHA-256 of its bytes before and after, the doctor level (and,
- * optionally, a short projection of its findings), and a summary of the examples an edit re-ran.
+ * site is the repository), the SHA-256 of its bytes before and after, the resulting source spans
+ * with the SHA-256 of the text each covers, the doctor level (and, optionally, a short projection
+ * of its findings), and a summary of the examples an edit re-ran.
  *
  * Two rules keep the record reproducible:
  *
@@ -14,8 +15,8 @@
  *   used by `tools/deterministic`: decimal seconds since the Unix epoch. When neither is present,
  *   the `date` field is left out. This module never calls `Date.now()`.
  * - **Fixed order.** Record keys are written in one fixed order, `files` is sorted by path
- *   comparing code points, and `examples.rerun` is sorted and has no duplicates. The same input
- *   therefore gives the same bytes.
+ *   comparing code points, each file's `spans` are sorted by position, and `examples.rerun` is
+ *   sorted and has no duplicates. The same input therefore gives the same bytes.
  *
  * A file that did not exist before the edit, or does not exist after it, is represented by an
  * explicit `null` hash: `{ "path": "docs/new.md", "before": null, "after": "<hash>" }` is an added
@@ -34,6 +35,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { formatPatchSpan, sliceBySpan, type PatchSpan } from "./patch.ts";
 
 /** The proof format version. Only 1 exists. */
 export const PROOF_VERSION = 1;
@@ -47,6 +49,23 @@ export type ProofLevel = (typeof PROOF_LEVELS)[number] | null;
 /** The bytes of a file before or after an edit, or `null` when the file did not exist then. */
 export type ProofContent = string | Uint8Array | null;
 
+/**
+ * One resulting source span and the SHA-256 of the text it covers, so a reader can re-slice the
+ * file and check that the edit still points where it said it did. The end is inclusive.
+ */
+export interface ProofSpan {
+  /** Line where the resulting text starts. */
+  readonly line: number;
+  /** Column where the resulting text starts (inclusive, 1-based, Unicode code points). */
+  readonly column: number;
+  /** Line where the resulting text ends. */
+  readonly endLine: number;
+  /** Column of the resulting text's last character (inclusive, 1-based). */
+  readonly endColumn: number;
+  /** SHA-256 of the text at the span in the file's after content. */
+  readonly hash: string;
+}
+
 /** One file's entry in the record. A `null` hash means the file was absent on that side of the edit. */
 export interface ProofFile {
   /** The file, relative to the site root, with forward slashes. */
@@ -55,6 +74,8 @@ export interface ProofFile {
   readonly before: string | null;
   /** SHA-256 of the file's bytes after the edit, or `null` when the file does not exist now. */
   readonly after: string | null;
+  /** The resulting source spans, sorted by position. Omitted when the caller records none. */
+  readonly spans?: readonly ProofSpan[];
 }
 
 /**
@@ -133,6 +154,12 @@ export interface ProofInput {
   readonly before: Readonly<Record<string, ProofContent>>;
   /** The contents after the edit, keyed the same way. `null` means the file no longer exists. */
   readonly after: Readonly<Record<string, ProofContent>>;
+  /**
+   * The resulting spans to prove, keyed by the same strings as `files`. Each is checked against
+   * the file's after content and its text hashed; a span outside that text is refused. Omitted
+   * entries, and an empty list, record no spans for that file.
+   */
+  readonly spans?: Readonly<Record<string, readonly PatchSpan[]>>;
   /** The doctor result, when one ran. */
   readonly doctor?: ProofDoctor;
   /** The examples the edit re-ran. */
@@ -159,6 +186,7 @@ export type ProofErrorCode =
   | "duplicate-path"
   | "missing-content"
   | "invalid-content"
+  | "invalid-span"
   | "invalid-date"
   | "invalid-doctor"
   | "invalid-examples";
@@ -254,6 +282,24 @@ export const proofSchema: Record<string, unknown> = {
           description: "SHA-256 before the edit, or null when the file did not exist then.",
         },
         path: { $ref: "#/$defs/path" },
+        spans: {
+          type: "array",
+          description: "The resulting source spans, sorted by position, each with the SHA-256 of the text it covers.",
+          items: { $ref: "#/$defs/span" },
+        },
+      },
+      additionalProperties: false,
+    },
+    span: {
+      type: "object",
+      description: "One resulting source span and the SHA-256 of the text it covers. The end is inclusive.",
+      required: ["column", "endColumn", "endLine", "hash", "line"],
+      properties: {
+        column: { type: "integer", minimum: 1, description: "Column where the resulting text starts, 1-based." },
+        endColumn: { type: "integer", minimum: 1, description: "Column of the resulting text's last character, 1-based." },
+        endLine: { type: "integer", minimum: 1, description: "Line where the resulting text ends." },
+        hash: { $ref: "#/$defs/hash", description: "SHA-256 of the text at the span in the file's after content." },
+        line: { type: "integer", minimum: 1, description: "Line where the resulting text starts." },
       },
       additionalProperties: false,
     },
@@ -340,6 +386,56 @@ function contentOf(
     "invalid-content",
     `proof: "${file}" in ${side} is not a string, a Uint8Array, or null.`,
   );
+}
+
+/** Compares two proof spans by position, never by locale. */
+function bySpan(a: ProofSpan, b: ProofSpan): number {
+  return a.line - b.line || a.column - b.column || a.endLine - b.endLine || a.endColumn - b.endColumn;
+}
+
+/**
+ * The resulting spans a caller gave for `file`, checked against its after content and reduced to
+ * the record's form. A span that does not name text in the after content is refused, so a proof
+ * never points at a position it cannot back with a hash.
+ */
+function spansOf(
+  input: ProofInput,
+  file: string,
+  after: ProofContent,
+): readonly ProofSpan[] | undefined {
+  if (input.spans === undefined || !Object.prototype.hasOwnProperty.call(input.spans, file)) return undefined;
+  const spans = input.spans[file];
+  if (!Array.isArray(spans)) {
+    throw new ProofError("invalid-span", `proof: spans for "${file}" is not a list.`);
+  }
+  if (spans.length === 0) return undefined;
+  if (typeof after !== "string") {
+    throw new ProofError("invalid-span", `proof: "${file}" records spans, but its after content is not a string.`);
+  }
+
+  const records = spans.map((span): ProofSpan => {
+    let text: string;
+    try {
+      text = sliceBySpan(after, span);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new ProofError(
+        "invalid-span",
+        `proof: "${file}" span ${formatPatchSpan(span)} is outside the resulting text: ${reason}.`,
+      );
+    }
+    if (text === "") {
+      throw new ProofError("invalid-span", `proof: "${file}" span ${formatPatchSpan(span)} covers no text.`);
+    }
+    return {
+      line: span.line,
+      column: span.column,
+      endLine: span.endLine,
+      endColumn: span.endColumn,
+      hash: hashOf(text),
+    };
+  });
+  return records.sort(bySpan);
 }
 
 /** An ISO 8601 UTC date, from the caller's date or the epoch. Never the wall clock. */
@@ -451,10 +547,12 @@ export function createProof(input: ProofInput): ProofRecord {
 
     const before = contentOf(input.before, file, "before");
     const after = contentOf(input.after, file, "after");
+    const spans = spansOf(input, file, after);
     files.push({
       path,
       before: before === null ? null : hashOf(before),
       after: after === null ? null : hashOf(after),
+      ...(spans === undefined ? {} : { spans }),
     });
   }
   files.sort((a, b) => byCodePoint(a.path, b.path));

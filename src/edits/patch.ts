@@ -9,8 +9,17 @@
  * The patch can carry the text it expects to find and the SHA-256 of the file it was computed
  * from. Both are optional; a caller that wants them enforced passes `requireExpected` or
  * `requireHash` in the options (the `mizzen fix` command is the strict caller).
+ *
+ * A whole edit is checked before it produces anything. {@link applyPatches} refuses two edits of
+ * the same or overlapping text and returns no text when any patch is refused;
+ * {@link applyFilePatches} does the same across files, and {@link writeFilePatches} is the only
+ * function here that touches the filesystem: it reads every file, validates the whole set, stages
+ * every result, and only then renames the files in. A refused set therefore leaves the tree as it
+ * was found.
  */
 import { createHash } from "node:crypto";
+import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** One span of one source file. `file` is informational: patching text never reads the file. */
 export interface PatchSpan {
@@ -52,7 +61,9 @@ export type PatchErrorCode =
   | "hash-mismatch"
   | "missing-expected"
   | "missing-hash"
-  | "out-of-range";
+  | "out-of-range"
+  | "ambiguous-span"
+  | "overlapping-spans";
 
 /** A refused patch. `span` is the patch's span as given, so the caller can report where it pointed. */
 export class PatchError extends Error {
@@ -78,10 +89,72 @@ export class PatchError extends Error {
   }
 }
 
+/** Why a whole edit set was refused before any file was written. */
+export type EditFileErrorCode =
+  | "duplicate-file"
+  | "file-mismatch"
+  | "path-escape"
+  | "source-missing"
+  | "stale-source"
+  | "write-failed";
+
+/** A refused edit set. `file` names the file the refusal is about. */
+export class EditFileError extends Error {
+  readonly code: EditFileErrorCode;
+  readonly file: string;
+
+  constructor(code: EditFileErrorCode, file: string, message: string) {
+    super(message);
+    this.name = "EditFileError";
+    this.code = code;
+    this.file = file;
+  }
+}
+
 /** The UTF-16 offsets of a span; slicing `source` with them returns exactly the span's text. */
 export interface SpanOffsets {
   readonly start: number;
   readonly end: number;
+}
+
+/** The text after a set of patches, and the spans its replacements occupy. */
+export interface PatchedText {
+  /** The source with every patch applied. */
+  readonly text: string;
+  /** The replacements' spans in `text`, in source order. A deletion leaves no span. */
+  readonly spans: readonly PatchSpan[];
+}
+
+/** One file's text and the patches to apply to it. */
+export interface FilePatches {
+  /** The file's path, relative to the repository root. */
+  readonly file: string;
+  /** The file's text as read just before applying, including line endings. */
+  readonly source: string;
+  /** The patches for this file. They may not share or overlap a span. */
+  readonly patches: readonly Patch[];
+}
+
+/** One file's content after every patch in an edit set passed. */
+export interface PatchedFile {
+  /** The file's path, as given. */
+  readonly file: string;
+  /** The file's text before the edit. */
+  readonly before: string;
+  /** SHA-256 of `before`. */
+  readonly beforeHash: string;
+  /** The file's text after the edit. */
+  readonly after: string;
+  /** SHA-256 of `after`. */
+  readonly afterHash: string;
+  /** The replacements' spans in `after`, in source order. A deletion leaves no span. */
+  readonly spans: readonly PatchSpan[];
+}
+
+/** One file to edit on disk: its path relative to the site root, and its patches. */
+export interface EditFile {
+  readonly file: string;
+  readonly patches: readonly Patch[];
 }
 
 /** SHA-256 of the whole source, hex. The hash a patch's `beforeHash` carries. */
@@ -188,18 +261,10 @@ function snippet(text: string, limit = 80): string {
 }
 
 /**
- * Applies one patch: replaces exactly the span's characters with `replacement` and returns the
- * result. The source is never mutated, and every character outside the span, including CRLF line
- * endings and a trailing newline, is copied through unchanged.
- *
- * Before touching anything it checks, in order:
- * 1. `beforeHash`, when present (or required), against the SHA-256 of `source`;
- * 2. the span's bounds, against the source;
- * 3. `expected`, when present (or required), against the text at the span.
- *
- * Every refusal throws a {@link PatchError}; a refusal never returns a partly patched string.
+ * Checks one patch against `source`, in order: hash, span, expected text. Returns the span's
+ * offsets only when every carried precondition holds.
  */
-export function applyPatch(source: string, patch: Patch, options: ApplyPatchOptions = {}): string {
+function checkPatch(source: string, patch: Patch, options: ApplyPatchOptions): SpanOffsets {
   const { span } = patch;
 
   if (patch.beforeHash === undefined) {
@@ -222,7 +287,7 @@ export function applyPatch(source: string, patch: Patch, options: ApplyPatchOpti
     }
   }
 
-  const { start, end } = spanToOffsets(source, span);
+  const offsets = spanToOffsets(source, span);
 
   if (patch.expected === undefined) {
     if (options.requireExpected === true) {
@@ -233,7 +298,7 @@ export function applyPatch(source: string, patch: Patch, options: ApplyPatchOpti
       );
     }
   } else {
-    const actual = source.slice(start, end);
+    const actual = source.slice(offsets.start, offsets.end);
     if (actual !== patch.expected) {
       throw new PatchError(
         "expected-mismatch",
@@ -244,5 +309,315 @@ export function applyPatch(source: string, patch: Patch, options: ApplyPatchOpti
     }
   }
 
+  return offsets;
+}
+
+/**
+ * Applies one patch: replaces exactly the span's characters with `replacement` and returns the
+ * result. The source is never mutated, and every character outside the span, including CRLF line
+ * endings and a trailing newline, is copied through unchanged.
+ *
+ * Before touching anything it checks, in order:
+ * 1. `beforeHash`, when present (or required), against the SHA-256 of `source`;
+ * 2. the span's bounds, against the source;
+ * 3. `expected`, when present (or required), against the text at the span.
+ *
+ * Every refusal throws a {@link PatchError}; a refusal never returns a partly patched string.
+ */
+export function applyPatch(source: string, patch: Patch, options: ApplyPatchOptions = {}): string {
+  const { start, end } = checkPatch(source, patch, options);
   return source.slice(0, start) + patch.replacement + source.slice(end);
+}
+
+/** The line and column of a UTF-16 offset, and of the character before the end offset. */
+function spanOfOffsets(source: string, start: number, end: number): PatchSpan | undefined {
+  // A span cannot name a line feed as its last character; a replacement that ends with one has no
+  // representable resulting span.
+  if (end <= start || source[end - 1] === "\n") return undefined;
+  const beforeStart = source.slice(0, start);
+  const beforeEnd = source.slice(0, end);
+  const line = 1 + (beforeStart.match(/\n/g)?.length ?? 0);
+  const endLine = 1 + (beforeEnd.match(/\n/g)?.length ?? 0);
+  const column = Array.from(beforeStart.slice(beforeStart.lastIndexOf("\n") + 1)).length + 1;
+  const endColumn = Array.from(beforeEnd.slice(beforeEnd.lastIndexOf("\n") + 1)).length;
+  return { line, column, endLine, endColumn };
+}
+
+/**
+ * Applies every patch to `source` as one change. All patches are checked before any text is
+ * produced, so a stale hash, out-of-range span, or missing expected text leaves the source
+ * untouched. Two patches that share a span are `ambiguous-span`; two that overlap (but are not
+ * identical) are `overlapping-spans`. Adjacent spans are fine.
+ *
+ * The returned `spans` are the replacements' positions in the new text, for a proof record.
+ */
+export function applyPatches(
+  source: string,
+  patches: readonly Patch[],
+  options: ApplyPatchOptions = {},
+): PatchedText {
+  const checked = patches.map((patch) => ({ patch, offsets: checkPatch(source, patch, options) }));
+  checked.sort((a, b) => a.offsets.start - b.offsets.start || a.offsets.end - b.offsets.end);
+
+  for (let index = 1; index < checked.length; index += 1) {
+    const previous = checked[index - 1]!;
+    const current = checked[index]!;
+    if (current.offsets.start >= previous.offsets.end) continue;
+    const identical =
+      current.offsets.start === previous.offsets.start && current.offsets.end === previous.offsets.end;
+    throw new PatchError(
+      identical ? "ambiguous-span" : "overlapping-spans",
+      identical
+        ? `Spans ${formatPatchSpan(previous.patch.span)} and ${formatPatchSpan(current.patch.span)} name the same text; the replacement is ambiguous`
+        : `Spans ${formatPatchSpan(previous.patch.span)} and ${formatPatchSpan(current.patch.span)} overlap`,
+      current.patch.span,
+    );
+  }
+
+  let text = "";
+  let cursor = 0;
+  const spans: PatchSpan[] = [];
+  for (const { patch, offsets } of checked) {
+    text += source.slice(cursor, offsets.start);
+    const start = text.length;
+    text += patch.replacement;
+    const span = spanOfOffsets(text, start, text.length);
+    if (span !== undefined) spans.push(span);
+    cursor = offsets.end;
+  }
+  text += source.slice(cursor);
+  return { text, spans };
+}
+
+/**
+ * Applies every file's patches, refusing the whole set when any file is refused. No result is
+ * returned for a partial edit, so a caller that writes only after this returns cannot write half
+ * an edit set.
+ *
+ * A file listed twice is `duplicate-file`; a patch whose `span.file` names another file is
+ * `file-mismatch`.
+ */
+export function applyFilePatches(
+  files: readonly FilePatches[],
+  options: ApplyPatchOptions = {},
+): readonly PatchedFile[] {
+  const seen = new Set<string>();
+  const results: PatchedFile[] = [];
+  for (const { file, source, patches } of files) {
+    if (seen.has(file)) {
+      throw new EditFileError("duplicate-file", file, `${file}: the edit set lists this file more than once.`);
+    }
+    seen.add(file);
+    for (const patch of patches) {
+      if (patch.span.file !== undefined && patch.span.file !== file) {
+        throw new EditFileError(
+          "file-mismatch",
+          file,
+          `${file}: a patch names ${formatPatchSpan(patch.span)}, which is not this file.`,
+        );
+      }
+    }
+
+    const patched = applyPatches(source, patches, options);
+    results.push({
+      file,
+      before: source,
+      beforeHash: hashSource(source),
+      after: patched.text,
+      afterHash: hashSource(patched.text),
+      spans: patched.spans,
+    });
+  }
+  return results;
+}
+
+/** The target inside the site root, refusing a path that is not a relative path inside it. */
+function insideRoot(root: string, file: string): { readonly path: string; readonly record: string } {
+  if (file === "" || isAbsolute(file) || file.includes("\\") || /^[a-zA-Z]:/.test(file)) {
+    throw new EditFileError(
+      "path-escape",
+      file,
+      `${file}: the edit names a path that is not relative to the site root; use a relative path with forward slashes.`,
+    );
+  }
+  const path = resolve(root, file);
+  const inside = relative(root, path);
+  if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+    throw new EditFileError("path-escape", file, `${file}: the path is outside the site root "${root}"; refusing it.`);
+  }
+  return { path, record: inside.split(sep).join("/") };
+}
+
+/** One staged file: its new bytes are written beside the target, ready for one rename. */
+interface StagedFile {
+  readonly target: string;
+  readonly file: string;
+  readonly original: string;
+  readonly beforeHash: string;
+  readonly mode: number;
+  readonly staging: string;
+  readonly temp: string;
+}
+
+/** Stages `after` beside `target`, so the write is one rename. Cleans up when staging fails. */
+async function stageFile(
+  target: string,
+  file: string,
+  after: string,
+  original: string,
+  beforeHash: string,
+): Promise<StagedFile> {
+  const staging = await mkdtemp(join(dirname(target), ".edit-patch-"));
+  try {
+    const mode = (await stat(target)).mode & 0o7777;
+    const temp = join(staging, "source");
+    await writeFile(temp, after, "utf8");
+    await chmod(temp, mode);
+    return { target, file, original, beforeHash, mode, staging, temp };
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** Puts `text` back in one rename, used to roll back a commit that failed partway. */
+async function restoreFile(target: string, text: string, mode: number): Promise<void> {
+  const staging = await mkdtemp(join(dirname(target), ".edit-restore-"));
+  try {
+    const temp = join(staging, "source");
+    await writeFile(temp, text, "utf8");
+    await chmod(temp, mode);
+    await rename(temp, target);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+/** The reason an errno error gives, as one phrase. */
+function reasonOf(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "ENOENT") return "it does not exist";
+  if (code === "EISDIR") return "it is a directory";
+  if (code === "EACCES" || code === "EPERM") return "it is not readable";
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Applies an edit set to the tree under `siteRoot` as one transaction.
+ *
+ * Every file is read and checked first, so a stale hash, an overlapping or out-of-range span, or a
+ * missing expected text refuses the whole set before anything is written. The new bytes are then
+ * staged beside each file and renamed in; if a rename fails the files already replaced are put
+ * back from the bytes read at the start. The returned entries carry the before and after SHA-256
+ * and the resulting spans, ready for {@link createProof}.
+ *
+ * A `file` that is absolute or leaves `siteRoot` is `path-escape`; a file that cannot be read is
+ * `source-missing`. Both preconditions are required by default: pass `requireHash: false` or
+ * `requireExpected: false` to write a patch that carries neither.
+ */
+export async function writeFilePatches(
+  siteRoot: string,
+  files: readonly EditFile[],
+  options: ApplyPatchOptions = { requireExpected: true, requireHash: true },
+): Promise<readonly PatchedFile[]> {
+  const root = resolve(siteRoot);
+  const targets: { readonly path: string; readonly record: string; readonly patches: readonly Patch[] }[] = [];
+  const records = new Set<string>();
+  for (const entry of files) {
+    const target = insideRoot(root, entry.file);
+    if (records.has(target.record)) {
+      throw new EditFileError(
+        "duplicate-file",
+        target.record,
+        `${target.record}: the edit set lists this file more than once.`,
+      );
+    }
+    records.add(target.record);
+    targets.push({ ...target, patches: entry.patches });
+  }
+
+  const inputs: FilePatches[] = [];
+  for (const target of targets) {
+    let source: string;
+    try {
+      source = await readFile(target.path, "utf8");
+    } catch (error) {
+      throw new EditFileError(
+        "source-missing",
+        target.record,
+        `${target.record}: cannot read the file to edit: ${reasonOf(error)}; nothing was written.`,
+      );
+    }
+    inputs.push({ file: target.record, source, patches: target.patches });
+  }
+
+  // Every check runs here; a refusal leaves no staging folder and no changed file.
+  const results = applyFilePatches(inputs, options);
+
+  const staged: StagedFile[] = [];
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index]!;
+    const target = targets[index]!;
+    try {
+      staged.push(await stageFile(target.path, result.file, result.after, result.before, result.beforeHash));
+    } catch (error) {
+      await Promise.allSettled(staged.map((item) => rm(item.staging, { recursive: true, force: true })));
+      throw new EditFileError(
+        "write-failed",
+        result.file,
+        `${result.file}: staging the edit failed: ${reasonOf(error)}; nothing was written.`,
+      );
+    }
+  }
+
+  const committed: StagedFile[] = [];
+  try {
+    // Re-read immediately before writing: a file that changed since it was validated refuses the
+    // whole set, so an exact span is never written onto text the plan did not see.
+    for (const item of staged) {
+      let current: string;
+      try {
+        current = await readFile(item.target, "utf8");
+      } catch (error) {
+        throw new EditFileError(
+          "source-missing",
+          item.file,
+          `${item.file}: the file cannot be read before writing: ${reasonOf(error)}; nothing was written.`,
+        );
+      }
+      if (hashSource(current) !== item.beforeHash) {
+        throw new EditFileError(
+          "stale-source",
+          item.file,
+          `${item.file}: the file changed while the edit was staged; nothing was written.`,
+        );
+      }
+    }
+
+    for (const item of staged) {
+      await rename(item.temp, item.target);
+      committed.push(item);
+    }
+  } catch (error) {
+    if (error instanceof EditFileError) throw error;
+
+    const failed = staged[committed.length];
+    let rollback = committed.length === 0 ? "nothing was replaced" : "the files already replaced were restored";
+    for (const item of [...committed].reverse()) {
+      try {
+        await restoreFile(item.target, item.original, item.mode);
+      } catch {
+        rollback = `restoring ${item.file} also failed; check the tree`;
+      }
+    }
+    throw new EditFileError(
+      "write-failed",
+      failed?.file ?? results[0]?.file ?? "",
+      `${failed?.file ?? "the edit"}: writing the file failed: ${reasonOf(error)}; ${rollback}.`,
+    );
+  } finally {
+    await Promise.allSettled(staged.map((item) => rm(item.staging, { recursive: true, force: true })));
+  }
+
+  return results;
 }
