@@ -66,12 +66,16 @@ function fileDiagnostic(file: string, id: string, message: string, help: string)
   return { id, severity: "error", message, pos: { file, line: 1, column: 1, endLine: 1, endColumn: 1 }, help };
 }
 
-/** An error about one plugin's hook, naming the plugin so the site owner knows which one to fix. */
+/**
+ * An error about one plugin's hook, naming the plugin so the site owner knows which one to fix, at the code file the
+ * plugins come from.
+ */
 function hookDiagnostic(plugin: Plugin, message: string): Diagnostic {
   return {
     id: "plugin.hook-failed",
     severity: "error",
     message: `Plugin "${plugin.name}" ${message}`,
+    pos: { file: CODE_CONFIG_FILE, line: 1, column: 1, endLine: 1, endColumn: 1 },
     help: "Fix the plugin or remove it from the site's code file.",
   };
 }
@@ -105,6 +109,7 @@ export async function loadCodeConfig(siteRoot: string, options: LoadCodeOptions 
 
   let mod: Record<string, unknown>;
   try {
+    // Node keeps an imported module for the life of the process, so an edited code file needs a new one.
     mod = (await import(pathToFileURL(abs).href)) as Record<string, unknown>;
   } catch (err) {
     return {

@@ -9,13 +9,14 @@ import { expandIncludes } from "../content/includes.ts";
 import { pageLang } from "../content/lang.ts";
 import { permalink } from "../content/permalink.ts";
 import { resolveTitle } from "../content/title.ts";
-import type { Diagnostic, FrontMatter, Heading, NavTree, Page, Site, SourcePos } from "../contracts/index.ts";
+import type { Diagnostic, FrontMatter, Heading, NavTree, Page, Plugin, Site, SourcePos } from "../contracts/index.ts";
 import { markdownToHtml } from "../markdown/to-html.ts";
 import { parseMarkdown } from "../markdown/parse.ts";
 import { navFromFolders, type FolderPage } from "../nav/from-folders.ts";
 import { loadNavigation } from "../nav/from-yaml.ts";
 import { createDiagnostics, sortDiagnostics } from "../pipeline/diagnostics.ts";
 import { pageCache, parseMarkdownWithCache, type PageCache } from "../pipeline/page-cache.ts";
+import { runContentHooks } from "../plugins/hooks.ts";
 import { applyFacts } from "./facts.ts";
 
 /** What {@link buildModel} returns: the site and every finding made while assembling it. */
@@ -35,6 +36,8 @@ export interface BuildModelOptions {
    * unchanged page is not parsed again. Front matter, includes, and every later stage still run every build.
    */
   readonly pageCacheDir?: string;
+  /** The site's plugins: their `content` hook runs once on every page before the site model is assembled. */
+  readonly plugins?: readonly Plugin[];
 }
 
 /** Compares by code point, never by locale. */
@@ -98,8 +101,9 @@ function appUrl(folder: string, base: string): string {
 
 /**
  * Assembles the site model for the site at `root`: loads the config, discovers the files, and takes each page through
- * front matter, Markdown, title, permalink, and language. Pages are sorted by URL; two pages with one URL are an error
- * that names both sources. Navigation comes from the navigation file, or from the folders when the file is missing.
+ * front matter, Markdown, title, permalink, and language, then through the plugins' `content` hook. Pages are sorted by
+ * URL; two pages with one URL are an error that names both sources. Navigation comes from the navigation file, or from
+ * the folders when the file is missing.
  *
  * With `options.pageCacheDir`, the Markdown parse of each page is cached by its expanded body, so a page whose body and
  * plugins are unchanged is not parsed again. Every other stage runs in full, so the model is the same either way.
@@ -110,6 +114,14 @@ export async function buildModel(root: string, options: BuildModelOptions = {}):
   const cache: PageCache | undefined =
     options.pageCacheDir === undefined ? undefined : pageCache(options.pageCacheDir);
   let parsedPages = 0;
+  const plugins = options.plugins ?? [];
+
+  /** Runs the `content` hook on a page that is complete, before navigation and data are built from it. */
+  const hookPage = async (page: Page): Promise<Page> => {
+    const result = await runContentHooks(plugins, page);
+    for (const d of result.diagnostics) diagnostics.report(d);
+    return result.value;
+  };
 
   const loaded = loadConfig(siteRoot);
   for (const d of loaded.diagnostics) diagnostics.report(d);
@@ -160,7 +172,7 @@ export async function buildModel(root: string, options: BuildModelOptions = {}):
       const indexFile = fileOf(`${folder}/index.html`);
       const lang = pageLang(`${folder}/index.html`, { config });
       add(
-        {
+        await hookPage({
           url: appUrl(folder, config.base),
           source: posOf(indexFile, 1),
           frontMatter: {},
@@ -171,7 +183,7 @@ export async function buildModel(root: string, options: BuildModelOptions = {}):
           html: "",
           markdown: "",
           kind: "app",
-        },
+        }),
         `${folder}/index.html`,
         undefined,
       );
@@ -228,22 +240,19 @@ export async function buildModel(root: string, options: BuildModelOptions = {}):
       headings = headingsOf(tree, out.headings, rel);
     }
 
-    add(
-      {
-        url,
-        source: posOf(rel, fm.bodyLine),
-        frontMatter,
-        title,
-        lang: lang.lang,
-        dir: lang.dir,
-        headings,
-        html,
-        markdown: body,
-        kind: "doc",
-      },
-      file.path,
-      frontMatter.order,
-    );
+    const page = await hookPage({
+      url,
+      source: posOf(rel, fm.bodyLine),
+      frontMatter,
+      title,
+      lang: lang.lang,
+      dir: lang.dir,
+      headings,
+      html,
+      markdown: body,
+      kind: "doc",
+    });
+    add(page, file.path, page.frontMatter.order);
   }
 
   pages.sort((a, b) => byCodePoint(a.url, b.url));

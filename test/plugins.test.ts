@@ -274,6 +274,7 @@ test("a hook that throws is an error naming the plugin and the value before it i
   assert.ok(diagnostic?.message.includes("broken"), `the plugin is named: ${diagnostic?.message}`);
   assert.ok(diagnostic?.message.includes("content hook"), diagnostic?.message);
   assert.ok(diagnostic?.message.includes("boom"), diagnostic?.message);
+  assert.equal(diagnostic?.pos?.file, CODE_CONFIG_FILE, "the diagnostic points at the site's code file");
   assert.equal(result.value.title, "kept", "the plugins after a throwing one still run");
   assert.equal(result.value.lang, "fa");
   assert.deepEqual(input, page("/install/"), "the page handed in is not changed");
