@@ -2,13 +2,23 @@ import type { Page, Site } from "../contracts/content.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 import { compareClaims } from "../drift/compare.ts";
 import { examplesOf } from "../markdown/plugins/example-fence.ts";
-import { reviewers, UNKNOWN as REVIEW_UNKNOWN, type Review } from "../model/reviewers.ts";
 import {
+  reviewCoverage,
+  reviewers,
+  UNKNOWN as REVIEW_UNKNOWN,
+  type Review,
+  type ReviewCoverage,
+} from "../model/reviewers.ts";
+import {
+  reviewDueDaysOf,
   trustScore,
   type TrustExamples,
+  type TrustFactorState,
   type TrustLevel,
   type TrustReasonCode,
+  type TrustScore,
   type TrustScoreOptions,
+  type TrustSignal,
   type TrustThresholds,
 } from "../model/trust-score.ts";
 import { hashOf } from "./build-hash.ts";
@@ -24,12 +34,14 @@ import { hashOf } from "./build-hash.ts";
  *
  * ```json
  * {
- *   "version": 1,
+ *   "version": 2,
  *   "build": {
  *     "algorithm": "sha256",
  *     "id": "…64 hex…",
  *     "pages": 1
  *   },
+ *   "reviewDueDays": 180,
+ *   "asOf": "2026-10-10T00:00:00.000Z",
  *   "pages": {
  *     "/guide/install/": {
  *       "key": "…64 hex…",
@@ -41,6 +53,17 @@ import { hashOf } from "./build-hash.ts";
  *         "review": "measured"
  *       },
  *       "level": "verified",
+ *       "factors": [
+ *         { "signal": "examples", "code": "examples.passed", "state": "positive", "value": 0 },
+ *         { "signal": "drift", "code": "drift.clean", "state": "positive", "value": 0 },
+ *         { "signal": "review", "code": "review.recent", "state": "positive", "value": 9 }
+ *       ],
+ *       "provenance": {
+ *         "examples": { "source": "inline", "availability": "available", "input": "/guide/install/" },
+ *         "drift": { "source": "computed", "availability": "available", "input": "guide/install.md" },
+ *         "review": { "source": "git", "availability": "available", "input": "guide/install.md" }
+ *       },
+ *       "reviewCoverage": "recorded",
  *       "reasons": [
  *         { "code": "examples.passed", "message": "No example fails; 2 of 2 pass." },
  *         { "code": "drift.clean", "message": "No drift findings." },
@@ -61,9 +84,14 @@ import { hashOf } from "./build-hash.ts";
  * URL, source, Markdown, or final HTML changes it.
  *
  * `level` is `verified`, `review-due`, or `at-risk`, exactly as N12's {@link trustScore} decides.
- * `reasons` always has three entries, in the fixed order examples, drift, review. `lastReviewer` is
- * present only when the last commit that touched the page has a non-empty author name. The JSON uses
- * two-space indentation and one trailing LF, and `schema/trust.schema.json` describes the same shape.
+ * `reasons` always has three entries, in the fixed order examples, drift, review. `factors` carries the
+ * same three signals as ordered data: the same code as the matching reason, a `state`, and the measured
+ * `value` (`"unknown"` when it was not measured). `reviewCoverage` is what the review source knows:
+ * `recorded`, `untracked`, `unavailable`, or `unknown` when no source was asked. `reviewDueDays` is the
+ * threshold the levels were judged with. `asOf` is present only when the caller named the review instant;
+ * it is never the wall clock. `lastReviewer` is present only when the last commit that touched the page has
+ * a non-empty author name. The JSON uses two-space indentation and one trailing LF, and
+ * `schema/trust.schema.json` describes the same shape.
  *
  * ## Evidence
  *
@@ -80,6 +108,18 @@ import { hashOf } from "./build-hash.ts";
  * A signal that is not `measured` also has an explaining reason in `reasons`, so no page is silently
  * treated as healthy. `examples: "none"` is known evidence, not a gap: the page has no examples to run.
  *
+ * ## Provenance
+ *
+ * Each signal also names where its answer came from, whether that source could answer, and the identity
+ * of the input it read. `source` is `inline` (the caller's option or `site.data`), `computed` (the drift
+ * pass over the site root), `git` (the source file's history), or `none` (no source was configured or
+ * available). `availability` is `available` when the source answered, `unavailable` when a source existed
+ * but could not answer (malformed data, an untracked file, a missing git, or a failed drift pass),
+ * `missing` when there was no source at all, `not-applicable` for a signal the page does not have (no
+ * examples), or `conflict` when the answer contradicts other evidence. `input` names what was read: the
+ * page URL for inline data, and the source file for a computed drift pass or a git review. Provenance
+ * never adds a git call or a clock read; it only records the channel the existing lookup used.
+ *
  * ## Where the signals come from
  *
  * Every signal is read through a data channel the site or the caller controls, never from another
@@ -93,13 +133,14 @@ import { hashOf } from "./build-hash.ts";
  *   neutral `examples.none`; it is not penalized for having no examples.
  * - **Drift.** First the caller's `drift` option, then `site.data.drift`. A value is either a bare
  *   finding count (`{ "/guide/": 0 }`) or an entry with `findings`. An entry that is not a count is
- *   still a source: it reads as `unknown`, not `missing`. Without data, and when a root is known,
- *   {@link compareClaims} counts the diagnostics for each page's source file. Without either, N12's
- *   `drift.unknown` makes the page `at-risk`.
+ *   still a source: it reads as `unknown`, not `missing`, and never falls back to a computed pass.
+ *   Only without the key, and when a root is known, {@link compareClaims} counts the diagnostics for
+ *   each page's source file. Without either, N12's `drift.unknown` makes the page `at-risk`.
  * - **Review.** First the caller's `reviewers` option, then `site.data.reviewers`, with `{ date,
  *   author }` per URL or an `{ pages: [...] }` list. An entry whose date is missing or unreadable is
- *   still a source: it reads as `unknown`, not `missing`. Without a usable entry, and when a root is
- *   known, N13's {@link reviewers} reads the last commit of the page's source file. The review age is
+ *   still a source: it reads as `unknown`, not `missing`, and never falls back to git. Only without
+ *   the key, and when a root is known, N13's {@link reviewers} reads the last commit of the page's
+ *   source file. The review age is
  *   whole days from that commit to `asOf`; without a date or `asOf`, it is `"unknown"` and the page is
  *   `review-due`, never silently `verified`.
  *
@@ -116,10 +157,10 @@ import { hashOf } from "./build-hash.ts";
  *
  * ## Determinism
  *
- * The file is sorted by URL, has a fixed key order, and carries no timestamp, duration, or run order.
- * `compareClaims` and `reviewers` are deterministic for a fixed root and history, and the reviewers
- * answer is cached per path for the life of the process. Two builds with the same model, data, root,
- * and `SOURCE_DATE_EPOCH` write the same bytes.
+ * The file is sorted by URL, has a fixed key order, and carries no wall-clock timestamp, duration, or run
+ * order: `asOf` is only the explicit instant the caller named. `compareClaims` and `reviewers` are
+ * deterministic for a fixed root and history, and the reviewers answer is cached per path for the life of
+ * the process. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes.
  *
  * App and asset pages are left out: they are programs or files, not documents with examples, drift,
  * and a reviewer.
@@ -132,7 +173,7 @@ export const SITE_ROOT_ENV = "MIZZEN_SITE_ROOT";
 export const AS_OF_ENV = "SOURCE_DATE_EPOCH";
 
 /** The shape version of `trust.json`. */
-export const TRUST_VERSION = 1;
+export const TRUST_VERSION = 2;
 
 /** Milliseconds in a whole day. */
 const DAY = 86_400_000;
@@ -167,10 +208,57 @@ export interface TrustEntry {
   readonly evidence: TrustEvidence;
   /** The worst level the reasons support. */
   readonly level: TrustLevel;
+  /** The same three signals as ordered data, one per reason. */
+  readonly factors?: readonly TrustEntryFactor[];
+  /** What the review source knows about the page's history. */
+  readonly reviewCoverage?: ReviewCoverage | "unknown";
   /** Exactly three reasons, ordered examples, drift, review. */
   readonly reasons: readonly TrustEntryReason[];
   /** The last commit's author name, when it is known. */
   readonly lastReviewer?: string;
+}
+
+/** One signal as data, with the output's extra `examples.unknown` code, in key order. */
+export interface TrustEntryFactor {
+  /** Which signal this is, in the fixed order examples, drift, review. */
+  readonly signal: TrustSignal;
+  /** The same stable code as the matching reason. */
+  readonly code: TrustEntryCode;
+  /** Whether the evidence is good, absent, bad, or contradictory. */
+  readonly state: TrustFactorState;
+  /** The measured value, or `"unknown"` when the signal was not measured. */
+  readonly value: number | "unknown";
+}
+
+/** Where a signal's answer came from: inline data, a computed pass, git, or nowhere. */
+export type TrustProvenanceSource = "inline" | "computed" | "git" | "none";
+
+/** Whether the named source could answer. */
+export type TrustProvenanceAvailability =
+  | "available"
+  | "unavailable"
+  | "missing"
+  | "not-applicable"
+  | "conflict";
+
+/** One signal's provenance: its channel, whether it answered, and what it read. */
+export interface TrustSignalProvenance {
+  /** The channel that supplied the answer. */
+  readonly source: TrustProvenanceSource;
+  /** Whether that channel answered, or why it did not. */
+  readonly availability: TrustProvenanceAvailability;
+  /** The input the signal read: a page URL for inline data, a source file for drift and git. */
+  readonly input?: string;
+}
+
+/** Per-signal provenance, in the fixed order examples, drift, review. */
+export interface TrustProvenance {
+  /** Where the example counts came from. */
+  readonly examples: TrustSignalProvenance;
+  /** Where the drift finding count came from. */
+  readonly drift: TrustSignalProvenance;
+  /** Where the review date came from. */
+  readonly review: TrustSignalProvenance;
 }
 
 /** One rendered page's entry in `trust.json`, with the facts a consumer joins on. */
@@ -181,6 +269,12 @@ export interface TrustPageEntry extends TrustEntry {
   readonly url: string;
   /** The source file, relative to the site root, with forward slashes. */
   readonly source: string;
+  /** The same three signals as ordered data, one per reason. */
+  readonly factors: readonly TrustEntryFactor[];
+  /** Where each signal's evidence came from. */
+  readonly provenance: TrustProvenance;
+  /** What the review source knows about the page's history. */
+  readonly reviewCoverage: ReviewCoverage | "unknown";
 }
 
 /** The identity of the rendered pages the evidence belongs to. */
@@ -197,6 +291,10 @@ export interface TrustBuild {
 export interface TrustReport {
   readonly version: typeof TRUST_VERSION;
   readonly build: TrustBuild;
+  /** The review-due threshold the levels were judged with. */
+  readonly reviewDueDays: number;
+  /** The explicit review instant, when the caller named one; never the wall clock. */
+  readonly asOf?: string;
   readonly pages: Readonly<Record<string, TrustPageEntry>>;
 }
 
@@ -214,6 +312,8 @@ export interface TrustSignals {
   readonly driftState?: "missing" | "unknown";
   /** Why review has no date; only read when `review` is absent or `UNKNOWN`. Default `missing`. */
   readonly reviewState?: "missing" | "unknown";
+  /** What the review source knows; absent means it was not looked up. */
+  readonly reviewCoverage?: ReviewCoverage;
 }
 
 /** Options of {@link trustReport}; every field has a default. */
@@ -278,15 +378,24 @@ function urlPairs(value: unknown): readonly (readonly [string, unknown])[] {
   return Object.entries(value).filter(([url]) => url.startsWith("/"));
 }
 
-/** The example counts, by URL, from either documented shape. */
-function examplesIndexOf(value: unknown): Map<string, TrustExamples> {
-  const index = new Map<string, TrustExamples>();
+/**
+ * The example counts, by URL, from either documented shape. A key whose entry holds no count is kept with
+ * `undefined`, so a malformed entry reads as a source that gave no answer instead of as absent data.
+ */
+function examplesIndexOf(value: unknown): Map<string, TrustExamples | undefined> {
+  const index = new Map<string, TrustExamples | undefined>();
   for (const [url, entry] of urlPairs(value)) {
-    if (!isRecord(entry)) continue;
+    if (!isRecord(entry)) {
+      index.set(url, undefined);
+      continue;
+    }
     const total = numberOf(entry.total);
     const passed = numberOf(entry.passed);
     const failed = numberOf(entry.failed);
-    if (total === undefined && passed === undefined && failed === undefined) continue;
+    if (total === undefined && passed === undefined && failed === undefined) {
+      index.set(url, undefined);
+      continue;
+    }
     const pass = passed ?? 0;
     const fail = failed ?? 0;
     index.set(url, { total: Math.max(total ?? 0, pass + fail), passed: pass, failed: fail });
@@ -336,12 +445,15 @@ function asOfOf(value: Date | string | undefined): Date | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
-/** Whole days from the review to `asOf`; unknown without both, and never negative. */
+/**
+ * Whole days from the review to `asOf`; negative when the review is dated after the measured instant,
+ * and unknown without both. N12 turns that conflict into `review-due`, never a fresh review.
+ */
 function reviewAgeOf(review: Review | typeof REVIEW_UNKNOWN | undefined, asOf: Date | undefined): number | "unknown" {
   if (review === undefined || review === REVIEW_UNKNOWN || asOf === undefined) return "unknown";
   const date = new Date(review.date);
   if (Number.isNaN(date.getTime())) return "unknown";
-  return Math.max(0, Math.floor((asOf.getTime() - date.getTime()) / DAY));
+  return Math.floor((asOf.getTime() - date.getTime()) / DAY);
 }
 
 /** The evidence states for the signals the entry builder was given. */
@@ -357,45 +469,76 @@ function evidenceOf(signals: TrustSignals): TrustEvidence {
   return { examples, drift, review };
 }
 
+/** An entry the pure builder always fills with factors and coverage, unlike a consumer that omits them. */
+type ScoredTrustEntry = TrustEntry & {
+  readonly factors: readonly TrustEntryFactor[];
+  readonly reviewCoverage: ReviewCoverage | "unknown";
+};
+
+/** The factors for the entry, with the examples factor matching an unknown result instead of `examples.none`. */
+function factorsOf(score: TrustScore, examplesUnknown: boolean): readonly TrustEntryFactor[] {
+  if (!examplesUnknown) return score.factors;
+  const unknownExamples: TrustEntryFactor = {
+    signal: "examples",
+    code: "examples.unknown",
+    state: "missing",
+    value: "unknown",
+  };
+  return [unknownExamples, score.factors[1]!, score.factors[2]!];
+}
+
 /** One entry, with `lastReviewer` present only when it is known. */
 function entryOf(
   evidence: TrustEvidence,
   level: TrustLevel,
+  factors: readonly TrustEntryFactor[],
+  reviewCoverage: ReviewCoverage | "unknown",
   reasons: readonly TrustEntryReason[],
   lastReviewer: string,
-): TrustEntry {
-  return lastReviewer === "" ? { evidence, level, reasons } : { evidence, level, reasons, lastReviewer };
+): ScoredTrustEntry {
+  return lastReviewer === ""
+    ? { evidence, level, factors, reviewCoverage, reasons }
+    : { evidence, level, factors, reviewCoverage, reasons, lastReviewer };
 }
 
 /**
  * The pure core: N12's score plus the one case N12 cannot see, a page whose examples were never
- * measured. That case replaces the examples reason with `examples.unknown` and makes the page
+ * measured. That case replaces the examples reason and factor with `examples.unknown` and makes the page
  * `at-risk`, so an unknown result is never written as `verified`. Everything else comes from
- * {@link trustScore}, including the fixed reason order and the review threshold.
+ * {@link trustScore}, including the fixed reason and factor order, the review coverage, and the review
+ * threshold.
  */
-export function trustEntryOf(signals: TrustSignals, options: TrustScoreOptions = {}): TrustEntry {
-  const measured = signals.examples === "unknown" ? undefined : signals.examples;
+export function trustEntryOf(
+  signals: TrustSignals,
+  options: TrustScoreOptions = {},
+): TrustEntry & { readonly factors: readonly TrustEntryFactor[]; readonly reviewCoverage: ReviewCoverage | "unknown" } {
+  const examplesUnknown = signals.examples === "unknown";
+  const measured = examplesUnknown ? undefined : signals.examples;
   const score = trustScore(
     {
       ...(measured === undefined ? {} : { examples: measured }),
       ...(signals.drift === undefined ? {} : { drift: signals.drift }),
       reviewAgeDays: reviewAgeOf(signals.review, signals.asOf),
+      ...(signals.reviewCoverage === undefined ? {} : { reviewCoverage: signals.reviewCoverage }),
     },
     options,
   );
 
   const evidence = evidenceOf(signals);
+  const factors = factorsOf(score, examplesUnknown);
   const lastReviewer =
     signals.review === undefined || signals.review === REVIEW_UNKNOWN ? "" : signals.review.author.trim();
 
-  if (signals.examples !== "unknown") return entryOf(evidence, score.level, score.reasons, lastReviewer);
+  if (!examplesUnknown) {
+    return entryOf(evidence, score.level, factors, score.reviewCoverage, score.reasons, lastReviewer);
+  }
 
   const unknownExamples: TrustEntryReason = {
     code: "examples.unknown",
     message: "The example results are unknown, so the page cannot be verified.",
   };
   const reasons: readonly TrustEntryReason[] = [unknownExamples, score.reasons[1]!, score.reasons[2]!];
-  return entryOf(evidence, "at-risk", reasons, lastReviewer);
+  return entryOf(evidence, "at-risk", factors, score.reviewCoverage, reasons, lastReviewer);
 }
 
 /** A page's stable key, from the two facts that identify it: its URL and its source file. */
@@ -467,6 +610,14 @@ async function driftCountsOf(pages: readonly Page[], root: string): Promise<Map<
   }
 }
 
+/** The provenance availability, raised to `conflict` when the factor it explains contradicts other evidence. */
+function availabilityOf(
+  provenance: TrustSignalProvenance,
+  state: TrustFactorState,
+): TrustSignalProvenance {
+  return state === "conflict" ? { ...provenance, availability: "conflict" } : provenance;
+}
+
 /**
  * Builds `trust.json` from the site model and the available data. Doc pages only, sorted by URL. This is
  * the helper tests call: it takes `root`, `asOf`, and the data inline, and reads no environment itself.
@@ -482,41 +633,104 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
   const reviewData = reviewIndexOf(options.reviewers ?? site.data.reviewers);
   const asOf = asOfOf(options.asOf);
   const root = options.root;
+  const reviewDueDays = reviewDueDaysOf(options.thresholds === undefined ? {} : { thresholds: options.thresholds });
 
   const driftCounts =
-    root !== undefined && pages.some((page) => driftData.get(page.url) === undefined)
+    root !== undefined && pages.some((page) => !driftData.has(page.url))
       ? await driftCountsOf(pages, root)
       : undefined;
 
   const body: Record<string, TrustPageEntry> = {};
   for (const page of pages) {
     const measured = examples.get(page.url);
-    const examplesSignal: TrustExamples | "unknown" | undefined =
-      measured !== undefined ? measured : (await declaresExamples(page)) ? "unknown" : undefined;
+    const hasInlineExamples = examples.has(page.url);
+    let examplesSignal: TrustExamples | "unknown" | undefined;
+    let examplesProvenance: TrustSignalProvenance;
+    if (measured !== undefined) {
+      examplesSignal = measured;
+      examplesProvenance = { source: "inline", availability: "available", input: page.url };
+    } else if (hasInlineExamples) {
+      examplesSignal = "unknown";
+      examplesProvenance = { source: "inline", availability: "unavailable", input: page.url };
+    } else if (await declaresExamples(page)) {
+      examplesSignal = "unknown";
+      examplesProvenance = { source: "none", availability: "missing" };
+    } else {
+      examplesProvenance = { source: "none", availability: "not-applicable" };
+    }
 
-    const drift = driftData.get(page.url) ?? driftCounts?.get(page.url);
-    const review = reviewData.get(page.url) ?? (root === undefined ? REVIEW_UNKNOWN : reviewers(root, page.source.file));
+    const inlineDrift = driftData.get(page.url);
+    let drift: number | undefined;
+    let driftProvenance: TrustSignalProvenance;
+    if (inlineDrift !== undefined) {
+      drift = inlineDrift;
+      driftProvenance = { source: "inline", availability: "available", input: page.url };
+    } else if (driftData.has(page.url)) {
+      // An invalid inline entry still names inline as the source; a fallback would hide it.
+      driftProvenance = { source: "inline", availability: "unavailable", input: page.url };
+    } else if (driftCounts !== undefined) {
+      drift = driftCounts.get(page.url);
+      driftProvenance = { source: "computed", availability: "available", input: page.source.file };
+    } else if (root !== undefined) {
+      driftProvenance = { source: "computed", availability: "unavailable", input: page.source.file };
+    } else {
+      driftProvenance = { source: "none", availability: "missing" };
+    }
+
+
+    const inlineReview = reviewData.get(page.url);
+    let review: Review | typeof REVIEW_UNKNOWN | undefined;
+    let reviewProvenance: TrustSignalProvenance;
+    let coverage: ReviewCoverage | "unknown" = "unknown";
+    if (inlineReview !== undefined) {
+      review = inlineReview;
+      reviewProvenance = { source: "inline", availability: "available", input: page.url };
+      coverage = "recorded";
+    } else if (reviewData.has(page.url)) {
+      // An invalid inline entry still names inline as the source; git could hide it.
+      reviewProvenance = { source: "inline", availability: "unavailable", input: page.url };
+    } else if (root !== undefined) {
+      const answer = reviewers(root, page.source.file);
+      review = answer;
+      reviewProvenance = {
+        source: "git",
+        availability: answer === REVIEW_UNKNOWN ? "unavailable" : "available",
+        input: page.source.file,
+      };
+      coverage = answer === REVIEW_UNKNOWN ? reviewCoverage(root, page.source.file) : "recorded";
+    } else {
+      reviewProvenance = { source: "none", availability: "missing" };
+    }
 
     const signals: TrustSignals = {
       ...(examplesSignal === undefined ? {} : { examples: examplesSignal }),
       ...(drift === undefined ? {} : { drift }),
-      review,
+      ...(review === undefined ? {} : { review }),
       ...(asOf === undefined ? {} : { asOf }),
-      // A root or a data entry means a source existed; without either, the signal was never available at all.
+      // A data entry, a root, or an attempted source means something was asked; without one, nothing was.
       ...(drift === undefined
-        ? { driftState: driftData.has(page.url) || root !== undefined ? "unknown" : "missing" }
+        ? { driftState: driftProvenance.availability === "missing" ? "missing" : "unknown" }
         : {}),
-      ...(review === REVIEW_UNKNOWN
-        ? { reviewState: reviewData.has(page.url) || root !== undefined ? "unknown" : "missing" }
+      ...(review === REVIEW_UNKNOWN || (review === undefined && reviewProvenance.availability === "unavailable")
+        ? { reviewState: "unknown" }
         : {}),
+      ...(coverage === "unknown" ? {} : { reviewCoverage: coverage }),
     };
     const entry = trustEntryOf(signals, options.thresholds === undefined ? {} : { thresholds: options.thresholds });
+    const provenance: TrustProvenance = {
+      examples: availabilityOf(examplesProvenance, entry.factors[0]!.state),
+      drift: availabilityOf(driftProvenance, entry.factors[1]!.state),
+      review: availabilityOf(reviewProvenance, entry.factors[2]!.state),
+    };
     body[page.url] = {
       key: pageKeyOf(page),
       url: page.url,
       source: page.source.file,
       evidence: entry.evidence,
       level: entry.level,
+      factors: entry.factors,
+      provenance,
+      reviewCoverage: entry.reviewCoverage,
       reasons: entry.reasons,
       ...(entry.lastReviewer === undefined ? {} : { lastReviewer: entry.lastReviewer }),
     };
@@ -525,6 +739,8 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
   const report: TrustReport = {
     version: TRUST_VERSION,
     build: { algorithm: "sha256", id: buildIdOf(pages, options.html), pages: pages.length },
+    reviewDueDays,
+    ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }),
     pages: body,
   };
   return [{ path: "trust.json", contents: `${JSON.stringify(report, null, 2)}\n` }];

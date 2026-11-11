@@ -1,17 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Mizzen trust report",
-  "description": "`trust.json` in the output folder: a build identifier plus one entry per rendered content page, keyed by the page URL including `base`. Keys are sorted by code point. Every entry names its stable `key`, its `url`, its `source`, the state of each evidence signal, `level`, `reasons`, and, when known, `lastReviewer`, in that order. `build.id` is a deterministic hash of the final HTML documents the build renders, layouts included, so evidence can be joined to the build that produced them. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes. App and asset pages are left out.",
+  "description": "`trust.json` in the output folder: a build identifier, the review threshold and explicit review instant, plus one entry per rendered content page, keyed by the page URL including `base`. Keys are sorted by code point. Every entry names its stable `key`, its `url`, its `source`, the state of each evidence signal, `level`, the ordered `factors` behind it, the `provenance` of each signal, `reviewCoverage`, `reasons`, and, when known, `lastReviewer`, in that order. `build.id` is a deterministic hash of the final HTML documents the build renders, layouts included, so evidence can be joined to the build that produced them. `asOf` is present only when the caller named the review instant, never when the wall clock would have supplied one. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes. App and asset pages are left out.",
   "type": "object",
   "required": [
     "version",
     "build",
+    "reviewDueDays",
     "pages"
   ],
   "properties": {
     "version": {
       "description": "The shape version of `trust.json`.",
-      "const": 1
+      "const": 2
     },
     "build": {
       "description": "The identity of the rendered pages the evidence belongs to.",
@@ -39,6 +40,16 @@
       },
       "additionalProperties": false
     },
+    "reviewDueDays": {
+      "description": "The review-due threshold, in whole days, that the levels were judged with.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "asOf": {
+      "description": "The explicit instant review ages were measured from. Absent when the caller named none; the wall clock is never substituted.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+    },
     "pages": {
       "description": "One entry per rendered content page, keyed by the page URL including `base`, in code-point order.",
       "type": "object",
@@ -60,6 +71,9 @@
         "source",
         "evidence",
         "level",
+        "factors",
+        "provenance",
+        "reviewCoverage",
         "reasons"
       ],
       "properties": {
@@ -122,6 +136,45 @@
             "verified"
           ]
         },
+        "factors": {
+          "description": "Exactly three signals as data, in the fixed order examples, drift, review, with the same code as the matching reason.",
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/factor"
+          }
+        },
+        "provenance": {
+          "description": "Where each signal's answer came from, whether that source could answer, and the input it read.",
+          "type": "object",
+          "required": [
+            "examples",
+            "drift",
+            "review"
+          ],
+          "properties": {
+            "examples": {
+              "$ref": "#/$defs/exampleProvenance"
+            },
+            "drift": {
+              "$ref": "#/$defs/driftProvenance"
+            },
+            "review": {
+              "$ref": "#/$defs/reviewProvenance"
+            }
+          },
+          "additionalProperties": false
+        },
+        "reviewCoverage": {
+          "description": "What the review source knows: `recorded` when it names a review, `untracked` when a work tree has no commit for the file, `unavailable` when git or the path inside the root is missing, `unknown` when no source was asked.",
+          "enum": [
+            "recorded",
+            "untracked",
+            "unavailable",
+            "unknown"
+          ]
+        },
         "reasons": {
           "description": "Exactly three reasons, in the fixed order examples, drift, review.",
           "type": "array",
@@ -139,6 +192,151 @@
       },
       "additionalProperties": false
     },
+    "factor": {
+      "type": "object",
+      "required": [
+        "signal",
+        "code",
+        "state",
+        "value"
+      ],
+      "properties": {
+        "signal": {
+          "description": "Which signal this factor measures.",
+          "enum": [
+            "examples",
+            "drift",
+            "review"
+          ]
+        },
+        "code": {
+          "description": "The same stable identifier as the matching reason.",
+          "enum": [
+            "drift.clean",
+            "drift.findings",
+            "drift.unknown",
+            "examples.conflict",
+            "examples.failed",
+            "examples.none",
+            "examples.passed",
+            "examples.unknown",
+            "review.conflict",
+            "review.overdue",
+            "review.recent",
+            "review.unknown"
+          ]
+        },
+        "state": {
+          "description": "Whether the evidence is good, neutral, absent, bad, or contradictory.",
+          "enum": [
+            "positive",
+            "neutral",
+            "negative",
+            "missing",
+            "conflict"
+          ]
+        },
+        "value": {
+          "description": "The measured value: failing examples for examples, findings for drift, and whole days for review; `unknown` when it was not measured. A negative day count means the review is dated after the measured instant, which is a conflict.",
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "const": "unknown"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "exampleProvenance": {
+      "type": "object",
+      "required": [
+        "source",
+        "availability"
+      ],
+      "properties": {
+        "source": {
+          "description": "`inline` for the caller's or site's data, or `none` when no data and no test fence exist.",
+          "enum": [
+            "inline",
+            "none"
+          ]
+        },
+        "availability": {
+          "$ref": "#/$defs/availability"
+        },
+        "input": {
+          "description": "The page URL for inline data.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "driftProvenance": {
+      "type": "object",
+      "required": [
+        "source",
+        "availability"
+      ],
+      "properties": {
+        "source": {
+          "description": "`inline` for supplied data, `computed` for the drift pass over the site root, or `none` when neither was available.",
+          "enum": [
+            "inline",
+            "computed",
+            "none"
+          ]
+        },
+        "availability": {
+          "$ref": "#/$defs/availability"
+        },
+        "input": {
+          "description": "The page URL for inline data, or the source file for a computed pass.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "reviewProvenance": {
+      "type": "object",
+      "required": [
+        "source",
+        "availability"
+      ],
+      "properties": {
+        "source": {
+          "description": "`inline` for supplied data, `git` for the source file's history, or `none` when neither was available.",
+          "enum": [
+            "inline",
+            "git",
+            "none"
+          ]
+        },
+        "availability": {
+          "$ref": "#/$defs/availability"
+        },
+        "input": {
+          "description": "The page URL for inline data, or the source file for git.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "availability": {
+      "description": "`available` when the source answered, `unavailable` when it existed but could not answer, `missing` when no source existed, `not-applicable` when the page has no such signal, or `conflict` when the answer contradicts other evidence.",
+      "enum": [
+        "available",
+        "unavailable",
+        "missing",
+        "not-applicable",
+        "conflict"
+      ]
+    },
     "reason": {
       "type": "object",
       "required": [
@@ -152,10 +350,12 @@
             "drift.clean",
             "drift.findings",
             "drift.unknown",
+            "examples.conflict",
             "examples.failed",
             "examples.none",
             "examples.passed",
             "examples.unknown",
+            "review.conflict",
             "review.overdue",
             "review.recent",
             "review.unknown"
