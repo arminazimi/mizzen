@@ -10,7 +10,7 @@ import {
   verifyProofMessage,
   type VerifyProofReport,
 } from "../src/cli/edit-verify.ts";
-import { writeProof, type ProofLevel } from "../src/edits/proof.ts";
+import { writeProof, type ProofDoctor } from "../src/edits/proof.ts";
 
 /** A temporary folder holding `files`. */
 function tree(files: Record<string, string>): string {
@@ -30,7 +30,7 @@ interface Entry {
 }
 
 /** Writes a proof at `<root>/.mizzen/proof.json` for `entries` and returns its path. */
-async function record(root: string, entries: readonly Entry[], doctor?: ProofLevel): Promise<string> {
+async function record(root: string, entries: readonly Entry[], doctor?: ProofDoctor): Promise<string> {
   const files = entries.map((entry) => entry.path);
   const before: Record<string, string | null> = {};
   const after: Record<string, string | null> = {};
@@ -43,7 +43,7 @@ async function record(root: string, entries: readonly Entry[], doctor?: ProofLev
     files,
     before,
     after,
-    ...(doctor === undefined ? {} : { doctor: { level: doctor } }),
+    ...(doctor === undefined ? {} : { doctor }),
     out: ".mizzen/proof.json",
   });
   return join(root, ".mizzen", "proof.json");
@@ -110,20 +110,22 @@ test("an untouched edit exits 0 and names no file", async () => {
   }
 });
 
-test("a file changed after the proof exits 1 and names the first path in order", async () => {
+test("a file changed after the proof exits 1 and names every path in order", async () => {
   const root = tree({ "a.md": "one\n", "z.md": "two\n" });
   try {
     const proof = await record(root, [
       { path: "a.md", after: "one\n" },
       { path: "z.md", after: "two\n" },
     ]);
-    // Change both: the report must name the earlier path, not whichever was read first.
+    // Change both: the report must name both, in path order, not stop at the first.
     writeFileSync(join(root, "a.md"), "changed\n");
     writeFileSync(join(root, "z.md"), "changed too\n");
 
     const { errors, io } = capture();
     assert.equal(await main(["edit", "verify", proof, "--site", root], io), 1);
-    assert.deepEqual(errors, ['mizzen: "a.md" changed after the proof.']);
+    assert.deepEqual(errors, [
+      'mizzen: "a.md" changed after the proof. "z.md" changed after the proof.',
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -184,7 +186,7 @@ test("a malformed or absent proof exits 2", async () => {
 test("without --doctor the hashes are checked and the doctor is reported as not run", async () => {
   const root = tree({ "a.md": "one\n" });
   try {
-    const proof = await record(root, [{ path: "a.md", after: "one\n" }], "L2");
+    const proof = await record(root, [{ path: "a.md", after: "one\n" }], { level: "L2" });
     const { logs, errors, io } = capture();
     assert.equal(await main(["edit", "verify", proof, "--site", root], io), 0);
     assert.deepEqual(errors, []);
@@ -198,14 +200,23 @@ test("without --doctor the hashes are checked and the doctor is reported as not 
   }
 });
 
-test("--doctor compares the recorded level with a doctor run as a command", async () => {
+test("--doctor compares recorded findings with the doctor's diagnostics report", async () => {
   const root = tree({ "a.md": "one\n" });
   const scratch = mkdtempSync(join(tmpdir(), "edit-verify-doctor-"));
   try {
-    const proof = await record(root, [{ path: "a.md", after: "one\n" }], "L2");
+    const findings = [{ id: "ae.meta", severity: "warning" as const, message: "Missing description." }];
+    const proof = await record(root, [{ path: "a.md", after: "one\n" }], { level: "L2", findings });
 
     const fake = join(scratch, "fake-doctor.ts");
-    writeFileSync(fake, 'process.stdout.write(JSON.stringify({ level: "L1" }));\n');
+    writeFileSync(
+      fake,
+      `process.stdout.write(${JSON.stringify(
+        JSON.stringify({
+          version: 1,
+          diagnostics: [{ id: "ae.meta", severity: "error", message: "Missing description." }],
+        }),
+      )});\n`,
+    );
     const mismatch = await verifyProof({
       proof,
       siteRoot: root,
@@ -213,10 +224,23 @@ test("--doctor compares the recorded level with a doctor run as a command", asyn
       doctorCommand: { command: process.execPath, prefix: [fake] },
     });
     assert.equal(mismatch.ok, false);
-    assert.deepEqual(mismatch.failure, { kind: "doctor", expected: "L2", actual: "L1" });
-    assert.match(verifyProofMessage(mismatch), /doctor level is L1, not the recorded L2/);
+    assert.deepEqual(mismatch.failure, {
+      kind: "doctor",
+      recorded: 1,
+      actual: 1,
+      difference: 'the recorded finding "ae.meta" is not in the doctor report',
+    });
+    assert.match(verifyProofMessage(mismatch), /doctor findings do not match/);
 
-    writeFileSync(fake, 'process.stdout.write(JSON.stringify({ level: "L2" }));\n');
+    writeFileSync(
+      fake,
+      `process.stdout.write(${JSON.stringify(
+        JSON.stringify({
+          version: 1,
+          diagnostics: [{ id: "ae.meta", severity: "warning", message: "Missing description." }],
+        }),
+      )});\n`,
+    );
     const match = await verifyProof({
       proof,
       siteRoot: root,
@@ -225,7 +249,7 @@ test("--doctor compares the recorded level with a doctor run as a command", asyn
     });
     assert.equal(match.ok, true);
     assert.equal(match.doctor, "matched");
-    assert.equal(verifyProofMessage(match), "ok: 1 file matches the proof; the doctor level matches.");
+    assert.equal(verifyProofMessage(match), "ok: 1 file matches the proof; the doctor findings match.");
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(scratch, { recursive: true, force: true });
@@ -235,7 +259,8 @@ test("--doctor compares the recorded level with a doctor run as a command", asyn
 test("a doctor that cannot run is a usage failure, not a matching proof", async () => {
   const root = tree({ "a.md": "one\n" });
   try {
-    const proof = await record(root, [{ path: "a.md", after: "one\n" }], "L2");
+    const findings = [{ id: "ae.meta", severity: "warning" as const, message: "Missing description." }];
+    const proof = await record(root, [{ path: "a.md", after: "one\n" }], { level: "L2", findings });
     const result = await verifyProof({
       proof,
       siteRoot: root,
@@ -245,7 +270,7 @@ test("a doctor that cannot run is a usage failure, not a matching proof", async 
     assert.equal(result.ok, false);
     assert.equal(result.doctor, "unavailable");
     assert.equal(result.failure?.kind, "doctor-unavailable");
-    assert.match(verifyProofMessage(result), /could not run the doctor/);
+    assert.match(verifyProofMessage(result), /could not verify the doctor/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -343,13 +368,22 @@ test("--format json reports an unreadable proof as invalid and names the proof f
   }
 });
 
-test("formatVerifyProofJson names a doctor mismatch's two levels and the failed check", async () => {
+test("formatVerifyProofJson names a doctor mismatch's difference and the failed check", async () => {
   const root = tree({ "a.md": "one\n" });
   const scratch = mkdtempSync(join(tmpdir(), "edit-verify-doctor-json-"));
   try {
-    const proof = await record(root, [{ path: "a.md", after: "one\n" }], "L2");
+    const findings = [{ id: "ae.meta", severity: "warning" as const, message: "Missing description." }];
+    const proof = await record(root, [{ path: "a.md", after: "one\n" }], { level: "L2", findings });
     const fake = join(scratch, "fake-doctor.ts");
-    writeFileSync(fake, 'process.stdout.write(JSON.stringify({ level: "L1" }));\n');
+    writeFileSync(
+      fake,
+      `process.stdout.write(${JSON.stringify(
+        JSON.stringify({
+          version: 1,
+          diagnostics: [{ id: "ae.meta", severity: "error", message: "Missing description." }],
+        }),
+      )});\n`,
+    );
     const result = await verifyProof({
       proof,
       siteRoot: root,
@@ -362,10 +396,11 @@ test("formatVerifyProofJson names a doctor mismatch's two levels and the failed 
       {
         code: "verify.doctor.mismatch",
         check: "doctor",
-        message: "the doctor level is L1, not the recorded L2.",
+        message:
+          'the doctor findings do not match the proof: the recorded finding "ae.meta" is not in the doctor report.',
         path: null,
-        expected: "L2",
-        actual: "L1",
+        expected: null,
+        actual: null,
       },
     ]);
 

@@ -86,8 +86,8 @@ export interface ProofFile {
 export interface ProofFinding {
   /** The spec test or generator check the finding belongs to. */
   readonly id: string;
-  /** `error` for a failed MUST, `warning` for a SHOULD or a generator check. */
-  readonly severity: "error" | "warning";
+  /** `error` for a failed MUST, `warning` for a SHOULD or a generator check, `info` for a skipped check. */
+  readonly severity: "error" | "warning" | "info";
   /** What is wrong, without the file and line. */
   readonly message: string;
   /** The file the finding is about, relative to the site root, with forward slashes. */
@@ -317,8 +317,8 @@ export const proofSchema: Record<string, unknown> = {
         line: { type: "integer", minimum: 1, description: "The line, 1-based, front matter included." },
         message: { type: "string", minLength: 1, description: "What is wrong, without the file and line." },
         severity: {
-          enum: ["error", "warning"],
-          description: "error for a failed MUST, warning for a SHOULD or a generator check.",
+          enum: ["error", "warning", "info"],
+          description: "error for a failed MUST, warning for a SHOULD or a generator check, info for a skipped check.",
         },
       },
       additionalProperties: false,
@@ -468,7 +468,7 @@ function findingRecord(finding: ProofFinding, siteRoot: string): ProofFinding {
   if (typeof finding.id !== "string" || finding.id === "") {
     throw new ProofError("invalid-doctor", "proof: a doctor finding has no id.");
   }
-  if (finding.severity !== "error" && finding.severity !== "warning") {
+  if (finding.severity !== "error" && finding.severity !== "warning" && finding.severity !== "info") {
     throw new ProofError("invalid-doctor", `proof: finding "${finding.id}" has an unknown severity.`);
   }
   if (typeof finding.message !== "string" || finding.message === "") {
@@ -477,7 +477,7 @@ function findingRecord(finding: ProofFinding, siteRoot: string): ProofFinding {
 
   const record: {
     id: string;
-    severity: "error" | "warning";
+    severity: "error" | "warning" | "info";
     message: string;
     file?: string;
     line?: number;
