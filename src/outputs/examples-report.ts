@@ -2,9 +2,9 @@ import type { Diagnostic, Page, Site, SourcePos } from "../contracts/index.ts";
 import type { Output, OutputFile } from "../contracts/output.ts";
 import { examplesOf, type MarkdownExample } from "../markdown/plugins/example-fence.ts";
 import { cachedRun, exampleCache, exampleCacheDirOf, type ExampleCache } from "../pipeline/examples/cache.ts";
-import { exampleFailed } from "../pipeline/examples/diagnostic.ts";
+import { exampleFailed, exampleSandboxUnavailable } from "../pipeline/examples/diagnostic.ts";
 import { runNodeExample, type ExampleLang } from "../pipeline/examples/run-node.ts";
-import { runShellExample } from "../pipeline/examples/run-shell.ts";
+import { runShellExample, sandboxAvailable } from "../pipeline/examples/run-shell.ts";
 
 /**
  * Writes `examples.json`: one entry per page with how many runnable examples it declares, how many passed, how many
@@ -15,6 +15,8 @@ import { runShellExample } from "../pipeline/examples/run-shell.ts";
  * and, when it is followed by an `output` fence, when its stdout matches that fence after line endings are normalized
  * and trailing newlines are dropped. A fence without an `output` fence checks only that it exits successfully. A
  * failing example is reported through `exampleFailed`, with the fence's source position, and never fails the build.
+ * A host with no OS sandbox reports one `example-sandbox` warning, so a build never presents best-effort limits as
+ * isolation.
  *
  * A fence whose language has no runner (`python`, `rust`, an empty language) is **not run**: it is counted in `skipped`
  * and neither passed nor failed, because the engine cannot know whether it works. For every page
@@ -43,12 +45,14 @@ export type ExampleKind = "node" | "shell";
 
 /** What one runner reports. A duration is allowed and ignored: it never reaches the JSON. */
 export interface ExampleRun {
-  /** The process exit code, or `null` when it timed out or could not start. */
+  /** The process exit code, or `null` when it timed out, was refused, or could not start. */
   readonly exitCode: number | null;
   /** Standard output, which an `output` fence is compared with. */
   readonly stdout: string;
   /** How long the run took, in milliseconds; accepted and never written. */
   readonly durationMs?: number;
+  /** Why the runner refused or could not run the example, shown instead of an empty actual output. */
+  readonly error?: string;
 }
 
 /** What a runner receives. */
@@ -145,6 +149,19 @@ function posOf(page: Page, example: MarkdownExample): SourcePos {
 
 /** The default runner: the Node process runner or the shell process runner, chosen by language family. */
 function defaultRunner(options: ExamplesReportOptions): ExampleRunner {
+  /** A refused run carries its reason, so the diagnostic shows why instead of an empty actual output. */
+  const report = (result: {
+    readonly exitCode: number | null;
+    readonly stdout: string;
+    readonly durationMs: number;
+    readonly rejected: boolean;
+    readonly stderr: string;
+  }): ExampleRun => ({
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    durationMs: result.durationMs,
+    ...(result.rejected ? { error: result.stderr.trim() } : {}),
+  });
   return async (input) => {
     if (input.kind === "node") {
       const result = await runNodeExample({
@@ -152,20 +169,15 @@ function defaultRunner(options: ExamplesReportOptions): ExampleRunner {
         lang: input.lang as ExampleLang,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       });
-      return { exitCode: result.exitCode, stdout: result.stdout, durationMs: result.durationMs };
+      return report(result);
     }
     const result = await runShellExample({
       code: input.code,
       shell: input.lang as "bash" | "sh",
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
-    return { exitCode: result.exitCode, stdout: result.stdout, durationMs: result.durationMs };
+    return report(result);
   };
-}
-
-/** A result plus, when the runner itself threw, the message to report instead of empty stdout. */
-interface RunOutcome extends ExampleRun {
-  readonly error?: string;
 }
 
 /**
@@ -176,7 +188,7 @@ async function runOne(
   cache: ExampleCache | undefined,
   runner: ExampleRunner,
   input: ExampleRunInput,
-): Promise<RunOutcome> {
+): Promise<ExampleRun> {
   try {
     if (cache === undefined) return await runner(input);
     const { result } = await cachedRun(
@@ -191,7 +203,7 @@ async function runOne(
 }
 
 /** The diagnostic for one failed example: the fence's position, the expected output, and what happened. */
-function diagnosticOf(page: Page, example: MarkdownExample, run: RunOutcome): Diagnostic {
+function diagnosticOf(page: Page, example: MarkdownExample, run: ExampleRun): Diagnostic {
   return exampleFailed({
     pos: posOf(page, example),
     page: page.url,
@@ -215,6 +227,8 @@ export async function examplesReport(
   const runner = options.runner ?? defaultRunner(options);
   const cache = options.cacheDir === undefined ? undefined : exampleCache({ dir: options.cacheDir });
   const pages: PageExamples[] = [];
+  // Probed only when the default runners are about to run a real example, so a fake runner stays sandbox-free.
+  let trustChecked = false;
 
   const allPages = [...site.pages].sort((a, b) => byCodePoint(a.url, b.url));
   for (const page of allPages) {
@@ -232,6 +246,12 @@ export async function examplesReport(
       if (kind === undefined) {
         skipped += 1;
         continue;
+      }
+      // One explicit finding when the host cannot confine examples, so a passing example never silently implies
+      // isolation the platform did not provide. Only the default runners are subject to the host's sandbox.
+      if (options.runner === undefined && !trustChecked) {
+        trustChecked = true;
+        if (!sandboxAvailable()) options.report?.(exampleSandboxUnavailable(process.platform));
       }
       const outcome = await runOne(cache, runner, { code: example.code, lang, kind });
       if (passed(example, outcome)) {

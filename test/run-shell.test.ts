@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { sandboxAvailable, runShellExample } from "../src/pipeline/examples/run-shell.ts";
+import { MAX_SHELL_OUTPUT_BYTES, sandboxAvailable, runShellExample } from "../src/pipeline/examples/run-shell.ts";
 
 /** True when this host has an OS sandbox, so the tests that need one can skip instead of assuming it (like `hasGit`). */
 const hasSandbox = sandboxAvailable();
@@ -122,3 +122,46 @@ test(
     assert.equal(result.sandboxed, false);
   },
 );
+
+test("a snippet that names a denied command is refused before anything is created", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "mizzen-denied-"));
+  try {
+    writeFileSync(join(parent, "keep.txt"), "kept\n");
+    const result = await runShellExample({ shell: "sh", code: `sudo rm -rf ${quote(parent)}` });
+    assert.equal(result.rejected, true);
+    assert.equal(result.exitCode, null);
+    assert.equal(result.workdir, "", "no working folder is created for a refused snippet");
+    assert.match(result.stderr, /denied command "sudo"/);
+    assert.equal(readFileSync(join(parent, "keep.txt"), "utf8"), "kept\n", "nothing outside the folder was touched");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("a runaway example is cut off at the output cap and killed", async () => {
+  const result = await runShellExample({ shell: "sh", code: "yes mizzen", timeoutMs: 10_000 });
+  assert.equal(result.outputLimited, true);
+  assert.equal(result.timedOut, false, "the output limit, not the timeout, ended the run");
+  assert.ok(result.stdout.endsWith("[output truncated]\n"), "the cut is marked");
+  const kept = Buffer.byteLength(result.stdout) - Buffer.byteLength("\n[output truncated]\n");
+  assert.equal(kept, MAX_SHELL_OUTPUT_BYTES, "exactly the budget is kept");
+});
+
+test("a timeout kills the whole process group, including a background command", async () => {
+  const result = await runShellExample({ shell: "sh", code: "sleep 30 & sleep 30", timeoutMs: 300 });
+  assert.equal(result.timedOut, true);
+  // Both sleeps hold the stdout pipe, so a kill of only the shell would keep `close` waiting for them.
+  assert.ok(result.durationMs < 5_000, `the group was killed promptly (${result.durationMs}ms)`);
+});
+
+test("the caller's env cannot move HOME, TMPDIR, or PATH out of the run", async () => {
+  const result = await runShellExample({
+    shell: "sh",
+    code: 'printf "%s|%s|%s\\n" "$HOME" "$TMPDIR" "$PATH"',
+    env: { HOME: "/", TMPDIR: "/", PATH: "/denied" },
+  });
+  const [home, temp, path] = result.stdout.trimEnd().split("|");
+  assert.ok(home?.startsWith(result.workdir), `HOME stayed inside the run folder: ${String(home)}`);
+  assert.ok(temp?.startsWith(result.workdir), `TMPDIR stayed inside the run folder: ${String(temp)}`);
+  assert.notEqual(path, "/denied", "an extra cannot replace PATH");
+});

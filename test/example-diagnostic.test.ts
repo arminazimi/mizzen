@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SourcePos } from "../src/contracts/source.ts";
-import { EXAMPLE_FAILED_ID, exampleFailed, firstDifference } from "../src/pipeline/examples/diagnostic.ts";
+import {
+  EXAMPLE_BEST_EFFORT_PROTECTIONS,
+  EXAMPLE_FAILED_ID,
+  EXAMPLE_SANDBOX_ID,
+  exampleFailed,
+  exampleSandboxUnavailable,
+  firstDifference,
+} from "../src/pipeline/examples/diagnostic.ts";
 
 const pos: SourcePos = { file: "guide/install.md", line: 42, column: 1, endLine: 42, endColumn: 3 };
 
@@ -85,4 +92,24 @@ test("results depend only on the arguments", () => {
 test("one string being a prefix of the other reports the shorter length", () => {
   assert.deepEqual(firstDifference("abc", "abcd"), { offset: 3, expected: "abc", actual: "abcd" });
   assert.deepEqual(firstDifference("abcd", "abc"), { offset: 3, expected: "abcd", actual: "abc" });
+});
+
+test("a host without an OS sandbox gets one explicit trust diagnostic that names the best-effort protections", () => {
+  const diagnostic = exampleSandboxUnavailable("linux");
+  assert.equal(diagnostic.id, EXAMPLE_SANDBOX_ID);
+  assert.equal(diagnostic.id, "example-sandbox");
+  assert.equal(diagnostic.severity, "warning");
+  assert.match(diagnostic.message, /without an OS sandbox on linux/);
+  assert.match(diagnostic.message, /not confined/);
+  assert.match(diagnostic.message, /Best-effort only/);
+  for (const protection of EXAMPLE_BEST_EFFORT_PROTECTIONS) {
+    assert.ok(diagnostic.message.includes(protection), `the message names "${protection}"`);
+  }
+  assert.equal(diagnostic.pos, undefined, "the finding is about the host, not a source span");
+  assert.equal(diagnostic.help?.includes("bwrap"), true);
+});
+
+test("the trust diagnostic depends only on the platform", () => {
+  assert.deepEqual(exampleSandboxUnavailable("linux"), exampleSandboxUnavailable("linux"));
+  assert.notEqual(exampleSandboxUnavailable("linux").message, exampleSandboxUnavailable("win32").message);
 });
