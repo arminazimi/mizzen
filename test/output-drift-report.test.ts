@@ -283,6 +283,26 @@ test("evidence that still matches is reused, so a stored finding survives unchan
   }
 });
 
+test("malformed pages never let stored evidence suppress a current finding", async () => {
+  const root = tree({ "src/app.ts": source() });
+  try {
+    const model = site([page("/guide/", "# Guide\n\nSee `/src/app.ts:20`.\n", "guide/index.md")]);
+    const stored = await driftReportOf(model, { root });
+    assert.equal(stored.evidence["/guide/"]?.state, "fresh");
+
+    // The pages half is unusable, so the evidence has nothing to vouch for: the root is checked again.
+    const data = { pages: { "/guide/": "not a findings list" }, evidence: stored.evidence };
+    const report = await driftReportOf(model, { root, data });
+
+    assert.deepEqual(report.pages["/guide/"], [
+      { kind: "drift.moved-symbol", reference: "src/app.ts:20", severity: "warning" },
+    ]);
+    assert.equal(report.evidence["/guide/"]?.state, "fresh");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("changed page content invalidates stored evidence and recomputes the findings", async () => {
   const root = tree({ "src/app.ts": source() });
   try {

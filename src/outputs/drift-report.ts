@@ -375,7 +375,8 @@ export async function driftReportOf(
   for (const page of site.pages) {
     if (page.kind !== "doc") continue;
     const comparison = byFile.get(page.source.file);
-    const entry = prior?.get(page.url);
+    // Evidence can only vouch for stored findings: with no usable pages map it must not suppress a fresh check.
+    const entry = stored === undefined ? undefined : prior?.get(page.url);
 
     if (stored?.has(page.url) !== true && entry === undefined) {
       if (comparison === undefined) {
