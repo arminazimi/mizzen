@@ -10,7 +10,7 @@ import { parseFrontMatter } from "../src/content/frontmatter.ts";
 import { parseMarkdown } from "../src/markdown/parse.ts";
 import { buildModel } from "../src/model/build.ts";
 import { sourcemap } from "../src/outputs/sourcemap.ts";
-import { blockIdOf, formatSpan, parseSpan, sliceSpan, spanFromPosition, spanOf, spansIn } from "../src/source/spans.ts";
+import { blockIdOf, formatSpan, parseSpan, sliceSpan, spanFromPosition, spanOf, spanProblem, spansIn } from "../src/source/spans.ts";
 
 const fixture = fileURLToPath(new URL("../fixtures/docs-site", import.meta.url));
 
@@ -87,6 +87,7 @@ test("slicing a block's span returns exactly that block's Markdown", async () =>
       const fromOffsets = body.slice(start, end);
       assert.equal(fromSpan, fromOffsets, `${blockIdOf(span)} slices to its block's Markdown`);
       assert.ok(fromSpan.length > 0, `${blockIdOf(span)} is not empty`);
+      assert.equal(spanProblem(source, span), undefined, `${blockIdOf(span)} is a range the file has`);
       blocks += 1;
     }
 
@@ -203,4 +204,43 @@ test("sliceSpan keeps the text between the two positions and nothing around it",
   );
   assert.equal(sliceSpan(source, { file: "a.md", line: 2, column: 5, endLine: 2, endColumn: 9 }), "three");
   assert.equal(sliceSpan(source, { file: "a.md", line: 5, column: 1, endLine: 5, endColumn: 1 }), "");
+});
+
+test("a span slices a CRLF file and non-ASCII text the way the parser counted it", async () => {
+  const body = "# T\r\n\r\nSee [x](a.md) and 😀 above.\r\n\r\n```ts test\r\nconst s = \"✓\";\r\n```\r\n";
+  const tree = await parseMarkdown(body, 1);
+  const nodes: Nodes[] = [];
+  visit(tree, (node) => nodes.push(node));
+
+  const link = nodes.find((node) => node.type === "link");
+  const fence = nodes.find((node) => node.type === "code");
+  assert.ok(link?.position && fence?.position, "the sample has a link and a fence");
+
+  const linkSpan = spanFromPosition("a.md", link.position);
+  assert.equal(sliceSpan(body, linkSpan), "[x](a.md)", "the link starts after the two-unit emoji");
+  assert.equal(spanProblem(body, linkSpan), undefined, "the link's range is valid");
+
+  const fenceSpan = spanFromPosition("a.md", fence.position);
+  assert.equal(sliceSpan(body, fenceSpan), "```ts test\r\nconst s = \"✓\";\r\n```", "the fence keeps its CRLF");
+  assert.equal(spanProblem(body, fenceSpan), undefined, "the fence's range is valid");
+});
+
+test("spanProblem reports an invalid or stale range instead of a guessed one", () => {
+  const source = "one\ntwo\nthree";
+  const span = { file: "a.md", line: 2, column: 1, endLine: 2, endColumn: 3 };
+  assert.equal(spanProblem(source, span), undefined);
+
+  const invalid: Array<[string, typeof span]> = [
+    ["a zero line", { ...span, line: 0 }],
+    ["a fractional column", { ...span, column: 1.5 }],
+    ["an end before the start", { ...span, column: 2, endColumn: 1 }],
+    ["a start line past the file", { ...span, line: 4, endLine: 4 }],
+    ["an end line past the file", { ...span, endLine: 4 }],
+    ["a start column past its line", { ...span, column: 5, endColumn: 5 }],
+    ["an end column past its line", { ...span, endColumn: 4 }],
+  ];
+  for (const [name, bad] of invalid) assert.ok(spanProblem(source, bad) !== undefined, name);
+
+  assert.equal(spanProblem("two\nthree", span, 2), undefined, "a body's first line is the span's first line");
+  assert.match(spanProblem("two\nthree", span, 3) ?? "", /outside lines 3 to 4/);
 });
