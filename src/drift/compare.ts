@@ -4,8 +4,16 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { Nodes } from "mdast";
 import type { Diagnostic, Page, SourcePos } from "../contracts/index.ts";
 import { parseMarkdown } from "../markdown/parse.ts";
+import { spanFromPosition, type NodePosition } from "../source/spans.ts";
 import { codeRefsOf, type CodeRef } from "./code-refs.ts";
-import { exportedSymbols, type ExportedSymbol } from "./symbols.ts";
+import {
+  checkDocumentedSignature,
+  documentedClaim,
+  exportedSymbols,
+  type DocumentedClaim,
+  type ExportedSymbol,
+  type SignatureCheck,
+} from "./symbols.ts";
 
 /**
  * Compares what a page claims about the code with what the code holds (N09), and reports each claim the
@@ -23,11 +31,21 @@ import { exportedSymbols, type ExportedSymbol } from "./symbols.ts";
  *   reference is enough.
  * - A cited line range (`path:10-14`) is satisfied by any declaration line the range reaches.
  *
+ * A claim also states an API when the inline code is a call or a signature: `` `build(root, mode)` ``
+ * states its arguments, and `` `build(root: string, mode?: Mode): Promise<Doc>` `` states parameter
+ * types, optionality, generics, and a return type. A class or interface signature states the members it
+ * writes; a type alias states its right-hand side; a `const` states its annotated type. Documented names
+ * are not compared (two callers may name a parameter differently), and a bare identifier states no API.
+ * The comparison is a subset check: extra optional parameters on the declaration, extra class members,
+ * and a return type the page does not write are not drift. `async` is normalized away because the return
+ * type carries it. A default value whose type is not written states only optionality.
+ *
  * The reference is satisfied when:
  *
  * - its target is a non-TypeScript file and every cited line is within it, which checks existence and
  *   range only; or
- * - the cited line is within `tolerance` lines (default 5) of a claimed symbol's declaration; or
+ * - the cited line is within `tolerance` lines (default 5) of a claimed symbol's declaration, or of one
+ *   of its overloads, and every API the claim states matches; or
  * - no symbol is claimed and some exported declaration is within `tolerance` lines of the cited range.
  *
  * Otherwise it reports:
@@ -41,6 +59,12 @@ import { exportedSymbols, type ExportedSymbol } from "./symbols.ts";
  *   TypeScript file exports nothing. Inline code that only looks like a symbol (camelCase, PascalCase,
  *   or a call) counts as a claim, so a renamed lowercase-only name is not detected; the page still
  *   passes when another declaration sits at the cited line.
+ * - `drift.signature-mismatch` when a documented call or signature disagrees with the declaration. The
+ *   finding points at the documentation span and names the documented signature, every actual signature,
+ *   and the declaration's line.
+ * - `drift.signature-unchecked` when the documentation states a signature but the declaration or the
+ *   documented form cannot be compared, such as an inferred const type, a re-export, an enum, a spread
+ *   argument, or a destructured argument. It is never silent: the citation is not clean either.
  *
  * Paths resolve inside `root` and never outside it: a target that resolves outside the root, including
  * one that uses a symbolic link to leave it, is refused with `drift.outside-root` and never read. A
@@ -89,24 +113,21 @@ interface Box {
 }
 
 /** One inline-code claim inside a paragraph. */
-interface Claim {
-  /** The identifier the inline code names. */
-  readonly name: string;
-  /** True when the inline code ended in `()`, which marks it as a call. */
-  readonly call: boolean;
+interface Claim extends DocumentedClaim {
+  /** The inline code exactly as the page wrote it. */
+  readonly text: string;
   /** Line of the inline-code node. */
   readonly line: number;
   /** Column of the inline-code node. */
   readonly column: number;
+  /** The span of the inline-code node, which is where a signature finding points. */
+  readonly pos: SourcePos;
 }
 
 /** A paragraph that can hold claims, with every inline code in it. */
 interface Paragraph extends Box {
   readonly claims: readonly Claim[];
 }
-
-/** A whole identifier, without a call's parentheses. */
-const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 /** A TypeScript source file, including `.d.ts`, `.mts`, `.cts`, and `.tsx`. */
 const TYPESCRIPT = /\.(?:ts|mts|cts|tsx)$/i;
@@ -137,6 +158,12 @@ export interface DriftIdentity {
   readonly sources: Readonly<Record<string, string>>;
 }
 
+/** One diagnostic with the code reference it was judged for, so a caller never infers the pair from positions. */
+export interface ClaimFinding {
+  readonly diagnostic: Diagnostic;
+  readonly reference: CodeRef;
+}
+
 /** One page's comparison: what it cites, what the files answered, and the identity behind both. */
 export interface ClaimComparison {
   /** The page's source file, relative to the repository root. */
@@ -145,6 +172,8 @@ export interface ClaimComparison {
   readonly references: readonly CodeRef[];
   /** The findings, sorted by line, column, check ID, and message. */
   readonly diagnostics: readonly Diagnostic[];
+  /** Every diagnostic with the reference it belongs to, in the same order as `diagnostics`. */
+  readonly findings: readonly ClaimFinding[];
   /** The content and source identities the findings were computed from. */
   readonly identity: DriftIdentity;
 }
@@ -185,21 +214,22 @@ export async function comparePages(
       sources.set(ref.path, target.kind === "text" ? hashOf(target.text) : target.kind);
     }
 
-    const diagnostics: Diagnostic[] = [];
+    const findings: ClaimFinding[] = [];
     if (references.length > 0) {
-      const paragraphs = paragraphsOf(await parseMarkdown(page.markdown, page.source.line));
+      const paragraphs = paragraphsOf(await parseMarkdown(page.markdown, page.source.line), page.source.file);
       for (const ref of references) {
         const target = await targetOf(ref.path, root, rootReal, targets);
         const found = judge(ref, target, paragraphFor(ref.pos, paragraphs), tolerance);
-        if (found !== null) diagnostics.push(found);
+        if (found !== null) findings.push({ diagnostic: found, reference: ref });
       }
-      diagnostics.sort(compareDiagnostics);
+      findings.sort((a, b) => compareDiagnostics(a.diagnostic, b.diagnostic));
     }
 
     comparisons.push({
       file: page.source.file,
       references,
-      diagnostics,
+      diagnostics: findings.map((finding) => finding.diagnostic),
+      findings,
       identity: { content: driftContentOf(page, tolerance), sources: sourcesOf(sources) },
     });
   }
@@ -298,51 +328,55 @@ function normalizeTolerance(value: number | undefined): number {
 }
 
 /** Every paragraph in a parsed page, with the inline code it holds. */
-function paragraphsOf(tree: Nodes): Paragraph[] {
+function paragraphsOf(tree: Nodes, file: string): Paragraph[] {
   const paragraphs: Paragraph[] = [];
-  collectParagraphs(tree, paragraphs);
+  collectParagraphs(tree, file, paragraphs);
   return paragraphs;
 }
 
 /** Walks a parsed page in document order, adding each positioned paragraph. */
-function collectParagraphs(node: Nodes, out: Paragraph[]): void {
+function collectParagraphs(node: Nodes, file: string, out: Paragraph[]): void {
   if (node.type === "paragraph" && node.position) {
     out.push({
       startLine: node.position.start.line,
       startColumn: node.position.start.column,
       endLine: node.position.end.line,
       endColumn: node.position.end.column,
-      claims: claimsIn(node),
+      claims: claimsIn(node, file),
     });
   }
-  if ("children" in node) for (const child of node.children) collectParagraphs(child, out);
+  if ("children" in node) for (const child of node.children) collectParagraphs(child, file, out);
 }
 
 /** Every inline code in one paragraph, in document order. */
-function claimsIn(node: Nodes): Claim[] {
+function claimsIn(node: Nodes, file: string): Claim[] {
   const claims: Claim[] = [];
-  collectClaims(node, claims);
+  collectClaims(node, file, claims);
   return claims;
 }
 
-/** Reads inline code by name; other inline nodes are walked for code nested in them. */
-function collectClaims(node: Nodes, out: Claim[]): void {
+/** Reads inline code as a claim; other inline nodes are walked for code nested in them. */
+function collectClaims(node: Nodes, file: string, out: Claim[]): void {
   if (node.type === "inlineCode") {
-    const claim = claimOf(node.value, node.position?.start.line, node.position?.start.column);
+    const claim = claimOf(node.value, node.position, file);
     if (claim !== null) out.push(claim);
     return;
   }
-  if ("children" in node) for (const child of node.children) collectClaims(child, out);
+  if ("children" in node) for (const child of node.children) collectClaims(child, file, out);
 }
 
-/** Reads one inline code's text as a claim, or null when it does not name an identifier. */
-function claimOf(value: string, line: number | undefined, column: number | undefined): Claim | null {
-  if (line === undefined || column === undefined) return null;
-  const text = value.trim();
-  const call = text.endsWith("()");
-  const name = call ? text.slice(0, -2) : text;
-  if (!IDENTIFIER.test(name)) return null;
-  return { name, call, line, column };
+/** Reads one inline code's text as a claim, or null when it names no symbol. */
+function claimOf(value: string, position: NodePosition | undefined, file: string): Claim | null {
+  if (position === undefined) return null;
+  const documented = documentedClaim(value);
+  if (documented === null) return null;
+  return {
+    ...documented,
+    text: value.trim(),
+    line: position.start.line,
+    column: position.start.column,
+    pos: spanFromPosition(file, position),
+  };
 }
 
 /** The paragraph whose span holds `pos`, if any. */
@@ -429,13 +463,24 @@ function checkSymbols(
   const candidates = claims.filter((claim) => exported.has(claim.name) || looksLikeSymbol(claim));
 
   if (named.length > 0) {
+    const within: Array<{ readonly claim: Claim; readonly diagnostic: Diagnostic }> = [];
+    const moved: Claim[] = [];
     for (const claim of named) {
-      const symbol = exported.get(claim.name);
-      if (symbol !== undefined && distanceTo(ref, symbol.line) <= tolerance) return null;
+      const symbol = exported.get(claim.name) as ExportedSymbol;
+      if (!nearDeclaration(ref, symbol, tolerance)) {
+        moved.push(claim);
+        continue;
+      }
+      const check = checkDocumentedSignature(claim, symbol);
+      if (check.state === "match") return null;
+      within.push({ claim, diagnostic: signatureDiagnostic(ref, claim, symbol, check) });
     }
-    const claim = nearestClaim(named, ref);
-    const symbol = exported.get(claim.name);
-    if (symbol === undefined) return null;
+    if (within.length > 0) {
+      const claim = nearestClaim(within.map((entry) => entry.claim), ref);
+      return (within.find((entry) => entry.claim === claim) as { diagnostic: Diagnostic }).diagnostic;
+    }
+    const claim = nearestClaim(moved, ref);
+    const symbol = exported.get(claim.name) as ExportedSymbol;
     return movedClaim(ref, claim.name, symbol.line, tolerance);
   }
 
@@ -446,14 +491,55 @@ function checkSymbols(
   if (symbols.length === 0) return noSymbols(ref);
 
   for (const symbol of symbols) {
-    if (distanceTo(ref, symbol.line) <= tolerance) return null;
+    if (nearDeclaration(ref, symbol, tolerance)) return null;
   }
   return movedWithoutClaim(ref, nearestSymbol(symbols, ref), tolerance);
 }
 
+/** True when the cited range reaches the declaration or one of its overloads. */
+function nearDeclaration(ref: CodeRef, symbol: ExportedSymbol, tolerance: number): boolean {
+  if (distanceTo(ref, symbol.line) <= tolerance) return true;
+  return (symbol.signatures ?? []).some((signature) => distanceTo(ref, signature.line) <= tolerance);
+}
+
+/** The one signature finding a claimed symbol earns. */
+function signatureDiagnostic(
+  ref: CodeRef,
+  claim: Claim,
+  symbol: ExportedSymbol,
+  check: SignatureCheck,
+): Diagnostic {
+  return check.state === "unchecked"
+    ? uncheckedSignature(ref, claim, check.reason)
+    : mismatchedSignature(ref, claim, symbol);
+}
+
+/** The page documents a signature that does not match the declaration. */
+function mismatchedSignature(ref: CodeRef, claim: Claim, symbol: ExportedSymbol): Diagnostic {
+  const actual = (symbol.signatures ?? []).map((signature) => `"${signature.text}" (line ${signature.line})`);
+  return {
+    id: "drift.signature-mismatch",
+    severity: "warning",
+    message: `"${ref.path}" declares "${symbol.name}" as ${actual.length === 0 ? `a ${symbol.kind}` : actual.join(" or ")}, but this page documents "${claim.text}" at line ${claim.line}.`,
+    pos: claim.pos,
+    help: "Update this documentation to match the declaration, or change the code.",
+  };
+}
+
+/** The page documents a signature the check cannot compare. */
+function uncheckedSignature(ref: CodeRef, claim: Claim, reason: string): Diagnostic {
+  return {
+    id: "drift.signature-unchecked",
+    severity: "warning",
+    message: `Cannot check the signature "${claim.text}" at line ${claim.line} against "${ref.path}": ${reason}.`,
+    pos: claim.pos,
+    help: "Write the signature in a form this check can compare, or cite the declaration by name only.",
+  };
+}
+
 /** True for inline code that reads as a symbol even when the file exports no such name. */
 function looksLikeSymbol(claim: Claim): boolean {
-  if (claim.call) return true;
+  if (claim.form !== "name") return true;
   // camelCase and PascalCase only, so an environment variable or a command stays out of the comparison.
   return /^[a-z][A-Za-z0-9]*[A-Z]/.test(claim.name) || /^[A-Z][a-z]/.test(claim.name);
 }

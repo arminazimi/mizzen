@@ -134,6 +134,45 @@ test("a computed finding keeps its message, help, documentation span, and target
   }
 });
 
+test("signature findings name the code reference and keep the documentation span", async () => {
+  const root = tree({
+    "src/api.ts": [
+      "export function build(count: number): number { return count; }",
+      "export enum Color { Red }",
+    ].join("\n"),
+  });
+  try {
+    const model = site([
+      page("/guide/mismatch/", "See `build(count: string)` at /src/api.ts:1.\n", "guide/mismatch.md"),
+      page("/guide/unchecked/", "See `Color(value: string)` at /src/api.ts:2.\n", "guide/unchecked.md"),
+    ]);
+    const report = await driftReportOf(model, { root });
+
+    const mismatch = findingsIn(report, "/guide/mismatch/")[0]!;
+    assert.equal(mismatch.kind, "drift.signature-mismatch");
+    assert.equal(mismatch.reference, "src/api.ts:1", "the reference is the cited code file, not the Markdown file");
+    assert.equal(mismatch.source?.file, "guide/mismatch.md", "the source span still names the inline signature");
+    assert.equal(mismatch.source?.line, 1);
+    assert.equal(mismatch.source?.column, 5);
+    assert.equal(mismatch.target?.path, "src/api.ts");
+    assert.equal(mismatch.target?.line, 1);
+    assert.equal(mismatch.target?.identity, report.evidence["/guide/mismatch/"]?.sources?.["src/api.ts"]);
+
+    const unchecked = findingsIn(report, "/guide/unchecked/")[0]!;
+    assert.equal(unchecked.kind, "drift.signature-unchecked");
+    assert.equal(unchecked.reference, "src/api.ts:2");
+    assert.equal(unchecked.source?.file, "guide/unchecked.md");
+    assert.equal(unchecked.target?.path, "src/api.ts");
+    assert.equal(unchecked.target?.line, 2);
+    assert.equal(unchecked.target?.identity, report.evidence["/guide/unchecked/"]?.sources?.["src/api.ts"]);
+
+    // The evidence a rerun records is the same, so a stored report stays fresh.
+    assert.deepEqual(await driftReportOf(model, { root }), report);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("coverage keeps zero findings, stored findings, stale, unavailable, and no evidence distinct", async () => {
   const root = tree({ "src/app.ts": source() });
   try {
