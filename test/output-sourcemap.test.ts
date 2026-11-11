@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Ajv2020 as Ajv2020Class } from "ajv/dist/2020.js";
-import type { Page, Site, SiteConfig } from "../src/contracts/index.ts";
+import type { Root } from "mdast";
+import type { Diagnostic, Page, Site, SiteConfig } from "../src/contracts/index.ts";
 import type { OutputContext, OutputFile } from "../src/contracts/output.ts";
 import { buildModel } from "../src/model/build.ts";
-import { sourcemap } from "../src/outputs/sourcemap.ts";
+import { linksOf, sourcemap } from "../src/outputs/sourcemap.ts";
+import { sliceSpan } from "../src/source/spans.ts";
 
 type Schema = {
   properties?: Record<string, Schema>;
@@ -91,11 +93,30 @@ interface LinkEntry {
   readonly endColumn: number;
 }
 
+interface TargetEntry {
+  readonly file: string;
+  readonly line: number;
+  readonly endLine?: number;
+  readonly column?: number;
+}
+
+interface ClaimEntry {
+  readonly kind: "trust" | "drift";
+  readonly line: number;
+  readonly column: number;
+  readonly endLine: number;
+  readonly endColumn: number;
+  readonly example?: string;
+  readonly reference?: string;
+  readonly target?: TargetEntry;
+}
+
 interface PageEntry {
   readonly url: string;
   readonly source: string;
   readonly sections: readonly Section[];
   readonly links: readonly LinkEntry[];
+  readonly claims: readonly ClaimEntry[];
 }
 
 interface SourceMap {
@@ -233,17 +254,100 @@ test("links are in document order, one per mention, and a page with no links has
   assert.deepEqual(byUrl(built.pages).get("/silent/")?.links, [], "a page with no links still has a links array");
 });
 
+/** A claim's span in the page file the test pages use. */
+function claimSpan(claim: ClaimEntry): { file: string; line: number; column: number; endLine: number; endColumn: number } {
+  return {
+    file: "guide/install.md",
+    line: claim.line,
+    column: claim.column,
+    endLine: claim.endLine,
+    endColumn: claim.endColumn,
+  };
+}
+
+test("trust and drift claims carry the exact page span and the cited target", async () => {
+  const markdown =
+    "# Guide\n\nCall `src/app.ts:12` and `other.md#L3-L4`.\n\n```ts test\nconsole.log(1);\n```\n";
+  const built = await mapOf(site([page("/guide/", "doc", markdown)]));
+  const entry = byUrl(built.pages).get("/guide/");
+  assert.ok(entry);
+
+  assert.deepEqual(entry.claims.map((claim) => claim.kind), ["drift", "drift", "trust"]);
+  const [first, second, example] = entry.claims;
+  assert.ok(first && second && example);
+
+  assert.equal(first.reference, "guide/src/app.ts:12", "the citation joins drift.json");
+  assert.deepEqual(first.target, { file: "guide/src/app.ts", line: 12 });
+  assert.equal(sliceSpan(markdown, claimSpan(first)), "`src/app.ts:12`", "the span covers the reference");
+
+  assert.equal(second.reference, "guide/other.md:3-4");
+  assert.deepEqual(second.target, { file: "guide/other.md", line: 3, endLine: 4 });
+  assert.equal(sliceSpan(markdown, claimSpan(second)), "`other.md#L3-L4`");
+
+  assert.equal(example.example, "example-1", "the example id is the one the example report uses");
+  assert.equal(sliceSpan(markdown, claimSpan(example)), "```ts test\nconsole.log(1);\n```", "the span covers the fence");
+});
+
+test("claim spans stay exact in a CRLF page with non-ASCII text", async () => {
+  const markdown = "# G\r\n\r\nSee 😀 `src/a.ts:1`.\r\n\r\n```ts test\r\nconst s = \"✓\";\r\n```\r\n";
+  const built = await mapOf(site([page("/g/", "doc", markdown)]));
+  const claims = byUrl(built.pages).get("/g/")?.claims;
+  assert.equal(claims?.length, 2);
+
+  assert.equal(sliceSpan(markdown, claimSpan(claims[0]!)), "`src/a.ts:1`", "the reference after the emoji");
+  assert.equal(sliceSpan(markdown, claimSpan(claims[1]!)), "```ts test\r\nconst s = \"✓\";\r\n```");
+});
+
+test("a claim whose span the page does not have is reported, never written", async () => {
+  const diagnostics: Diagnostic[] = [];
+  const broken = { ...page("/broken/", "doc", "```ts test\nx\n```\n"), source: { ...pos, line: 0 } };
+  const file = await run(site([broken]), { ...ctx, report: (diagnostic) => diagnostics.push(diagnostic) });
+  const built = JSON.parse(String(file.contents)) as SourceMap;
+
+  assert.deepEqual(built.pages[0]?.claims, [], "the stale claim is left out");
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.id, "sourcemap.stale-range");
+  assert.equal(diagnostics[0]?.pos, undefined, "a stale range is not repeated as a location");
+});
+
+test("a link without a position is reported, not given a made-up line", () => {
+  const diagnostics: Diagnostic[] = [];
+  const tree: Root = {
+    type: "root",
+    children: [{ type: "paragraph", children: [{ type: "link", url: "a.md", children: [] }] }],
+  };
+
+  assert.deepEqual(linksOf(tree, pos, (diagnostic) => diagnostics.push(diagnostic)), []);
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.id, "sourcemap.missing-position");
+  assert.deepEqual(diagnostics[0]?.pos, pos, "the page it belongs to is the location");
+});
+
 test("an app page and an asset page are left out, and a page with no headings has an empty sections list", async () => {
   const built = await mapOf(site([page("/a/"), page("/dashboard/", "app"), page("/logo.svg", "asset")]));
   assert.deepEqual(built.pages.map((entry) => entry.url), ["/a/"]);
   assert.deepEqual(built.pages[0]?.sections, []);
   assert.deepEqual(built.pages[0]?.links, []);
+  assert.deepEqual(built.pages[0]?.claims, []);
 });
 
 test("two runs of the same model write the same bytes", async () => {
-  const model = site([page("/b/", "doc", "# B\n"), page("/a/", "doc", "# A\n")]);
+  const model = site([
+    page("/b/", "doc", "# B\n"),
+    page("/c/", "doc", "See `src/a.ts:1`.\n\n```ts test\nx\n```\n"),
+    page("/a/", "doc", "# A\n"),
+  ]);
   assert.equal(String((await run(model)).contents), String((await run(model)).contents));
-  assert.deepEqual((await mapOf(model)).pages.map((entry) => entry.url), ["/b/", "/a/"], "the model's order is kept");
+  assert.deepEqual(
+    (await mapOf(model)).pages.map((entry) => entry.url),
+    ["/b/", "/c/", "/a/"],
+    "the model's order is kept",
+  );
+  assert.deepEqual(
+    (await mapOf(model)).pages.find((entry) => entry.url === "/c/")?.claims.map((claim) => claim.kind),
+    ["drift", "trust"],
+    "claims come out in the same order every time",
+  );
 });
 
 test("the schema rejects a source map a tool must not accept", () => {
@@ -255,6 +359,10 @@ test("the schema rejects a source map a tool must not accept", () => {
         source: "a.md",
         sections: [{ id: "a", level: 1, line: 1, text: "A" }],
         links: [{ href: "b.md", line: 3 }],
+        claims: [
+          { kind: "trust", line: 1, column: 1, endLine: 3, endColumn: 3, example: "example-1" },
+          { kind: "drift", line: 5, column: 1, endLine: 5, endColumn: 12, reference: "a.ts:1", target: { file: "a.ts", line: 1 } },
+        ],
       },
     ],
   };
@@ -264,6 +372,8 @@ test("the schema rejects a source map a tool must not accept", () => {
   const page = valid.pages[0]!;
   const section = page.sections[0]!;
   const link = page.links[0]!;
+  const claim = page.claims[0]!;
+  const driftClaim = page.claims[1]!;
   const invalid: Array<[string, unknown]> = [
     ["a missing version", { pages: [] }],
     ["another version", { ...valid, version: 1 }],
@@ -287,6 +397,17 @@ test("the schema rejects a source map a tool must not accept", () => {
     ["a link line of 0", { version: 0, pages: [{ ...page, links: [{ ...link, line: 0 }] }] }],
     ["a link without an href", { version: 0, pages: [{ ...page, links: [{ line: 1 }] }] }],
     ["a link with an unknown key", { version: 0, pages: [{ ...page, links: [{ ...link, text: "B" }] }] }],
+    ["a trust claim without an example", { version: 0, pages: [{ ...page, claims: [{ ...claim, example: undefined }] }] }],
+    ["a drift claim without a reference", { version: 0, pages: [{ ...page, claims: [{ ...driftClaim, reference: undefined }] }] }],
+    ["a drift claim without a target", { version: 0, pages: [{ ...page, claims: [{ ...driftClaim, target: undefined }] }] }],
+    ["an unknown claim kind", { version: 0, pages: [{ ...page, claims: [{ ...claim, kind: "review" }] }] }],
+    ["a claim without an end", { version: 0, pages: [{ ...page, claims: [{ ...claim, endLine: undefined }] }] }],
+    ["a claim column of 0", { version: 0, pages: [{ ...page, claims: [{ ...claim, column: 0 }] }] }],
+    ["a claim with an unknown key", { version: 0, pages: [{ ...page, claims: [{ ...claim, text: "A" }] }] }],
+    ["a target line of 0", { version: 0, pages: [{ ...page, claims: [{ ...driftClaim, target: { file: "a.ts", line: 0 } }] }] }],
+    ["a target with an absolute file", { version: 0, pages: [{ ...page, claims: [{ ...driftClaim, target: { file: "/a.ts", line: 1 } }] }] }],
+    ["a target with a parent segment", { version: 0, pages: [{ ...page, claims: [{ ...driftClaim, target: { file: "docs/../a.ts", line: 1 } }] }] }],
+    ["a target with an unknown key", { version: 0, pages: [{ ...page, claims: [{ ...driftClaim, target: { file: "a.ts", line: 1, endLine: 2, column: 1, text: "x" } }] }] }],
   ];
   for (const [name, document] of invalid) assert.equal(validate(document), false, name);
 });

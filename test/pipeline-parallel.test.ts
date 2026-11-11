@@ -1,19 +1,27 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "../src/cli/index.ts";
-import type { Diagnostic } from "../src/contracts/index.ts";
+import type { Diagnostic, Page } from "../src/contracts/index.ts";
+import { buildModel } from "../src/model/build.ts";
 import { build } from "../src/pipeline/build.ts";
-import { createRenderPool, type RenderPoolOptions } from "../src/pipeline/parallel.ts";
+import { createRenderPool, type RenderPool, type RenderPoolOptions, type RenderedPage } from "../src/pipeline/parallel.ts";
+import { loadRegistry } from "../src/render/registry.ts";
 
 /** The theme that ships in this repository. */
 const THEME = fileURLToPath(new URL("../../lateen", import.meta.url));
 
 /** The fixture docs site: 593 pages, which is the size parallel rendering is for. */
 const FIXTURE = fileURLToPath(new URL("../fixtures/docs-site", import.meta.url));
+
+/** A 24-page site whose theme records, per render, the interval it held its thread. */
+const PARALLEL_SITE = fileURLToPath(new URL("../fixtures/parallel/site", import.meta.url));
+
+/** The recording theme paired with {@link PARALLEL_SITE}. */
+const PARALLEL_THEME = fileURLToPath(new URL("../fixtures/parallel/theme", import.meta.url));
 
 /** A temporary folder holding `files`. */
 function tree(files: Record<string, string>): string {
@@ -75,6 +83,102 @@ function errors(diagnostics: readonly Diagnostic[]): Diagnostic[] {
 /** Removes the folders a test made. */
 function cleanup(...folders: string[]): void {
   for (const folder of folders) rmSync(folder, { recursive: true, force: true });
+}
+
+/** One render the recording theme traced: its page, the worker thread it ran on, and the interval it held that thread. */
+interface Span {
+  readonly url: string;
+  readonly thread: number;
+  readonly start: bigint;
+  readonly end: bigint;
+}
+
+/** The renders traced under `dir`, in no particular order. */
+function spansIn(dir: string): Span[] {
+  if (!existsSync(dir)) return [];
+  const spans: Span[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const { url, start, end } = JSON.parse(readFileSync(join(dir, name), "utf8")) as {
+        url: string;
+        start: string;
+        end: string;
+      };
+      const thread = Number(name.split("-")[1]);
+      spans.push({ url, thread, start: BigInt(start), end: BigInt(end) });
+    } catch {
+      // A trace file being written between the listing and the read; the next poll sees it complete.
+    }
+  }
+  return spans;
+}
+
+/** The most spans covering one instant; intervals are half-open, so touching spans do not overlap. */
+function peakOverlap(spans: readonly Span[]): number {
+  const edges: { readonly at: bigint; readonly delta: number }[] = [];
+  for (const span of spans) edges.push({ at: span.start, delta: 1 }, { at: span.end, delta: -1 });
+  // An end sorts before a start at the same instant, so a page that stops as another starts is not counted twice.
+  edges.sort((a, b) => (a.at === b.at ? a.delta - b.delta : a.at < b.at ? -1 : 1));
+  let active = 0;
+  let peak = 0;
+  for (const edge of edges) {
+    active += edge.delta;
+    peak = Math.max(peak, active);
+  }
+  return peak;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(what: string, ready: () => boolean): Promise<void> {
+  for (let tries = 0; tries < 2000; tries++) {
+    if (ready()) return;
+    await sleep(5);
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+/** Runs `run` with the recording theme tracing into a temporary folder that is removed afterwards. */
+async function traced<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "pipeline-parallel-trace-"));
+  process.env.MIZZEN_PARALLEL_TRACE = dir;
+  try {
+    return await run(dir);
+  } finally {
+    delete process.env.MIZZEN_PARALLEL_TRACE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** A pool on the recording fixture, with its registry loaded here as the fallback. */
+async function fixturePool(
+  options: Omit<RenderPoolOptions, "themeRoot" | "site" | "registry">,
+): Promise<{ readonly pool: RenderPool; readonly pages: Page[] }> {
+  const { site } = await buildModel(PARALLEL_SITE);
+  const registry = await loadRegistry(PARALLEL_THEME);
+  return {
+    pool: createRenderPool({ themeRoot: PARALLEL_THEME, site, registry, ...options }),
+    pages: site.pages.filter((page) => page.kind === "doc"),
+  };
+}
+
+/** Renders every fixture page through a fresh pool: the results in page order, and what actually ran. */
+async function renderFixture(
+  options: Omit<RenderPoolOptions, "themeRoot" | "site" | "registry">,
+): Promise<{ readonly rendered: RenderedPage[]; readonly pages: Page[]; readonly spans: Span[] }> {
+  return traced(async (dir) => {
+    const { pool, pages } = await fixturePool(options);
+    try {
+      pool.prefetch(pages);
+      const rendered = await Promise.all(pages.map((page) => pool.render(page)));
+      return { rendered, pages, spans: spansIn(dir) };
+    } finally {
+      await pool.close();
+    }
+  });
 }
 
 /**
@@ -236,6 +340,142 @@ test("50 pages: both times are recorded, the sites are the same, and workers spe
   }
 });
 
+test("peak active work never exceeds the configured concurrency", async () => {
+  const limited = await renderFixture({ workers: 4, concurrency: 2 });
+  assert.equal(limited.pages.length, 24);
+  assert.equal(limited.spans.length, limited.pages.length, "every page rendered exactly once");
+  assert.deepEqual(
+    limited.spans.map((span) => span.url).sort(),
+    limited.pages.map((page) => page.url).sort(),
+    "one render per page, none shared or dropped",
+  );
+  const limitedPeak = peakOverlap(limited.spans);
+  assert.ok(limitedPeak <= 2, `four workers at concurrency 2 ran ${limitedPeak} pages at once`);
+  assert.equal(new Set(limited.spans.map((span) => span.thread)).size, 2, "two workers took the work, no more");
+  // Results come back keyed by the page that was asked for, whatever order the workers finished in.
+  for (const [index, page] of limited.pages.entries()) {
+    assert.equal(limited.rendered[index]?.url, page.url);
+    assert.ok(limited.rendered[index]?.html.includes(page.title));
+  }
+
+  const natural = await renderFixture({ workers: 3 });
+  const naturalPeak = peakOverlap(natural.spans);
+  assert.ok(naturalPeak <= 3, `three workers ran ${naturalPeak} pages at once`);
+  assert.equal(new Set(natural.spans.map((span) => span.thread)).size, 3, "the default window keeps every worker fed");
+});
+
+test("two requests for one page share one render, so a destination has one owner", async () => {
+  await traced(async (dir) => {
+    const { pool, pages } = await fixturePool({ workers: 2 });
+    const page = pages[0]!;
+    try {
+      pool.prefetch([page, page]);
+      const [first, second] = await Promise.all([pool.render(page), pool.render(page)]);
+      assert.equal(first, second, "both requests got the same result, not two renders");
+      assert.equal(spansIn(dir).filter((span) => span.url === page.url).length, 1, "the page rendered once");
+    } finally {
+      await pool.close();
+    }
+  });
+});
+
+test("the recording fixture site is byte for byte the same at every concurrency setting", async () => {
+  const outputs = htmlOnlyOutputs();
+  const serial = scratch();
+  const scratchs = [serial];
+  try {
+    const one = await build({ root: PARALLEL_SITE, out: serial.out, themeRoot: PARALLEL_THEME, outputsDir: outputs });
+    assert.deepEqual(errors(one.diagnostics), []);
+    for (const workers of [2, 3, 5, 8]) {
+      const each = scratch();
+      scratchs.push(each);
+      const many = await build({
+        root: PARALLEL_SITE,
+        out: each.out,
+        themeRoot: PARALLEL_THEME,
+        outputsDir: outputs,
+        workers,
+      });
+      assert.deepEqual(snapshot(each.out), snapshot(serial.out), `${workers} workers write the same bytes`);
+      assert.deepEqual(many.files, one.files, `${workers} workers write the same files`);
+      assert.deepEqual(many.diagnostics, one.diagnostics, `${workers} workers find the same things`);
+    }
+  } finally {
+    cleanup(outputs, ...scratchs.map((each) => each.parent));
+  }
+});
+
+test("closing the pool cancels queued and in-flight work and settles every waiter", async () => {
+  await traced(async (dir) => {
+    const { pool, pages } = await fixturePool({ workers: 2, concurrency: 2 });
+    try {
+      pool.prefetch(pages);
+      await waitFor("a page to start rendering", () => spansIn(dir).length > 0);
+      // Attach the expectation before closing: close settles the promise synchronously.
+      const pending = assert.rejects(pool.render(pages[pages.length - 1]!), /the pool closed before/);
+      await pool.close();
+      await pending;
+      await assert.rejects(pool.render(pages[0]!), /the pool closed before/);
+      const after = spansIn(dir).length;
+      assert.ok(after < pages.length, "close stopped the prefetch queue instead of draining it");
+      await sleep(150);
+      assert.equal(spansIn(dir).length, after, "no worker kept rendering after close");
+    } finally {
+      await pool.close();
+    }
+  });
+});
+
+test("a page whose layout throws everywhere rejects its render instead of hanging", async () => {
+  const theme = tree({
+    "package.json": JSON.stringify({ type: "module", name: "broken-theme" }),
+    "src/index.ts": 'export const theme = { name: "broken", folders: ["layouts"] };\n',
+    "layouts/doc.ts": 'export default function doc(): string {\n  throw new Error("render boom");\n}\n',
+  });
+  const root = tree({ "a.md": "---\nlayout: doc\n---\n# A\n" });
+  try {
+    const { site } = await buildModel(root);
+    const registry = await loadRegistry(theme);
+    const pool = createRenderPool({ themeRoot: theme, site, registry, workers: 2 });
+    try {
+      await assert.rejects(pool.render(site.pages[0]!), /render boom/, "the failure reached the caller");
+    } finally {
+      await pool.close();
+    }
+  } finally {
+    cleanup(theme, root);
+  }
+});
+
+test("a build that fails while pages render leaves no destination and no staging folder", async () => {
+  const root = tree({ "a.md": "# A\n", "b.md": "# B\n" });
+  const outputs = oneOutput(`export const one = {
+  name: "one",
+  async run(site, ctx) {
+    for (const page of site.pages) await ctx.renderPage(page);
+    throw new Error("output boom");
+  },
+};
+`);
+  const { parent, out } = scratch();
+  try {
+    mkdirSync(out, { recursive: true });
+    writeFileSync(join(out, "old.txt"), "old");
+    await assert.rejects(
+      build({ root, out, themeRoot: THEME, outputsDir: outputs, defaultLayout: "doc", workers: 2 }),
+      /output boom/,
+    );
+    assert.equal(readFileSync(join(out, "old.txt"), "utf8"), "old", "the site on disk is left as it was");
+    assert.deepEqual(
+      readdirSync(parent).filter((name) => name.startsWith(".site-build-")),
+      [],
+      "no staging folder is left behind",
+    );
+  } finally {
+    cleanup(root, outputs, parent);
+  }
+});
+
 test("worker counts are validated before any build work", async () => {
   const root = tree({ "a.md": "# A\n" });
   const outputs = htmlOnlyOutputs();
@@ -253,6 +493,14 @@ test("worker counts are validated before any build work", async () => {
       Promise.resolve().then(() => createRenderPool({ workers: 1 } as unknown as RenderPoolOptions)),
       TypeError,
     );
+    // A window narrower than one page is no window, and is refused before any worker starts.
+    for (const concurrency of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => createRenderPool({ workers: 2, concurrency } as unknown as RenderPoolOptions),
+        TypeError,
+        `${concurrency} is not a concurrency`,
+      );
+    }
     // One worker is not a pool: it renders in this process, fast and without starting a thread.
     const result = await build({ root, out, themeRoot: THEME, outputsDir: outputs, defaultLayout: "doc", workers: 1 });
     assert.deepEqual(errors(result.diagnostics), []);

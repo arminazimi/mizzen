@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mizzen context request",
+  "description": "A versioned request for task-specific documentation context: the task, include/exclude hints, locale and version limits, a token budget, and the evidence that must survive trimming. `parseContextRequest` validates against this schema, fills the defaults, and returns the normalised request; keys are written in this order, so the same request always has the same bytes. Parsing is local: no network, no model, no clock.",
+  "type": "object",
+  "required": [
+    "version",
+    "task",
+    "budget"
+  ],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "The contract version. Only 1 exists."
+    },
+    "task": {
+      "$ref": "#/$defs/task",
+      "description": "What the agent is doing; the parser never infers it from other fields."
+    },
+    "include": {
+      "description": "Hints that raise a page's priority: a URL, source path, or topic. Default `[]`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/hint"
+      },
+      "uniqueItems": true
+    },
+    "exclude": {
+      "description": "Hints that leave a page out: a URL, source path, or topic. Default `[]`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/hint"
+      },
+      "uniqueItems": true
+    },
+    "constraints": {
+      "$ref": "#/$defs/constraints",
+      "description": "Language and site version limits. Absent means no limit."
+    },
+    "budget": {
+      "$ref": "#/$defs/budget",
+      "description": "The token budget of the request."
+    },
+    "requiredEvidence": {
+      "$ref": "#/$defs/evidence",
+      "description": "Evidence that trimming must keep. Absent means nothing is required."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "task": {
+      "type": "object",
+      "description": "The task the context is for.",
+      "required": [
+        "goal"
+      ],
+      "properties": {
+        "goal": {
+          "description": "The task in one sentence; the parser removes leading and trailing whitespace.",
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "kind": {
+          "description": "The kind of work, when the caller states it. Never inferred.",
+          "enum": [
+            "explain",
+            "implement",
+            "review",
+            "debug",
+            "migrate",
+            "other"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "hint": {
+      "description": "A URL, source path, section id, or topic a page can be matched against.",
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "version": {
+      "description": "A site version folder, such as `v2`, `v2.1`, or `v2.1.3`.",
+      "type": "string",
+      "pattern": "^v[0-9]+(?:\\.[0-9]+){0,2}$"
+    },
+    "versionRange": {
+      "type": "object",
+      "description": "The acceptable site version folders.",
+      "properties": {
+        "exact": {
+          "$ref": "#/$defs/version",
+          "description": "Only this version folder; exclusive with `min` and `max`."
+        },
+        "min": {
+          "$ref": "#/$defs/version",
+          "description": "Oldest acceptable version folder, inclusive."
+        },
+        "max": {
+          "$ref": "#/$defs/version",
+          "description": "Newest acceptable version folder, inclusive."
+        }
+      },
+      "additionalProperties": false
+    },
+    "constraints": {
+      "type": "object",
+      "description": "Limits on the language and site version of the selected context.",
+      "properties": {
+        "locale": {
+          "description": "BCP 47 language tag, such as `en`, `fa`, or `en-US`; the parser lower-cases it.",
+          "type": "string",
+          "pattern": "^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$"
+        },
+        "version": {
+          "$ref": "#/$defs/versionRange",
+          "description": "The acceptable site version folders."
+        }
+      },
+      "additionalProperties": false
+    },
+    "budget": {
+      "type": "object",
+      "description": "The token budget: an upper bound and, optionally, tokens reserved for required evidence.",
+      "required": [
+        "maxTokens"
+      ],
+      "properties": {
+        "maxTokens": {
+          "description": "Upper bound on the estimated tokens of the serialised context.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "reservedTokens": {
+          "description": "Tokens held back for required evidence; less than `maxTokens`.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "object",
+      "description": "Evidence that must survive trimming.",
+      "properties": {
+        "refs": {
+          "description": "Page URLs, source paths, or section ids that must stay in the context. Default `[]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hint"
+          },
+          "uniqueItems": true
+        },
+        "source": {
+          "description": "Keep each selected fragment's source path and span. Default `false`.",
+          "type": "boolean"
+        },
+        "versions": {
+          "description": "Keep the site version and locale each selected fragment came from. Default `false`.",
+          "type": "boolean"
+        },
+        "warnings": {
+          "description": "Keep the warnings attached to selected pages. Default `false`.",
+          "type": "boolean"
+        },
+        "dependencies": {
+          "description": "Keep the pages a selected page depends on. Default `false`.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

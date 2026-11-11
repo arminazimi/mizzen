@@ -1,12 +1,19 @@
 import type { Diagnostic } from "../contracts/diagnostic.ts";
+import type { Direction } from "../contracts/config.ts";
 import type { Page, Site } from "../contracts/content.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
+import { discoverVersions } from "../content/versions.ts";
+import { version } from "../index.ts";
 import { rankPages } from "../packs/rank.ts";
 import { estimateTokens } from "../packs/tokens.ts";
-import { trimPages } from "../packs/trim.ts";
+import { trimPages, type TrimmedPage } from "../packs/trim.ts";
+import { blockIdOf, formatSpan } from "../source/spans.ts";
+import { buildHashOf, hashOf } from "./build-hash.ts";
+import { trustReport, type TrustEntry, type TrustPageEntry } from "./trust.ts";
 
 /**
- * Writes one ready-to-paste context pack per configured topic: `pack/<topic>.md`.
+ * Writes one ready-to-paste context pack per configured topic: `pack/<topic>.md`, and its structured twin
+ * `pack/<topic>.json`.
  *
  * A pack is a Markdown file an agent can paste into a prompt without reading the site. Topics come from
  * `_data/context-packs.yml` (also readable as `_data/contextPacks.yml`), as a list of entries:
@@ -45,6 +52,25 @@ import { trimPages } from "../packs/trim.ts";
  *
  * Files are sorted by path, the input order never reaches the bytes otherwise, and the output reads no
  * clock, network, environment, or disk: the same model gives the same files.
+ *
+ * ## The structured twin
+ *
+ * Every topic also writes `pack/<topic>.json`, the same selected evidence in a form a tool can read. Both files
+ * come from one {@link PackEvidence} model, so the structured items and the Markdown sections name the same pages,
+ * in the same order. An item carries:
+ *
+ * - `id`: the page's URL, which stays the same across builds while the page keeps its address.
+ * - `origin`: the source file and its span, using the source map's span format (`path:line:column-endLine:endColumn`).
+ * - `version` and `locale`: the documentation version folder (`content/versions.ts`) and the page's `lang`/`dir`.
+ * - `trust`: the page's trust level, reasons, and per-signal evidence states, from the same signals as `trust.json`
+ *   (`./trust.ts`), or left out when trust cannot be read.
+ * - `build`: the identity of the documentation build, and `hash`: the SHA-256 of the page's source body, the same
+ *   value `.mizzen/manifest.json` records under `hashes.source`.
+ * - `sections`: the kept top-level sections, with their stable block ids and spans, and `content`: the exact
+ *   Markdown the human-readable pack shows.
+ *
+ * The build identity is the engine version plus one SHA-256 over every doc page's URL and source hash, using
+ * `build-hash.ts`'s rule. No absolute path, clock, environment, or unselected page reaches either file.
  */
 
 /** The `_data` key `_data/contextPacks.yml` loads under. */
@@ -66,6 +92,72 @@ export interface PackTopic {
   readonly query: string;
   /** `undefined` when every doc page is a candidate; otherwise the page URLs or source paths named. */
   readonly pages: readonly string[] | undefined;
+}
+
+/** One selected section in the structured pack: its stable block id, heading text, and source span. */
+export interface PackSection {
+  /** The section's block id, `<file>:<line>:<column>`, the same id `trim.ts` matches `keep` against. */
+  readonly id: string;
+  /** The heading's plain text. */
+  readonly text: string;
+  /** The heading's span in the source file. */
+  readonly span: string;
+}
+
+/** One selected page in the structured pack, with everything needed to trace its claims to the source. */
+export interface PackItem {
+  /** The page's URL: stable while the page keeps its address, and unique within a pack. */
+  readonly id: string;
+  /** The page title, as the pack section shows it. */
+  readonly title: string;
+  /** The output URL, including `base`. */
+  readonly url: string;
+  /** The source file (relative to the site root) and the span its content starts at. */
+  readonly origin: { readonly source: string; readonly span: string };
+  /** The documentation version folder, or `null` when the page is outside every version. */
+  readonly version: string | null;
+  /** The page's language and text direction. */
+  readonly locale: { readonly lang: string; readonly dir: Direction };
+  /** A reference to the pack's build identity, repeated so an item stands on its own. */
+  readonly build: string;
+  /** SHA-256 of the page's source body, the manifest's `hashes.source` value. */
+  readonly hash: string;
+  /** The trust level, reasons, and per-signal evidence, or omitted when trust could not be read. */
+  readonly trust?: TrustEntry;
+  /** The kept top-level sections, in document order. */
+  readonly sections: readonly PackSection[];
+  /** The exact Markdown the human-readable pack shows for this page. */
+  readonly content: string;
+}
+
+/** The identity of the documentation a pack was compiled from. */
+export interface PackBuild {
+  /** The engine version that wrote the pack. */
+  readonly engine: string;
+  /** SHA-256 over every doc page's URL and source hash, by `build-hash.ts`'s rule. */
+  readonly id: string;
+}
+
+/** The topic a pack was compiled for, so a reader sees why this evidence was selected. */
+export interface PackTopicEvidence {
+  /** The display name. */
+  readonly name: string;
+  /** The ranking query that selected the pages. */
+  readonly query: string;
+  /** The token budget the Markdown pack was trimmed to. */
+  readonly budget: number;
+}
+
+/** The structured form of one pack: the model both `pack/<slug>.json` and `pack/<slug>.md` are written from. */
+export interface PackEvidence {
+  /** The structured artifact's own format version. */
+  readonly version: 1;
+  /** The documentation build the selected evidence came from. */
+  readonly build: PackBuild;
+  /** Why this evidence was selected. */
+  readonly topic: PackTopicEvidence;
+  /** The selected pages, in pack order. */
+  readonly items: readonly PackItem[];
 }
 
 /** Compares by code point, never by locale. */
@@ -91,14 +183,95 @@ function sourceOf(page: Page): string {
  * The URL the pack shows for a page: absolute when the config has `url`, else the site-relative URL the
  * model carries (which includes `base`).
  */
-function urlOf(page: Page, site: Site): string {
+function absoluteUrl(url: string, site: Site): string {
   const origin = site.config.url?.replace(/\/+$/, "");
-  return origin === undefined || origin === "" ? page.url : `${origin}${page.url}`;
+  return origin === undefined || origin === "" ? url : `${origin}${url}`;
+}
+
+/**
+ * The documentation build a pack was compiled from: the engine version plus one hash over every doc page's URL and
+ * source hash. It uses `build-hash.ts`'s rule, so the same model gives the same identity on every machine, and an
+ * edit to any page changes it. No clock, environment, or output folder is read.
+ */
+function buildIdentityOf(site: Site): PackBuild {
+  const sources: Record<string, string> = {};
+  for (const page of site.pages) {
+    if (page.kind === "doc") sources[page.url] = hashOf(page.markdown);
+  }
+  return { engine: version, id: buildHashOf(sources) };
+}
+
+/** The documentation version folder of each page, by URL; `content/versions.ts` decides the rule. */
+function versionsOf(site: Site): ReadonlyMap<string, string> {
+  const versions = new Map<string, string>();
+  for (const entry of discoverVersions(site.pages)) {
+    if (entry.version !== null) versions.set(entry.page.url, entry.version);
+  }
+  return versions;
+}
+
+/** The trust fields of one `trust.json` page entry, without the join facts the pack already carries. */
+function trustEntryOf(entry: TrustPageEntry): TrustEntry {
+  return {
+    evidence: entry.evidence,
+    level: entry.level,
+    reasons: entry.reasons,
+    ...(entry.lastReviewer === undefined ? {} : { lastReviewer: entry.lastReviewer }),
+  };
+}
+
+/**
+ * The trust entry of every doc page, by URL, from the same signals and thresholds as `trust.json`. The helper reads
+ * the site's data channels only (no root), so it never touches git, the clock, or the environment. `trust.json`
+ * nests the entries under `pages` and repeats each page's URL in its entry, which is the field this joins on.
+ */
+async function trustIndexOf(site: Site): Promise<ReadonlyMap<string, TrustEntry>> {
+  const [file] = await trustReport(site);
+  if (file === undefined) return new Map();
+  const report = JSON.parse(String(file.contents)) as { readonly pages: Readonly<Record<string, TrustPageEntry>> };
+  return new Map(Object.values(report.pages).map((entry) => [entry.url, trustEntryOf(entry)]));
+}
+
+/** A section's span with the page's normalized source path, so a Windows model still writes forward slashes. */
+function sectionOf(page: Page, section: { readonly pos: Page["source"]; readonly text: string }): PackSection {
+  const span = { ...section.pos, file: sourceOf(page) };
+  return { id: blockIdOf(span), text: section.text, span: formatSpan(span) };
+}
+
+/** One selected page, with its origin, build identity, locale, trust, kept sections, and shown Markdown. */
+function itemOf(
+  page: Page,
+  content: string,
+  trimmed: TrimmedPage | undefined,
+  build: PackBuild,
+  versions: ReadonlyMap<string, string>,
+  trust: ReadonlyMap<string, TrustEntry>,
+): PackItem {
+  const source = sourceOf(page);
+  const entry = trust.get(page.url);
+  return {
+    id: page.url,
+    title: page.title,
+    url: page.url,
+    origin: { source, span: formatSpan({ ...page.source, file: source }) },
+    version: versions.get(page.url) ?? null,
+    locale: { lang: page.lang, dir: page.dir },
+    build: build.id,
+    hash: hashOf(page.markdown),
+    ...(entry === undefined ? {} : { trust: entry }),
+    sections: (trimmed?.keptSections ?? []).map((section) => sectionOf(page, section)),
+    content,
+  };
 }
 
 /** The header of one page section, without the body. */
 function headerOf(page: Page, site: Site): string {
-  return `## ${oneLine(page.title)}\n\n- URL: ${urlOf(page, site)}\n- Source: \`${sourceOf(page)}\``;
+  return `## ${oneLine(page.title)}\n\n- URL: ${absoluteUrl(page.url, site)}\n- Source: \`${sourceOf(page)}\``;
+}
+
+/** The header of one structured item, so the Markdown and the JSON name the same origin. */
+function headerOfItem(item: PackItem, site: Site): string {
+  return `## ${oneLine(item.title)}\n\n- URL: ${absoluteUrl(item.url, site)}\n- Source: \`${item.origin.source}\``;
 }
 
 /** The pack's title line. */
@@ -277,16 +450,29 @@ function noPagesDiagnostic(topic: PackTopic): Diagnostic {
   };
 }
 
-/** One topic's finished pack. */
+/** One topic's finished pack: the Markdown file and the structured model both files come from. */
 export interface PackContents {
-  /** The topic's file name, without `.md`. */
+  /** The topic's file name, without `.md` or `.json`. */
   readonly slug: string;
   /** The pack's Markdown. */
   readonly contents: string;
+  /** The structured form of the same selected evidence. */
+  readonly evidence: PackEvidence;
+}
+
+/** Options of {@link buildPack}. */
+export interface BuildPackOptions {
+  /** The trust entries to use, by URL; computed from the site's data when absent. */
+  readonly trust?: ReadonlyMap<string, TrustEntry>;
 }
 
 /** Builds one pack, or `undefined` when the topic has no pages. */
-export async function buildPack(site: Site, topic: PackTopic, ctx: OutputContext): Promise<PackContents | undefined> {
+export async function buildPack(
+  site: Site,
+  topic: PackTopic,
+  ctx: OutputContext,
+  options: BuildPackOptions = {},
+): Promise<PackContents | undefined> {
   const candidates = candidatesOf(site, topic);
   if (candidates.length === 0) {
     ctx.report(noPagesDiagnostic(topic));
@@ -317,6 +503,8 @@ export async function buildPack(site: Site, topic: PackTopic, ctx: OutputContext
   let chosen = selected;
   let diagnostics: readonly Diagnostic[] = [];
   let contents = "";
+  let kept: readonly TrimmedPage[] = [];
+  let bodies: readonly string[] = [];
   for (;;) {
     const overhead = estimateTokens(
       assemble(
@@ -325,14 +513,15 @@ export async function buildPack(site: Site, topic: PackTopic, ctx: OutputContext
       ),
     ).tokens;
     const trimmed = await trimPages(chosen, Math.max(0, topic.budget - overhead));
-    const sections = chosen.map((page, index) => ({
-      header: headerOf(page, site),
-      body: withoutLeadHeading(trimmed.pages[index]?.markdown ?? page.markdown),
-    }));
-    contents = assemble(topic.topic, sections);
+    bodies = chosen.map((page, index) => withoutLeadHeading(trimmed.pages[index]?.markdown ?? page.markdown));
+    contents = assemble(
+      topic.topic,
+      chosen.map((page, index) => ({ header: headerOf(page, site), body: bodies[index]! })),
+    );
     const total = estimateTokens(contents).tokens;
     if (total <= topic.budget || chosen.length <= 1) {
       diagnostics = trimmed.diagnostics;
+      kept = trimmed.pages;
       if (total > topic.budget && diagnostics.length === 0) {
         ctx.report({
           id: "context-pack.over-budget",
@@ -349,16 +538,35 @@ export async function buildPack(site: Site, topic: PackTopic, ctx: OutputContext
 
   for (const diagnostic of diagnostics) ctx.report(diagnostic);
 
-  return { slug: slugOf(topic.topic), contents };
+  const build = buildIdentityOf(site);
+  const versions = versionsOf(site);
+  const trust = options.trust ?? (await trustIndexOf(site));
+  const evidence: PackEvidence = {
+    version: 1,
+    build,
+    topic: { name: topic.topic, query: topic.query, budget: topic.budget },
+    items: chosen.map((page, index) =>
+      itemOf(page, bodies[index] ?? "", kept[index], build, versions, trust),
+    ),
+  };
+
+  // The human-readable pack is rendered from the same items, so the two files cannot name different evidence.
+  contents = assemble(
+    topic.topic,
+    evidence.items.map((item) => ({ header: headerOfItem(item, site), body: item.content })),
+  );
+
+  return { slug: slugOf(topic.topic), contents, evidence };
 }
 
 /**
- * Writes `pack/<topic>.md` for every topic in `_data/context-packs.yml`. No topics means no files.
+ * Writes `pack/<topic>.md` and `pack/<topic>.json` for every topic in `_data/context-packs.yml`. No topics means no
+ * files.
  *
  * The file name is the sanitized topic slug (see the rule at the top of this module), files are sorted by
  * path, and a topic with no candidate page is reported with `context-pack.no-pages` instead of writing an
  * empty pack. A malformed data file or topic entry is a warning, not a build failure, and produces no file
- * for that entry.
+ * for that entry. The trust entries are read once for the whole run, from the site's data channels.
  */
 export const contextPack: Output = {
   name: "context-pack",
@@ -368,12 +576,15 @@ export const contextPack: Output = {
 
     const used = new Set<string>();
     const files: OutputFile[] = [];
+    let trust: ReadonlyMap<string, TrustEntry> | undefined;
     for (let index = 0; index < raw.length; index += 1) {
       const topic = readPackTopic(raw[index], index + 1, ctx);
       if (topic === undefined) continue;
-      const pack = await buildPack(site, topic, ctx);
+      trust ??= await trustIndexOf(site);
+      const pack = await buildPack(site, topic, ctx, { trust });
       if (pack === undefined) continue;
       const slug = uniqueSlug(pack.slug, used, index + 1);
+      files.push({ path: `pack/${slug}.json`, contents: `${JSON.stringify(pack.evidence, null, 2)}\n` });
       files.push({ path: `pack/${slug}.md`, contents: pack.contents });
     }
 

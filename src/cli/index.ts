@@ -1,4 +1,4 @@
-/** `mizzen build`, `mizzen check`, `mizzen dev`, `mizzen edit apply`, `mizzen edit verify`, `mizzen pack`, `mizzen verify`, and `mizzen watch`: build a site, report diagnostics, serve it while developing, apply or verify an agent patch, print a context pack, check a build, or rebuild on change. */
+/** `mizzen build`, `mizzen check`, `mizzen dev`, `mizzen doctor`, `mizzen edit apply`, `mizzen edit verify`, `mizzen pack`, `mizzen verify`, and `mizzen watch`: build a site, report diagnostics, serve it while developing, preflight a site, apply or verify an agent patch, print a context pack, check a build, or rebuild on change. */
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import { version } from "../index.ts";
 import { build } from "../pipeline/build.ts";
 import { formatJson, formatSarif, formatText } from "../pipeline/diagnostics.ts";
 import { DEFAULT_DEV_HOST, DEFAULT_DEV_OUT, DEFAULT_DEV_PORT, dev } from "./dev.ts";
+import { doctor } from "./doctor.ts";
 import { editApply, EditApplyError, formatEditApplyJson } from "./edit-apply.ts";
 import { formatVerifyProofJson, verifyProof, verifyProofMessage } from "./edit-verify.ts";
 import { pack } from "./pack.ts";
@@ -17,6 +18,9 @@ import { DEFAULT_WATCH_OUT, watch as watchSite } from "./watch.ts";
 
 /** The command name on the PATH. */
 export const NAME = "mizzen";
+
+/** Every command the parser registers, in the order the help lists them. */
+export const COMMANDS = ["build", "check", "dev", "doctor", "edit", "pack", "verify", "watch"] as const;
 
 const FORMATS = ["text", "json", "sarif"] as const;
 type Format = (typeof FORMATS)[number];
@@ -42,6 +46,7 @@ Commands:
   build [dir]               Build the site into --out (default: dist)
   check [dir]               Build to a temp folder and print diagnostics only
   dev [dir]                 Serve the site, rebuild on change, and reload the browser
+  doctor [dir]              Check the config, content, output paths, runtime, and toolchain
   edit apply <patch.json> [dir]
                             Apply a span patch to its source file and record a proof
   edit verify <proof.json>  Check an edit proof against the site and rerun the doctor
@@ -52,7 +57,7 @@ Commands:
 Options:
   --out <path>         Output folder: build (default: dist), dev (default: .mizzen/dev), watch (default: .mizzen/watch); pack writes a file here instead of stdout
   --theme <dir>        Theme root folder (layouts/, chrome/, components/)
-  --format <format>    text, json, or sarif (check; default: text); text or json for edit apply and edit verify
+  --format <format>    text, json, or sarif (check and doctor; default: text); text or json for edit apply and edit verify
   --hash <hex>         Expected build hash for verify (default: the manifest's)
   --site <dir>         Site root for edit verify (default: .)
   --doctor             Rerun the doctor for edit verify
@@ -88,6 +93,13 @@ type CheckOpts = {
   readonly format: Format;
   readonly theme?: string;
   readonly workers?: number;
+};
+
+type DoctorOpts = {
+  readonly command: "doctor";
+  readonly root: string;
+  readonly format: Format;
+  readonly theme?: string;
 };
 
 type DevOpts = {
@@ -145,6 +157,7 @@ type Parsed =
         | BuildOpts
         | CheckOpts
         | DevOpts
+        | DoctorOpts
         | EditApplyOpts
         | EditVerifyOpts
         | PackOpts
@@ -308,6 +321,7 @@ export function parseArgs(args: readonly string[]): Parsed {
     command !== "build" &&
     command !== "check" &&
     command !== "dev" &&
+    command !== "doctor" &&
     command !== "pack" &&
     command !== "verify" &&
     command !== "watch"
@@ -341,10 +355,10 @@ export function parseArgs(args: readonly string[]): Parsed {
         }
         out = value();
       } else if (arg === "--theme") {
-        if (command === "verify") return { error: "--theme is only valid for build, check, dev, and watch" };
+        if (command === "verify") return { error: "--theme is only valid for build, check, dev, doctor, and watch" };
         theme = value();
       } else if (arg === "--format") {
-        if (command !== "check") return { error: "--format is only valid for check" };
+        if (command !== "check" && command !== "doctor") return { error: "--format is only valid for check and doctor" };
         const raw = value();
         if (!FORMATS.includes(raw as Format)) {
           return { error: `--format must be text, json, or sarif, not ${raw}` };
@@ -455,6 +469,16 @@ export function parseArgs(args: readonly string[]): Parsed {
         command: "watch",
         root: dir,
         ...(out === undefined ? {} : { out }),
+        ...(theme === undefined ? {} : { theme }),
+      },
+    };
+  }
+  if (command === "doctor") {
+    return {
+      options: {
+        command: "doctor",
+        root: dir,
+        format,
         ...(theme === undefined ? {} : { theme }),
       },
     };
@@ -591,6 +615,22 @@ export async function main(args: readonly string[], io: Io = {}): Promise<number
   }
 
   const root = resolve(options.root);
+  if (options.command === "doctor") {
+    try {
+      const themeRoot = await resolveThemeRoot(root, options.theme);
+      const diagnostics = await doctor({
+        root,
+        defaultLayout: DEFAULT_LAYOUT,
+        ...(themeRoot === undefined ? {} : { themeRoot }),
+      });
+      printDiagnostics(diagnostics, options.format, log);
+      return diagnostics.some((d) => d.severity === "error") ? 1 : 0;
+    } catch (err) {
+      error(`${NAME}: ${err instanceof Error ? err.message : String(err)}`);
+      return 2;
+    }
+  }
+
   const themeRoot = await resolveThemeRoot(root, options.theme);
   if (themeRoot === undefined) {
     error(

@@ -1,8 +1,12 @@
 import { stringify } from "yaml";
 import { parseAgentInstructions, type AgentBlock } from "../content/agent-instructions.ts";
+import { discoverVersions } from "../content/versions.ts";
+import type { Direction } from "../contracts/config.ts";
 import type { Page, Site } from "../contracts/content.ts";
 import type { Diagnostic } from "../contracts/diagnostic.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
+import { version } from "../index.ts";
+import { hashOf } from "./build-hash.ts";
 
 /** Compares by code point, never by locale. */
 function byCodePoint(a: string, b: string): number {
@@ -97,7 +101,29 @@ export interface PageAgent {
   readonly url: string;
   /** The source file, relative to the site root, with forward slashes. */
   readonly source: string;
+  /** The page's language, a BCP 47 tag. */
+  readonly lang: string;
+  /** The page's text direction. */
+  readonly dir: Direction;
+  /** The documentation version folder, or `null` when the page is outside every version. */
+  readonly version: string | null;
+  /** The build identity the instructions were read from. */
+  readonly build: {
+    /** The engine version that wrote the file. */
+    readonly engine: string;
+    /** SHA-256 of the page's source body, the manifest's `hashes.source` value. */
+    readonly hash: string;
+  };
   readonly agent: AgentBlock;
+}
+
+/** The documentation version folder of each doc page, by URL; `content/versions.ts` decides the rule. */
+function versionsOf(site: Site): ReadonlyMap<string, string> {
+  const versions = new Map<string, string>();
+  for (const entry of discoverVersions(site.pages)) {
+    if (entry.version !== null) versions.set(entry.page.url, entry.version);
+  }
+  return versions;
 }
 
 /** The block's keys in the output's fixed order, with the unset ones left out. */
@@ -111,10 +137,20 @@ function orderedAgent(block: AgentBlock): AgentBlock {
   };
 }
 
+/** A page's source file, relative to the site root, with forward slashes on every platform. */
+function sourceOf(page: Page): string {
+  return page.source.file.replace(/\\/g, "/");
+}
+
 /**
  * Writes `<url>/agent.json` beside each document page that has an `agent:` block: the page's URL, its source file,
- * and the block (`edit`, `owner`, `rules`, `source`, `notes`), so an agent that opens one page also gets that page's
- * rules without reading the whole site or the HTML.
+ * its locale and documentation version, the build identity, and the block (`edit`, `owner`, `rules`, `source`,
+ * `notes`), so an agent that opens one page also gets that page's rules without reading the whole site or the HTML.
+ *
+ * The instructions' claims trace back to the build: `build.hash` is the SHA-256 of the page's source body, the same
+ * value `.mizzen/manifest.json` records under `hashes.source`, and `build.engine` is the engine version. `version` is
+ * the documentation version folder (`content/versions.ts`), and `lang`/`dir` are the page's locale. No absolute path,
+ * clock, or unselected page is written.
  *
  * A page without the block writes no file, and so does an app or asset page, a page whose URL names a file of another
  * kind, and a block whose every key is unreadable. A block with errors still writes its readable keys, and the errors
@@ -126,6 +162,7 @@ export const pageAgent: Output = {
   name: "page-agent",
   async run(site: Site, ctx: OutputContext): Promise<readonly OutputFile[]> {
     const files: OutputFile[] = [];
+    const versions = versionsOf(site);
     for (const page of site.pages) {
       if (page.kind !== "doc") continue;
       const url = agentPath(page.url);
@@ -133,7 +170,15 @@ export const pageAgent: Output = {
       const block = readAgentBlock(page, (diagnostic) => ctx.report(diagnostic));
       const agent = orderedAgent(block);
       if (Object.keys(agent).length === 0) continue;
-      const body: PageAgent = { url: page.url, source: page.source.file, agent };
+      const body: PageAgent = {
+        url: page.url,
+        source: sourceOf(page),
+        lang: page.lang,
+        dir: page.dir,
+        version: versions.get(page.url) ?? null,
+        build: { engine: version, hash: hashOf(page.markdown) },
+        agent,
+      };
       files.push({
         path: underBase(url, site.config.base).replace(/^\//, ""),
         contents: `${JSON.stringify(body, null, 2)}\n`,

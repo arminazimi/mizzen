@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Diagnostic, FrontMatter, Page, Site, SiteConfig } from "../src/contracts/index.ts";
 import type { OutputContext, OutputFile } from "../src/contracts/output.ts";
+import { version } from "../src/index.ts";
 import { buildModel } from "../src/model/build.ts";
+import { hashOf } from "../src/outputs/build-hash.ts";
 import { agentPath, pageAgent, readAgentBlock } from "../src/outputs/page-agent.ts";
 
 const pos = { file: "guide/install.md", line: 4, column: 1, endLine: 4, endColumn: 1 };
@@ -108,6 +110,10 @@ test("a page writes its URL, source, and every agent key in the fixed order", as
   assert.deepEqual(body, {
     url: "/guide/install/",
     source: "guide/install.md",
+    lang: "en",
+    dir: "ltr",
+    version: null,
+    build: { engine: version, hash: hashOf("") },
     agent: {
       edit: false,
       owner: "docs-team",
@@ -116,7 +122,7 @@ test("a page writes its URL, source, and every agent key in the fixed order", as
       notes: "Change the constant, not the page.",
     },
   });
-  assert.deepEqual(Object.keys(body), ["url", "source", "agent"]);
+  assert.deepEqual(Object.keys(body), ["url", "source", "lang", "dir", "version", "build", "agent"]);
   assert.deepEqual(Object.keys(body.agent as object), ["edit", "owner", "rules", "source", "notes"]);
   assert.ok(String(file.contents).endsWith("\n"), "the file ends with a line feed");
 });
@@ -204,6 +210,36 @@ test("quotes, backslashes, line breaks, and non-ASCII text survive the JSON", as
   assert.ok(String(file.contents).includes("\\n"), "the line break is escaped on disk");
 });
 
+test("a versioned, localized page records its version folder and locale", async () => {
+  const file = await only(
+    site([
+      page("/v2/guide/install/", { agent: { owner: "docs-team" } }, {
+        source: { ...pos, file: "v2/guide/install.md" },
+        lang: "fa",
+        dir: "rtl",
+      }),
+    ]),
+  );
+  const body = bodyOf(file) as { version: string | null; lang: string; dir: string };
+
+  assert.equal(body.version, "v2");
+  assert.equal(body.lang, "fa");
+  assert.equal(body.dir, "rtl");
+});
+
+test("the build identity is the engine version and the page's source hash, with no absolute path", async () => {
+  const markdown = "# Install\n";
+  const model = site([page("/guide/install/", { agent: { owner: "docs-team" } }, {
+    source: { ...pos, file: "guide\\install.md" },
+    markdown,
+  })]);
+  const body = bodyOf(await only(model)) as { source: string; build: { engine: string; hash: string } };
+
+  assert.equal(body.source, "guide/install.md", "a Windows source path is written with forward slashes");
+  assert.deepEqual(body.build, { engine: version, hash: hashOf(markdown) });
+  assert.equal(JSON.stringify(body).includes(process.cwd()), false);
+});
+
 test("a block that is not a mapping is reported and writes no file", async () => {
   const reports: Diagnostic[] = [];
   const model = site([page("/a/", { agent: "docs-team" as never }, { source: { ...pos, file: "guide/a.md", line: 5 } })]);
@@ -289,9 +325,14 @@ test("a build from source files writes agent.json for the page with a block and 
       files.map((f) => f.path),
       ["guide/install/agent.json"],
     );
+    const page = model.pages.find((entry) => entry.url === "/guide/install/")!;
     assert.deepEqual(bodyOf(files[0]!), {
       url: "/guide/install/",
       source: "guide/install.md",
+      lang: "en",
+      dir: "ltr",
+      version: null,
+      build: { engine: version, hash: hashOf(page.markdown) },
       agent: { owner: "docs-team", rules: ["Never change the version table by hand"] },
     });
   } finally {

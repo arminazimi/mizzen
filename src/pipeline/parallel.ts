@@ -7,6 +7,10 @@
  * once; it loads the theme's registry itself. A page a worker fails to render, or a worker that dies, falls back to
  * this process for that page with a diagnostic, and the build carries on.
  *
+ * The pool holds a bounded window of pages: no more than {@link RenderPoolOptions.concurrency} are ever dispatched
+ * and unanswered, so a prefetch of every page queues a window rather than every page at once. Closing the pool
+ * cancels what is queued and in flight and settles every waiting `render`, so nothing is left running or waiting.
+ *
  * `parallel.ts` is both the pool and the worker entry point: Node starts the same file in a thread and the
  * {@link isMainThread} guard at the bottom turns it into a worker. That keeps the unit one file, as the engine's
  * folder-per-unit rule asks.
@@ -42,13 +46,17 @@ export interface RenderedPage {
 /** A pool that renders pages in worker threads. */
 export interface RenderPool {
   /**
-   * Starts rendering `pages` now, in this order, without waiting for anyone to ask for the result. Pages already
-   * queued or done are skipped. A result nobody asks for is dropped at {@link RenderPool.close}.
+   * Starts rendering `pages` now, in this order, without waiting for anyone to ask for the result. Only a bounded
+   * window of them is in flight; the rest wait their turn. Pages already queued or done are skipped. A result nobody
+   * asks for is dropped at {@link RenderPool.close}.
    */
   prefetch(pages: readonly Page[]): void;
   /** Renders one page, in a worker when one is free and in this process when its worker failed. */
   render(page: Page): Promise<RenderedPage>;
-  /** Stops every worker and drops the results kept for pages. Safe to call more than once. */
+  /**
+   * Cancels every page queued or in flight, settles their `render` promises with an error, and stops the workers.
+   * Safe to call more than once, and no work starts after it.
+   */
   close(): Promise<void>;
 }
 
@@ -64,6 +72,11 @@ export interface RenderPoolOptions {
   readonly defaultLayout?: string;
   /** How many worker threads to start; at least 2, since one thread is the case that needs no pool. */
   readonly workers: number;
+  /**
+   * The most pages dispatched to workers and not yet answered; more wait in the queue. Default: four per worker,
+   * which keeps each thread fed without holding a whole site in flight.
+   */
+  readonly concurrency?: number;
 }
 
 /** Compares by code point, never by locale. */
@@ -194,6 +207,11 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** What a `render` waiting on a pool that closed or cancelled its work is rejected with. */
+function closedError(page: Page): Error {
+  return new Error(`render: the pool closed before ${page.url} was rendered.`);
+}
+
 /** Messages this module posts in a worker's thread. */
 type InitMessage = {
   readonly type: "init";
@@ -284,11 +302,14 @@ interface PoolState {
   readonly site: Site;
   readonly registry: ThemeRegistry;
   readonly defaultLayout: string | undefined;
+  /** The most pages that may be dispatched and unanswered at once. */
+  readonly concurrency: number;
 }
 
 /**
  * The thread pool. Pages are rendered in batches: the queued pages are split over the idle workers, so a build that
- * prefetches every page sends each worker one large batch rather than one message per page.
+ * prefetches every page sends each worker a batch rather than one message per page, without ever holding more pages
+ * in flight than the configured concurrency.
  */
 class WorkerPool implements RenderPool {
   readonly #state: PoolState;
@@ -326,7 +347,7 @@ class WorkerPool implements RenderPool {
   }
 
   render(page: Page): Promise<RenderedPage> {
-    if (this.#closed) return Promise.resolve(this.#inProcess(page, undefined));
+    if (this.#closed) return Promise.reject(closedError(page));
     const entry = this.#enqueue(page);
     this.#dispatch();
     if (entry.settled) {
@@ -342,12 +363,16 @@ class WorkerPool implements RenderPool {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    this.#queue.length = 0;
+    for (const entry of this.#queue.splice(0)) this.#reject(entry, closedError(entry.page));
+    for (const slot of this.#slots) {
+      const batch = slot.current;
+      slot.current = undefined;
+      for (const entry of batch ?? []) this.#reject(entry, closedError(entry.page));
+    }
     this.#entries.clear();
     await Promise.all(
       this.#slots.map(async (slot) => {
         slot.dead = true;
-        slot.current = undefined;
         await slot.worker.terminate().catch(() => undefined);
       }),
     );
@@ -363,7 +388,7 @@ class WorkerPool implements RenderPool {
     return entry;
   }
 
-  /** Sends queued pages to every idle worker, split evenly, so a prefetched build uses the whole pool. */
+  /** Sends queued pages to every idle worker, split evenly, within the concurrency window. */
   #dispatch(): void {
     if (this.#closed) return;
     if (this.#slots.every((slot) => slot.dead)) {
@@ -376,14 +401,25 @@ class WorkerPool implements RenderPool {
     if (live.some((slot) => !slot.ready)) return;
     const free = live.filter((slot) => slot.current === undefined);
     if (free.length === 0 || this.#queue.length === 0) return;
-    const size = Math.max(1, Math.ceil(this.#queue.length / free.length));
+    const capacity = Math.min(this.#state.concurrency - this.#inFlight(), this.#queue.length);
+    if (capacity <= 0) return;
+    const size = Math.max(1, Math.ceil(capacity / free.length));
+    let left = capacity;
     for (const slot of free) {
-      if (this.#queue.length === 0) break;
-      const batch = this.#queue.splice(0, size);
+      if (left <= 0) break;
+      const batch = this.#queue.splice(0, Math.min(size, left));
+      left -= batch.length;
       slot.current = batch;
       slot.batchID = ++this.#lastID;
       slot.worker.postMessage({ type: "render", id: slot.batchID, pages: batch.map((entry) => entry.page) } satisfies RenderMessage);
     }
+  }
+
+  /** Pages dispatched to workers and not answered yet; the window that backpressure keeps bounded. */
+  #inFlight(): number {
+    let count = 0;
+    for (const slot of this.#slots) count += slot.current?.length ?? 0;
+    return count;
   }
 
   #onReply(slot: Slot, reply: Reply): void {
@@ -479,11 +515,16 @@ export function createRenderPool(options: RenderPoolOptions): RenderPool {
   if (!Number.isInteger(options.workers) || options.workers < 2) {
     throw new TypeError(`createRenderPool: workers must be a whole number of at least 2, not ${String(options.workers)}.`);
   }
+  const concurrency = options.concurrency ?? options.workers * 4;
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new TypeError(`createRenderPool: concurrency must be a whole number of at least 1, not ${String(options.concurrency)}.`);
+  }
   const state: PoolState = {
     themeRoot: options.themeRoot,
     site: options.site,
     registry: options.registry,
     defaultLayout: options.defaultLayout,
+    concurrency,
   };
   return new WorkerPool(state, options.workers);
 }
