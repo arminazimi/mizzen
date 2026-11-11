@@ -219,6 +219,18 @@ test("slugs are lower-case, ASCII, hyphenated, and never contain ..", async () =
   );
 });
 
+test("moving a page changes the build identity even when its content is unchanged", async () => {
+  const topics = { contextPacks: [{ topic: "Install", budget: 20_000 }] };
+  const before = evidenceOf(
+    await contextPack.run(site([page("/guide/install/", INSTALL)], topics), context().ctx),
+  );
+  const after = evidenceOf(
+    await contextPack.run(site([page("/guide/setup/", INSTALL)], topics), context().ctx),
+  );
+
+  assert.notEqual(after.build.id, before.build.id, "the full page URL is part of the build identity");
+});
+
 test("the URL is absolute when the config has one and site-relative otherwise", async () => {
   const pages = [
     page("/docs/guide/install/", INSTALL, { title: "Install the engine", source: "docs/guide/install.md" }),
@@ -330,8 +342,15 @@ test("the structured twin traces every selected page to its source, span, locale
   assert.equal(evidence.build.engine, version);
   assert.equal(
     evidence.build.id,
-    buildHashOf(Object.fromEntries(model.pages.map((entry) => [entry.url, hashOf(entry.markdown)]))),
-    "the build identity is build-hash.ts's rule over the doc pages",
+    buildHashOf(
+      Object.fromEntries(
+        model.pages.map((entry) => [
+          entry.url.replace(/^\/+|\/+$/g, "") || "index",
+          hashOf(`${entry.url}\0${hashOf(entry.markdown)}`),
+        ]),
+      ),
+    ),
+    "the build identity is build-hash.ts's rule over relative page URLs and their full URLs",
   );
   assert.equal(evidence.build.id, evidence.items[0]?.build);
 
