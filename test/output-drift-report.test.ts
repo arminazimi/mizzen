@@ -5,9 +5,14 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { Heading, Page, Site, SiteConfig } from "../src/contracts/index.ts";
 import type { OutputContext, OutputFile } from "../src/contracts/output.ts";
-import { driftPagesOf, driftReport, driftReportOf, driftRoot } from "../src/outputs/drift-report.ts";
+import { driftPagesOf, driftReport, driftReportOf, driftRoot, type DriftFinding } from "../src/outputs/drift-report.ts";
 
 const POS = { file: "guide/install.md", line: 1, column: 1, endLine: 1, endColumn: 1 };
+
+/** The stable identity of a finding; the richer evidence fields are covered by output-drift-evidence.test.ts. */
+function core(findings: readonly DriftFinding[]): Array<Pick<DriftFinding, "kind" | "reference" | "severity">> {
+  return findings.map(({ kind, reference, severity }) => ({ kind, reference, severity }));
+}
 
 function config(overrides: Partial<SiteConfig> = {}): SiteConfig {
   return {
@@ -95,7 +100,7 @@ test("a site with no pages writes exactly empty pages and evidence with a traili
   const file = await only(site([]));
   const text = String(file.contents);
 
-  assert.equal(text, '{\n  "pages": {},\n  "evidence": {}\n}\n');
+  assert.equal(text, '{\n  "pages": {},\n  "coverage": {},\n  "evidence": {}\n}\n');
   assert.ok(text.endsWith("\n"), "the file ends with a line feed");
 });
 
@@ -131,10 +136,18 @@ test("N09's findings are grouped by page URL with kind, reference, and severity"
     const pages = await driftPagesOf(model, { root });
 
     assert.deepEqual(Object.keys(pages), ["/guide/install/"]);
-    assert.deepEqual(pages["/guide/install/"], [
+    assert.deepEqual(core(pages["/guide/install/"]!), [
       { kind: "drift.missing-file", reference: "src/missing.ts:12", severity: "warning" },
     ]);
-    assert.deepEqual(Object.keys(pages["/guide/install/"]![0]!), ["kind", "reference", "severity"]);
+    assert.deepEqual(Object.keys(pages["/guide/install/"]![0]!), [
+      "kind",
+      "reference",
+      "severity",
+      "message",
+      "help",
+      "source",
+      "target",
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -147,8 +160,8 @@ test("the output reads the drift checks through MIZZEN_SITE_ROOT", async () => {
   try {
     const model = site([page("/guide/install/", "# Install\n\nSee `/src/missing.ts:3`.\n", "guide/install.md")]);
     const text = String((await only(model)).contents);
-    const body = JSON.parse(text) as { pages: Record<string, unknown> };
-    assert.deepEqual(body.pages, {
+    const body = JSON.parse(text) as { pages: Record<string, DriftFinding[]> };
+    assert.deepEqual(Object.fromEntries(Object.entries(body.pages).map(([url, findings]) => [url, core(findings)])), {
       "/guide/install/": [{ kind: "drift.missing-file", reference: "src/missing.ts:3", severity: "warning" }],
     });
   } finally {
@@ -206,7 +219,7 @@ test("malformed drift data is ignored and the computed findings are written inst
       drift: { "/a/": [{ message: "not a finding" }] },
     });
     const pages = await driftPagesOf(model, { root });
-    assert.deepEqual(pages, {
+    assert.deepEqual(Object.fromEntries(Object.entries(pages).map(([url, findings]) => [url, core(findings)])), {
       "/a/": [{ kind: "drift.missing-file", reference: "src/gone.ts:5", severity: "warning" }],
     });
   } finally {
@@ -254,8 +267,9 @@ test("two runs over the same site model write the same bytes", async () => {
     const second = await driftReportOf(model, { root });
     assert.deepEqual(first, second);
     assert.equal(`${JSON.stringify(first, null, 2)}\n`, `${JSON.stringify(second, null, 2)}\n`);
-    assert.deepEqual(Object.keys(first), ["pages", "evidence"]);
+    assert.deepEqual(Object.keys(first), ["pages", "coverage", "evidence"]);
     assert.deepEqual(Object.keys(first.evidence), ["/guide/a/", "/guide/b/"]);
+    assert.deepEqual(Object.keys(first.coverage), ["/guide/a/", "/guide/b/"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -294,7 +308,7 @@ test("malformed pages never let stored evidence suppress a current finding", asy
     const data = { pages: { "/guide/": "not a findings list" }, evidence: stored.evidence };
     const report = await driftReportOf(model, { root, data });
 
-    assert.deepEqual(report.pages["/guide/"], [
+    assert.deepEqual(core(report.pages["/guide/"]!), [
       { kind: "drift.moved-symbol", reference: "src/app.ts:20", severity: "warning" },
     ]);
     assert.equal(report.evidence["/guide/"]?.state, "fresh");
@@ -340,7 +354,7 @@ test("changed source bytes invalidate stored evidence and the new finding names 
     };
     const refreshed = await driftReportOf(model, { root, data });
 
-    assert.deepEqual(refreshed.pages["/guide/"], [
+    assert.deepEqual(core(refreshed.pages["/guide/"]!), [
       { kind: "drift.moved-symbol", reference: "src/app.ts:2", severity: "warning" },
     ]);
     assert.equal(refreshed.evidence["/guide/"]?.state, "fresh");
@@ -367,7 +381,7 @@ test("a deleted source invalidates stored evidence and is reported at the cited 
     };
     const refreshed = await driftReportOf(model, { root, data });
 
-    assert.deepEqual(refreshed.pages["/guide/"], [
+    assert.deepEqual(core(refreshed.pages["/guide/"]!), [
       { kind: "drift.missing-file", reference: "src/app.ts:2", severity: "warning" },
     ]);
     assert.equal(refreshed.evidence["/guide/"]?.sources?.["src/app.ts"], "missing");
@@ -389,7 +403,7 @@ test("a renamed source invalidates stored evidence and the finding keeps the old
     };
     const refreshed = await driftReportOf(model, { root, data });
 
-    assert.deepEqual(refreshed.pages["/guide/"], [
+    assert.deepEqual(core(refreshed.pages["/guide/"]!), [
       { kind: "drift.missing-file", reference: "src/app.ts:2", severity: "warning" },
     ]);
     assert.equal(refreshed.evidence["/guide/"]?.sources?.["src/app.ts"], "missing");
