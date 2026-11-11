@@ -198,7 +198,7 @@ function linksFor(html: string, hreflang: string): string[] {
 
 const THEME = fileURLToPath(new URL("../../lateen", import.meta.url));
 
-test("a built page's head carries the alternates, and a one-language page carries none", async () => {
+test("a built page's head carries the alternates, and a page alone in its group carries only itself", async () => {
   const root = tree({
     "mizzen.yml": [
       "title: Example",
@@ -238,8 +238,12 @@ test("a built page's head carries the alternates, and a one-language page carrie
     assert.match(linksFor(persian, "en")[0]!, /href="https:\/\/example\.com\/guide\/install\/"/);
 
     const solo = readFileSync(join(out, "solo/index.html"), "utf8");
-    assert.deepEqual(linksFor(solo, "en"), [], "a page alone in its group has no alternates");
-    assert.deepEqual(linksFor(solo, "x-default"), []);
+    // The theme's language-switcher layout writes the page's own language and x-default when no
+    // translation exists, so a page alone in its group names only itself and never another language.
+    assert.equal(linksFor(solo, "en").length, 1, "a page alone names itself");
+    assert.match(linksFor(solo, "en")[0]!, /href="https:\/\/example\.com\/solo\/"/);
+    assert.equal(linksFor(solo, "x-default").length, 1);
+    assert.deepEqual(linksFor(solo, "fa"), [], "a missing translation is not advertised");
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(parent, { recursive: true, force: true });
