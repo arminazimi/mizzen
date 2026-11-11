@@ -71,10 +71,10 @@ function canonicalInstant(date: string): string | undefined {
 /**
  * Reads every file's last commit under `root` with one `git log`, newest first, so a site of 600 pages costs one
  * process instead of 600. The newest commit that names a path is the one `git log -1 -- <path>` would give.
- * Any failure, including a missing git, is an empty map, so every page reads {@link UNKNOWN}.
+ * A failure, including a missing git, is `undefined` rather than an empty map: git did not answer, so a page must
+ * read {@link UNKNOWN} and coverage must be `unavailable`, not the `untracked` an empty map would imply.
  */
-function readReviews(root: string): Map<string, Review> {
-  const reviews = new Map<string, Review>();
+function readReviews(root: string): Map<string, Review> | undefined {
   let text: string;
   try {
     // `--relative` with `-- .` limits the log to `root` and names files relative to it; `-z` keeps odd names unquoted.
@@ -85,8 +85,10 @@ function readReviews(root: string): Map<string, Review> {
       stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {
-    return reviews;
+    return undefined;
   }
+
+  const reviews = new Map<string, Review>();
 
   // Each record is `\x01 date \x02 author NUL \n file NUL file NUL ...`; the author never holds a NUL or \x01.
   for (const record of text.split("\x01")) {
@@ -142,8 +144,8 @@ export function reviewers(root: string, pageFile: string): ReviewLookup {
   const found = historyOf(root, pageFile);
   if (found === undefined) return UNKNOWN;
 
-  found.history.reviews ??= readReviews(found.base);
-  return found.history.reviews.get(found.path) ?? UNKNOWN;
+  const reviews = (found.history.reviews ??= readReviews(found.base));
+  return reviews?.get(found.path) ?? UNKNOWN;
 }
 
 /**
@@ -155,6 +157,7 @@ export function reviewCoverage(root: string, pageFile: string): ReviewCoverage {
   const found = historyOf(root, pageFile);
   if (found === undefined) return "unavailable";
 
-  found.history.reviews ??= readReviews(found.base);
-  return found.history.reviews.has(found.path) ? "recorded" : "untracked";
+  const reviews = (found.history.reviews ??= readReviews(found.base));
+  if (reviews === undefined) return "unavailable";
+  return reviews.has(found.path) ? "recorded" : "untracked";
 }

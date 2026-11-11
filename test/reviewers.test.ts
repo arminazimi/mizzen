@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -192,6 +192,31 @@ test("coverage separates a recorded review from an untracked file", { skip: hasG
     assert.equal(reviewCoverage(root, "guide/new.md"), "untracked");
     assert.equal(reviewers(root, "guide/new.md"), UNKNOWN);
   });
+});
+
+test("coverage is unavailable when git log fails after the work-tree check", { skip: process.platform === "win32" ? "a POSIX shell is required" : false }, () => {
+  const root = mkdtempSync(join(tmpdir(), "reviewers-log-fails-"));
+  const bin = mkdtempSync(join(tmpdir(), "reviewers-log-fails-bin-"));
+  const git = join(bin, "git");
+  const originalPath = process.env.PATH;
+  try {
+    writeFileSync(join(root, "page.md"), "# Page\n");
+    // The work-tree check succeeds; the whole-root log that follows fails, as a broken repository or a killed process would.
+    writeFileSync(
+      git,
+      ['#!/bin/sh', 'if [ "$1" = "rev-parse" ]; then printf "true\\n"; exit 0; fi', 'exit 128', ""].join("\n"),
+    );
+    chmodSync(git, 0o755);
+    process.env.PATH = `${bin}:${originalPath ?? ""}`;
+
+    assert.equal(reviewCoverage(root, "page.md"), "unavailable", "a failed git log must not read as an untracked file");
+    assert.equal(reviewers(root, "page.md"), UNKNOWN);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test("coverage is unavailable without git, and for paths the lookup refuses", { skip: hasGit ? false : "git is not installed" }, async () => {
