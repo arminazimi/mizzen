@@ -29,6 +29,10 @@ type Format = (typeof FORMATS)[number];
 const EDIT_FORMATS = ["text", "json"] as const;
 type EditFormat = (typeof EDIT_FORMATS)[number];
 
+/** What `pack` prints: the Markdown pack, or its structured evidence. */
+const PACK_FORMATS = ["markdown", "json"] as const;
+type PackFormat = (typeof PACK_FORMATS)[number];
+
 /** Reads the `--format` value of an edit command, or `undefined` when it is not one it prints. */
 function editFormat(raw: string): EditFormat | undefined {
   return (EDIT_FORMATS as readonly string[]).includes(raw) ? (raw as EditFormat) : undefined;
@@ -50,22 +54,23 @@ Commands:
   edit apply <patch.json> [dir]
                             Apply a span patch to its source file and record a proof
   edit verify <proof.json>  Check an edit proof against the site and rerun the doctor
-  pack [dir]                Print one context pack for a topic, to stdout or --out
+  pack [dir]                Print one context pack for a topic or an ad-hoc request, to stdout or --out
   verify [dir]              Check a built folder against the hash in its manifest
   watch [dir]               Rebuild the site whenever a source or theme file changes
 
 Options:
   --out <path>         Output folder: build (default: dist), dev (default: .mizzen/dev), watch (default: .mizzen/watch); pack writes a file here instead of stdout
   --theme <dir>        Theme root folder (layouts/, chrome/, components/)
-  --format <format>    text, json, or sarif (check and doctor; default: text); text or json for edit apply and edit verify
+  --format <format>    text, json, or sarif (check and doctor; default: text); text or json for edit apply and edit verify; markdown or json for pack
   --hash <hex>         Expected build hash for verify (default: the manifest's)
   --site <dir>         Site root for edit verify (default: .)
   --doctor             Rerun the doctor for edit verify
   --port <number>      Port for dev (default: 3000; 0 picks a free one)
   --host <host>        Host for dev (default: 127.0.0.1)
   --workers <n|auto>   Render pages in n worker threads; auto is the CPU count minus one (default: 1)
-  --topic <name>       Topic for pack (default: the site's only topic)
-  --budget <tokens>    Token budget for pack, overriding the topic's
+  --request <file|->   Versioned JSON context request for pack; - reads stdin
+  --topic <name>       Topic for pack (default: the site's only topic); not with --request
+  --budget <tokens>    Token budget for pack, overriding the topic's; not with --request
   --dry-run            Print the diff for edit apply without writing
   --proof <path>       Proof record for edit apply (default: <patch>.proof.json)
   -h, --help           Show this help
@@ -77,6 +82,8 @@ export type Io = {
   readonly error?: (message: string) => void;
   /** Writes a command's payload, such as a pack, to stdout; defaults to `process.stdout.write`. */
   readonly write?: (text: string) => void;
+  /** Reads stdin for `pack --request -`; defaults to the process's stream, left open after the read. */
+  readonly readStdin?: () => Promise<string>;
 };
 
 type BuildOpts = {
@@ -116,6 +123,8 @@ type PackOpts = {
   readonly root: string;
   readonly topic?: string;
   readonly budget?: number;
+  readonly request?: string;
+  readonly format?: PackFormat;
   readonly out?: string;
 };
 
@@ -339,6 +348,8 @@ export function parseArgs(args: readonly string[]): Parsed {
   let workers: number | undefined;
   let topic: string | undefined;
   let budget: number | undefined;
+  let request: string | undefined;
+  let packFormat: PackFormat | undefined;
 
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
@@ -358,12 +369,21 @@ export function parseArgs(args: readonly string[]): Parsed {
         if (command === "verify") return { error: "--theme is only valid for build, check, dev, doctor, and watch" };
         theme = value();
       } else if (arg === "--format") {
-        if (command !== "check" && command !== "doctor") return { error: "--format is only valid for check and doctor" };
-        const raw = value();
-        if (!FORMATS.includes(raw as Format)) {
-          return { error: `--format must be text, json, or sarif, not ${raw}` };
+        if (command !== "check" && command !== "doctor" && command !== "pack") {
+          return { error: "--format is only valid for check, doctor, and pack" };
         }
-        format = raw as Format;
+        const raw = value();
+        if (command === "pack") {
+          if (!PACK_FORMATS.includes(raw as PackFormat)) {
+            return { error: `--format for pack must be markdown or json, not ${raw}` };
+          }
+          packFormat = raw as PackFormat;
+        } else {
+          if (!FORMATS.includes(raw as Format)) {
+            return { error: `--format must be text, json, or sarif, not ${raw}` };
+          }
+          format = raw as Format;
+        }
       } else if (arg === "--hash") {
         if (command !== "verify") return { error: "--hash is only valid for verify" };
         const raw = value();
@@ -399,6 +419,13 @@ export function parseArgs(args: readonly string[]): Parsed {
         const raw = value().trim();
         if (raw === "") return { error: "--topic needs a name" };
         topic = raw;
+      } else if (arg === "--request") {
+        if (command !== "pack") return { error: "--request is only valid for pack" };
+        const next = rest[++i];
+        if (next === undefined || (next.startsWith("-") && next !== "-")) {
+          return { error: "--request needs a file path or -" };
+        }
+        request = next;
       } else if (arg === "--budget") {
         if (command !== "pack") return { error: "--budget is only valid for pack" };
         const raw = value();
@@ -444,12 +471,20 @@ export function parseArgs(args: readonly string[]): Parsed {
     };
   }
   if (command === "pack") {
+    if (request !== undefined && topic !== undefined) {
+      return { error: "--request and --topic cannot be used together: a request names its own task" };
+    }
+    if (request !== undefined && budget !== undefined) {
+      return { error: "--request and --budget cannot be used together: the request carries its own budget" };
+    }
     return {
       options: {
         command: "pack",
         root: dir,
         ...(topic === undefined ? {} : { topic }),
         ...(budget === undefined ? {} : { budget }),
+        ...(request === undefined ? {} : { request }),
+        ...(packFormat === undefined ? {} : { format: packFormat }),
         ...(out === undefined ? {} : { out }),
       },
     };
@@ -552,9 +587,13 @@ export async function main(args: readonly string[], io: Io = {}): Promise<number
           root: resolve(options.root),
           ...(options.topic === undefined ? {} : { topic: options.topic }),
           ...(options.budget === undefined ? {} : { budget: options.budget }),
+          ...(options.request === undefined
+            ? {}
+            : { request: options.request === "-" ? "-" : resolve(options.request) }),
+          ...(options.format === undefined ? {} : { format: options.format }),
           ...(options.out === undefined ? {} : { out: resolve(options.out) }),
         },
-        { write, error },
+        { write, error, ...(io.readStdin === undefined ? {} : { readStdin: io.readStdin }) },
       );
     } catch (err) {
       error(`${NAME}: ${err instanceof Error ? err.message : String(err)}`);

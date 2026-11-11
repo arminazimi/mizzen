@@ -486,7 +486,7 @@ function rankOf(page: Page, ranked: ReadonlyMap<Page, RankedPage>): RankedPage {
 }
 
 /** Every warning the compiler emitted, with the source path in forward slashes. */
-function warningOf(diagnostic: Diagnostic): PackWarning {
+export function warningOf(diagnostic: Diagnostic): PackWarning {
   return {
     id: diagnostic.id,
     severity: diagnostic.severity,
@@ -514,7 +514,7 @@ function requirementOf(
  * because the pack publishes every warning its own compilation produced. `dependency` is not available in
  * the site model, so it names every item as missing rather than claiming a page selection proved it.
  */
-function coverageOf(items: readonly PackItem[]): PackCoverage {
+export function coverageOf(items: readonly PackItem[]): PackCoverage {
   const source = items
     .filter((item) => item.origin.source === "" || !item.origin.span.startsWith(`${item.origin.source}:`))
     .map((item) => item.id);

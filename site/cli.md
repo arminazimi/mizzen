@@ -18,22 +18,23 @@ Commands:
   edit apply <patch.json> [dir]
                             Apply a span patch to its source file and record a proof
   edit verify <proof.json>  Check an edit proof against the site and rerun the doctor
-  pack [dir]                Print one context pack for a topic, to stdout or --out
+  pack [dir]                Print one context pack for a topic or an ad-hoc request, to stdout or --out
   verify [dir]              Check a built folder against the hash in its manifest
   watch [dir]               Rebuild the site whenever a source or theme file changes
 
 Options:
   --out <path>         Output folder: build (default: dist), dev (default: .mizzen/dev), watch (default: .mizzen/watch); pack writes a file here instead of stdout
   --theme <dir>        Theme root folder (layouts/, chrome/, components/)
-  --format <format>    text, json, or sarif (check and doctor; default: text); text or json for edit apply and edit verify
+  --format <format>    text, json, or sarif (check and doctor; default: text); text or json for edit apply and edit verify; markdown or json for pack
   --hash <hex>         Expected build hash for verify (default: the manifest's)
   --site <dir>         Site root for edit verify (default: .)
   --doctor             Rerun the doctor for edit verify
   --port <number>      Port for dev (default: 3000; 0 picks a free one)
   --host <host>        Host for dev (default: 127.0.0.1)
   --workers <n|auto>   Render pages in n worker threads; auto is the CPU count minus one (default: 1)
-  --topic <name>       Topic for pack (default: the site's only topic)
-  --budget <tokens>    Token budget for pack, overriding the topic's
+  --request <file|->   Versioned JSON context request for pack; - reads stdin
+  --topic <name>       Topic for pack (default: the site's only topic); not with --request
+  --budget <tokens>    Token budget for pack, overriding the topic's; not with --request
   --dry-run            Print the diff for edit apply without writing
   --proof <path>       Proof record for edit apply (default: <patch>.proof.json)
   -h, --help           Show this help
