@@ -6,11 +6,15 @@
  * source before and after, and the verification that followed it, so a reviewer can correlate an
  * applied plan with the bytes it changed and the checks that judged it.
  *
- * Three rules keep the ledger trustworthy:
+ * Four rules keep the ledger trustworthy:
  *
  * - **Append-only.** A record is one line and a write never rewrites an existing line: the new line
  *   is added to the bytes already there and one rename puts the result in place, so a reader never
  *   sees half a record. A ledger that does not end with a line feed is refused, not repaired.
+ * - **Serialized.** `<ledger>.lock` is created beside the ledger with `O_EXCL` for the length of one
+ *   append, so two processes cannot both read the old bytes and rename over each other. A second
+ *   writer waits a bounded time, and a lock whose process is gone (or that is older than
+ *   {@link STALE_LOCK_MS}) is recovered; the lock is removed on success, refusal, and error.
  * - **Deterministic.** There is no wall-clock timestamp unless the caller passes a date or
  *   `SOURCE_DATE_EPOCH` is set, as `src/edits/proof.ts` does. Checks are sorted by id, keys are
  *   written in one fixed order, and the same input gives the same line. The record's `id` is a
@@ -25,8 +29,9 @@
  * before anything is written.
  */
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type {
   EditAuditCheck,
   EditAuditCheckStatus,
@@ -61,10 +66,20 @@ export interface AppendEditAuditOptions extends EditAuditInput {
   readonly siteRoot: string;
   /** The ledger file. A relative path is resolved against `siteRoot`; parent folders are created. */
   readonly ledger: string;
+  /**
+   * How long to wait for the ledger's lock before refusing, in milliseconds. Default: 10000. A
+   * writer that waits longer is told which process holds the lock instead of losing a line.
+   */
+  readonly lockTimeoutMs?: number;
 }
 
 /** Why a record or a ledger was refused. Each code names one check so a caller can tell them apart. */
-export type EditAuditErrorCode = "invalid-plan" | "invalid-verification" | "invalid-date" | "invalid-ledger";
+export type EditAuditErrorCode =
+  | "invalid-plan"
+  | "invalid-verification"
+  | "invalid-date"
+  | "invalid-ledger"
+  | "ledger-locked";
 
 /** A refused audit record or ledger. Nothing is written when this is thrown. */
 export class EditAuditError extends Error {
@@ -111,22 +126,38 @@ export function redactAuditText(text: string): string {
 
 /** The record's form of a path: relative, forward slashes, and no way out of the site root. */
 function auditPath(file: string, where: string, code: EditAuditErrorCode = "invalid-plan"): string {
-  if (
-    typeof file !== "string" ||
-    file === "" ||
-    file === "." ||
-    file.startsWith("/") ||
-    file.includes("\\") ||
-    /[\r\n]/.test(file) ||
-    /^[a-zA-Z]:/.test(file) ||
-    file.split("/").includes("..")
-  ) {
+  if (!isEditAuditPath(file)) {
     throw new EditAuditError(
       code,
       `audit: ${where} is not a file relative to the site root; use a relative path with forward slashes and no ".." segment.`,
     );
   }
   return file;
+}
+
+/**
+ * True when `file` is a path the ledger accepts: relative, forward slashes, no `..` segment, and no
+ * line break. `audit-verify.ts` uses the same definition so the writer and the reader agree.
+ */
+export function isEditAuditPath(file: unknown): file is string {
+  return (
+    typeof file === "string" &&
+    file !== "" &&
+    file !== "." &&
+    !file.startsWith("/") &&
+    !file.includes("\\") &&
+    !/[\r\n]/.test(file) &&
+    !/^[a-zA-Z]:/.test(file) &&
+    !file.split("/").includes("..")
+  );
+}
+
+/** A check id: one leading letter or digit, then letters, digits, dot, underscore, or dash. */
+export const EDIT_AUDIT_CHECK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** True when `value` is a SHA-256 in the ledger's canonical lowercase form. */
+export function isEditAuditHash(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 /** A positive whole line or column. */
@@ -154,7 +185,7 @@ function hashRecord(value: string | null, where: string): string | null {
     throw new EditAuditError("invalid-plan", `audit: ${where} is not a SHA-256.`);
   }
   const hash = value.toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(hash)) {
+  if (!isEditAuditHash(hash)) {
     throw new EditAuditError("invalid-plan", `audit: ${where} is not 64 hexadecimal characters.`);
   }
   return hash;
@@ -193,7 +224,7 @@ function planRecord(plan: EditAuditPlan, outcome: EditAuditOutcome): EditAuditPl
 
 /** One check with its free text redacted, in a fixed key order. */
 function checkRecord(check: EditAuditCheck): EditAuditCheck {
-  if (typeof check.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(check.id)) {
+  if (typeof check.id !== "string" || !EDIT_AUDIT_CHECK_ID.test(check.id)) {
     throw new EditAuditError(
       "invalid-verification",
       `audit: ${JSON.stringify(check.id)} is not a check id; use letters, digits, dot, underscore, or dash.`,
@@ -323,8 +354,11 @@ function recordDate(input: EditAuditInput): string | undefined {
   return new Date(seconds * 1000).toISOString();
 }
 
-/** The record's `id`: a SHA-256 over the plan's identity, in one fixed key order. */
-function auditId(outcome: EditAuditOutcome, plan: EditAuditPlan): string {
+/**
+ * The record's canonical `id`: a SHA-256 over the plan's identity, in one fixed key order. The
+ * verifier in `audit-verify.ts` recomputes it from the record on disk, so the two cannot drift.
+ */
+export function editAuditId(outcome: EditAuditOutcome, plan: EditAuditPlan): string {
   const identity = JSON.stringify({
     version: EDIT_AUDIT_VERSION,
     outcome,
@@ -351,7 +385,7 @@ export function createEditAudit(input: EditAuditInput): EditAuditRecord {
   const date = recordDate(input);
   return {
     version: EDIT_AUDIT_VERSION,
-    id: auditId(input.outcome, plan),
+    id: editAuditId(input.outcome, plan),
     outcome: input.outcome,
     plan,
     verification,
@@ -380,33 +414,245 @@ async function writeAtomic(out: string, text: string): Promise<void> {
 
 /**
  * Appends one record to the ledger at `ledger` and returns it. The record is built and checked
- * first, so a refusal leaves the ledger byte-identical. A line that is already present is not
- * appended twice, so replaying the same plan is a no-op.
+ * first, so a refusal leaves the ledger byte-identical. The ledger is then re-read under its lock
+ * and a line that is already present is not appended twice, so replaying the same plan is a no-op
+ * and two processes racing with the same record write one line.
+ *
+ * Identical plans are de-duplicated by the whole line, not by `id`: the same plan verified twice
+ * with different evidence is two records, because its `verification` differs.
  */
 export async function appendEditAudit(options: AppendEditAuditOptions): Promise<EditAuditRecord> {
   const record = createEditAudit(options);
   const line = formatEditAudit(record);
   const out = isAbsolute(options.ledger) ? options.ledger : resolve(options.siteRoot, options.ledger);
 
-  let existing = "";
+  await mkdir(dirname(out), { recursive: true });
+  const held = await acquireLedgerLock(`${out}.lock`, options.lockTimeoutMs ?? LOCK_WAIT_MS);
   try {
-    existing = await readFile(out, "utf8");
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new EditAuditError("invalid-ledger", `audit: cannot read the ledger at "${out}": ${reason}`);
+    let existing = "";
+    try {
+      existing = await readFile(out, "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new EditAuditError("invalid-ledger", `audit: cannot read the ledger at "${out}": ${reason}`);
+      }
     }
+    if (existing !== "" && !existing.endsWith("\n")) {
+      throw new EditAuditError(
+        "invalid-ledger",
+        `audit: the ledger at "${out}" does not end with a line feed; refusing to append to a damaged ledger.`,
+      );
+    }
+    if (existing.split("\n").includes(line.slice(0, -1))) return record;
+
+    await writeAtomic(out, existing + line);
+    return record;
+  } finally {
+    await releaseLedgerLock(held);
   }
-  if (existing !== "" && !existing.endsWith("\n")) {
+}
+
+/** How long an append waits for the lock before refusing. */
+const LOCK_WAIT_MS = 10_000;
+
+/** A lock this old is abandoned, even if its process is still listed. */
+const STALE_LOCK_MS = 30_000;
+
+/** How often a waiting append retries the lock. */
+const LOCK_POLL_MS = 5;
+
+/** Distinguishes two appends in this process, so releasing one never removes the other's lock. */
+let lockSequence = 0;
+
+/** One lock this process holds: its path and the token written into it. */
+interface HeldLock {
+  readonly path: string;
+  readonly token: string;
+}
+
+/** True when `pid` names a process, including one this user cannot signal. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** The pid in a lock's token, or `undefined` when the lock is gone or its token is unreadable. */
+async function lockHolder(lock: string): Promise<number | undefined> {
+  try {
+    const pid = Number.parseInt((await readFile(lock, "utf8")).split(/\s+/)[0] ?? "", 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw new EditAuditError(
       "invalid-ledger",
-      `audit: the ledger at "${out}" does not end with a line feed; refusing to append to a damaged ledger.`,
+      `audit: cannot inspect the ledger lock at "${lock}": ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (existing.split("\n").includes(line.slice(0, -1))) return record;
-
-  // shortcut: two processes appending at once can lose a line; the edit CLI applies one plan at a time.
-  await writeAtomic(out, existing + line);
-  return record;
 }
+
+/** What a breaker saw before asking to remove a lock: its token and inode prove it is still the same lock. */
+export interface StaleLockProbe {
+  readonly token: string | undefined;
+  readonly ino: number;
+  readonly stale: boolean;
+}
+
+/** The lock's raw token, or `undefined` when the lock vanished while it was being read. */
+async function readLockToken(lock: string): Promise<string | undefined> {
+  try {
+    return await readFile(lock, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new EditAuditError(
+      "invalid-ledger",
+      `audit: cannot inspect the ledger lock at "${lock}": ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
+ * Reads the lock and decides whether it is abandoned: gone at {@link STALE_LOCK_MS}, or held by a
+ * process that is no longer running. Returns `undefined` when the lock does not exist.
+ */
+export async function probeStaleLock(lock: string): Promise<StaleLockProbe | undefined> {
+  let ino: number;
+  let age: number;
+  try {
+    const info = await stat(lock);
+    ino = info.ino;
+    age = Date.now() - info.mtimeMs;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new EditAuditError(
+      "invalid-ledger",
+      `audit: cannot inspect the ledger lock at "${lock}": ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const token = await readLockToken(lock);
+  const pid = Number.parseInt(token?.split(/\s+/)[0] ?? "", 10);
+  // A lock written by this process may belong to a concurrent append here; only an absent
+  // process is stale.
+  const stale =
+    age >= STALE_LOCK_MS ||
+    (Number.isInteger(pid) && pid > 0 && pid !== process.pid && !processAlive(pid));
+  return { token, ino, stale };
+}
+
+/**
+ * The guard that serializes stale-lock recovery. It is held for one stat and one unlink, so a
+ * missing guard is retried rather than recovered; only one left by a dead breaker is removed.
+ */
+async function acquireBreakGuard(lock: string): Promise<string | undefined> {
+  const guard = `${lock}.recover`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(guard, `${process.pid} ${++lockSequence}`, { encoding: "utf8", flag: "wx" });
+      return guard;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw new EditAuditError(
+          "invalid-ledger",
+          `audit: cannot create the ledger recovery guard at "${guard}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (attempt > 0) return undefined;
+      const info = await stat(guard).catch(() => undefined);
+      const pid = await lockHolder(guard);
+      if (
+        info === undefined ||
+        Date.now() - info.mtimeMs < STALE_LOCK_MS ||
+        (pid !== undefined && pid !== process.pid && processAlive(pid))
+      ) {
+        return undefined;
+      }
+      // shortcut: two breakers may both recover a guard left by a process that died; the
+      // freshness check under the new guard still protects a lock another breaker just made.
+      await rm(guard, { force: true }).catch(() => undefined);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Removes a lock whose holder is gone or whose age exceeds {@link STALE_LOCK_MS}, and reports
+ * whether it did. The removal runs under {@link acquireBreakGuard} and only when the lock still
+ * matches `probe`, so a second breaker can never remove the fresh lock the first one just made.
+ */
+export async function breakStaleLock(lock: string, probe?: StaleLockProbe): Promise<boolean> {
+  const observed = probe ?? (await probeStaleLock(lock));
+  if (observed === undefined || !observed.stale) return false;
+
+  const guard = await acquireBreakGuard(lock);
+  if (guard === undefined) return false;
+  try {
+    let ino: number;
+    try {
+      ino = (await stat(lock)).ino;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    if (ino !== observed.ino || (await readLockToken(lock)) !== observed.token) return false;
+    await rm(lock, { force: true });
+    return true;
+  } finally {
+    await rm(guard, { force: true }).catch(() => undefined);
+  }
+}
+
+/** Takes the ledger's lock, waiting a bounded time; a lock this process already holds is not stolen. */
+async function acquireLedgerLock(lock: string, waitMs: number): Promise<HeldLock> {
+  const token = `${process.pid} ${++lockSequence}`;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      await writeFile(lock, token, { encoding: "utf8", flag: "wx" });
+      return { path: lock, token };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new EditAuditError("invalid-ledger", `audit: cannot create the ledger lock at "${lock}": ${reason}`);
+      }
+    }
+
+    const probe = await probeStaleLock(lock);
+    if (probe !== undefined && (await breakStaleLock(lock, probe))) continue;
+    if (Date.now() >= deadline) {
+      const pid = await lockHolder(lock);
+      throw new EditAuditError(
+        "ledger-locked",
+        `audit: the ledger lock at "${lock}" was held${pid === undefined ? "" : ` by process ${pid}`} for ${waitMs} ms; ` +
+          "another writer is appending. Retry once it finishes.",
+      );
+    }
+    await delay(LOCK_POLL_MS);
+  }
+}
+
+/**
+ * Removes the lock only while it still carries this append's token, so a lock recovered as stale
+ * and re-taken by another process is never removed under it. A failure here is not reported: the
+ * record is already durable, and a leftover lock is recovered as stale by the next writer.
+ */
+async function releaseLedgerLock(held: HeldLock): Promise<void> {
+  try {
+    if ((await readFile(held.path, "utf8")) === held.token) await rm(held.path, { force: true });
+  } catch {
+    /* A missing lock is already released. */
+  }
+}
+
+/** The lock primitives, exported so the concurrency tests can drive two breakers deterministically. */
+export const auditLockInternals = {
+  probeStaleLock,
+  breakStaleLock,
+  acquireLedgerLock,
+  releaseLedgerLock,
+};
