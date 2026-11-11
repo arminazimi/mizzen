@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { Heading as MdHeading, Nodes } from "mdast";
 import type { Site } from "../src/contracts/index.ts";
 import { EditPlanError, planHeadingEdit } from "../src/edits/plan.ts";
-import { applyPatch, sliceBySpan, type Patch } from "../src/edits/patch.ts";
+import { applyPatch, hashSource, PatchError, sliceBySpan, type Patch } from "../src/edits/patch.ts";
 import { parseMarkdown } from "../src/markdown/parse.ts";
 import { buildModel } from "../src/model/build.ts";
 
@@ -196,6 +196,41 @@ test("a setext heading is planned as an ATX heading and leaves the following lin
   const patched = applyPatch(source, patch);
   assert.equal(patched, "# New title\n\nBody.\n");
   assert.deepEqual(await headingTexts(patched), [{ depth: 1, text: "New title" }]);
+});
+
+test("the planned patch carries the source hash, so a changed source is refused before the span is touched", async () => {
+  const source = "# Guide\n\n## Install\n";
+  const site = await siteOf({ "guide.md": source });
+  const page = site.pages[0]!;
+
+  const patch = planHeadingEdit({ site, source, url: page.url, headingId: "install", newText: "Set up" });
+  assert.equal(patch.beforeHash, hashSource(source));
+
+  const changed = "# Guide\n\n## Install\n\nA new paragraph changed the file.\n";
+  assert.throws(
+    () => applyPatch(changed, patch),
+    (error: unknown) => error instanceof PatchError && error.code === "hash-mismatch",
+  );
+});
+
+test("a heading id that names two source headings is an ambiguous target", async () => {
+  const source = "# Guide\n\n## Install\n";
+  const site = await siteOf({ "guide.md": source });
+  const page = site.pages[0]!;
+  const ambiguous: Site = {
+    ...site,
+    pages: [{ ...page, headings: [...page.headings, page.headings[1]!] }],
+  };
+
+  assert.throws(
+    () => planHeadingEdit({ site: ambiguous, source, url: page.url, headingId: "install", newText: "Set up" }),
+    (error: unknown) => {
+      assert.ok(error instanceof EditPlanError);
+      assert.equal(error.code, "edit.ambiguous-target");
+      assert.equal(error.headingId, "install");
+      return true;
+    },
+  );
 });
 
 test("the same request gives the same patch", async () => {
