@@ -1,0 +1,7 @@
+docs:
+  - title: A
+    url: /a/
+  - title: B
+    url: /b/
+  - title: Missing
+    url: /missing/
