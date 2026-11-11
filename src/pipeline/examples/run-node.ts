@@ -9,7 +9,7 @@
  * ## Isolation
  *
  * The environment is an allow-list — `PATH`, `HOME`, `TMPDIR`, `LANG=C.UTF-8`, `NO_COLOR=1`, plus whatever the caller
- * passes in `env` — so the engine's secrets never reach the example. A snippet that names a command in
+ * passes in `env` — so the engine's secrets never reach the example. A snippet that invokes a command in
  * {@link DENIED_COMMANDS} is refused before the folder is created. Where the host offers an OS sandbox,
  * {@link planSandbox} confines writes to the working folder; {@link NodeExampleResult.sandboxed} says whether that
  * happened.
@@ -243,7 +243,7 @@ export async function runNodeExample(options: RunNodeExampleOptions): Promise<No
   }
 
   // Refused before the temp folder exists, so a denied snippet leaves nothing behind.
-  const denied = deniedCommand(options.code);
+  const denied = deniedCommand(options.code, "node");
   if (denied !== undefined) {
     return {
       ok: false,

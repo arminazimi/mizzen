@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MAX_SHELL_OUTPUT_BYTES, sandboxAvailable, runShellExample } from "../src/pipeline/examples/run-shell.ts";
+import { MAX_SHELL_OUTPUT_BYTES, deniedCommand, sandboxAvailable, runShellExample } from "../src/pipeline/examples/run-shell.ts";
 
 /** True when this host has an OS sandbox, so the tests that need one can skip instead of assuming it (like `hasGit`). */
 const hasSandbox = sandboxAvailable();
@@ -123,7 +123,47 @@ test(
   },
 );
 
-test("a snippet that names a denied command is refused before anything is created", async () => {
+test("a denied word in a comment or a string does not refuse a harmless snippet", async () => {
+  const result = await runShellExample({
+    shell: "sh",
+    code: '# sudo rm -rf /\necho ok\necho "sudo"\n',
+  });
+  assert.equal(result.rejected, false);
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stdout, "ok\nsudo\n");
+});
+
+test("the denied-command guard reads shell command position, not words in text", () => {
+  for (const code of [
+    "sudo true",
+    "sudo",
+    "echo hi; sudo true",
+    "echo hi && sudo true",
+    "echo hi || sudo true",
+    "FOO=1 sudo true",
+    "/usr/bin/sudo true",
+    "if sudo true; then echo ok; fi",
+    "sudo; true",
+    "sudo&& true",
+    "pkill node",
+  ]) {
+    assert.notEqual(deniedCommand(code, "shell"), undefined, `rejects ${JSON.stringify(code)}`);
+  }
+  for (const code of [
+    "# sudo true\necho ok",
+    "echo ok # sudo true",
+    'echo "sudo"',
+    "echo sudo",
+    "echo sudoers",
+    "printf 'pkill\\n'",
+    "echo abc#sudo",
+    "echo 'sudo",
+  ]) {
+    assert.equal(deniedCommand(code, "shell"), undefined, `allows ${JSON.stringify(code)}`);
+  }
+});
+
+test("a snippet that invokes a denied command is refused before anything is created", async () => {
   const parent = mkdtempSync(join(tmpdir(), "mizzen-denied-"));
   try {
     writeFileSync(join(parent, "keep.txt"), "kept\n");

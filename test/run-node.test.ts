@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { MAX_OUTPUT_BYTES, runNodeExample } from "../src/pipeline/examples/run-node.ts";
-import { sandboxAvailable } from "../src/pipeline/examples/run-shell.ts";
+import { deniedCommand, sandboxAvailable } from "../src/pipeline/examples/run-shell.ts";
 
 /** True when this host has an OS sandbox, so the tests that need one can skip instead of assuming it (like `hasGit`). */
 const hasSandbox = sandboxAvailable();
@@ -135,15 +135,61 @@ test("the result says honestly whether the run was sandboxed", async () => {
   assert.equal(result.sandboxed, hasSandbox);
 });
 
-test("a Node example that names a denied command is refused before anything runs", async () => {
+test("a denied word in a string literal or comment is not a command invocation", async () => {
   const result = await runNodeExample({
     lang: "js",
-    code: 'import { execSync } from "node:child_process";\nexecSync("sudo -n true");\n',
+    code: '// sudo rm -rf /\nconsole.log("sudo");\n',
   });
-  assert.equal(result.rejected, true);
-  assert.equal(result.exitCode, null);
-  assert.equal(result.sandboxed, false);
-  assert.match(result.stderr, /denied command "sudo"/);
+  assert.equal(result.rejected, false);
+  assert.equal(result.ok, true, result.stderr);
+  assert.equal(result.stdout, "sudo\n");
+});
+
+test("the denied-command guard reads only the command argument of spawn calls", () => {
+  for (const code of [
+    'execSync("sudo true")',
+    'exec("sudo true")',
+    'execFile("sudo", [])',
+    'execFileSync("sudo", [])',
+    'spawn("sudo", [])',
+    'spawnSync("sudo", [])',
+    'execSync("echo ok && sudo true")',
+    'execSync("echo ok"); execSync("sudo true")',
+    "execSync(`sudo true`)",
+  ]) {
+    assert.notEqual(deniedCommand(code, "node"), undefined, `rejects ${JSON.stringify(code)}`);
+  }
+  for (const code of [
+    'console.log("sudo")',
+    'const word = "sudo";',
+    '// execSync("sudo true")',
+    '/* spawn("sudo", []) */',
+    '/* sudo',
+    'spawn("echo", ["sudo"])',
+    'execSync("echo sudo")',
+    'fork("sudo-worker.js")',
+    'const s = "sudo',
+  ]) {
+    assert.equal(deniedCommand(code, "node"), undefined, `allows ${JSON.stringify(code)}`);
+  }
+});
+
+test("a Node example that invokes a denied command is refused before anything runs", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "mizzen-node-denied-"));
+  try {
+    const result = await runNodeExample({
+      lang: "js",
+      cwd: parent,
+      code: 'import { execSync } from "node:child_process";\nexecSync("sudo -n true");\n',
+    });
+    assert.equal(result.rejected, true);
+    assert.equal(result.exitCode, null);
+    assert.equal(result.sandboxed, false);
+    assert.match(result.stderr, /denied command "sudo"/);
+    assert.deepEqual(readdirSync(parent), [], "no temp folder is created for a refused example");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test("a runaway example is cut off at the output cap and killed", async () => {

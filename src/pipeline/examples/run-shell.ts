@@ -15,7 +15,7 @@
  * - Where the OS offers one, writes are confined to the working folder: `sandbox-exec` on macOS (a profile that allows
  *   everything except writes outside the folder) and `bwrap` on Linux (`/` read-only, the working folder writable).
  *   {@link ShellExampleResult.sandboxed} says whether that happened.
- * - A snippet that names a command in {@link DENIED_COMMANDS} is refused before anything is created or spawned.
+ * - A snippet that invokes a command in {@link DENIED_COMMANDS} is refused before anything is created or spawned.
  * - Only {@link MAX_SHELL_OUTPUT_BYTES} of each stream is kept; past that the process group is killed, so a runaway
  *   example cannot fill memory or a terminal.
  *
@@ -53,7 +53,7 @@ export const MAX_SHELL_OUTPUT_BYTES = 64 * 1024;
 const TRUNCATION_MARKER = "\n[output truncated]\n";
 
 /**
- * Commands that act on the host rather than on the working folder. A snippet that names one as a whole word is refused
+ * Commands that act on the host rather than on the working folder. A snippet that invokes one as a command is refused
  * before it runs, so the refusal has no side effects.
  */
 export const DENIED_COMMANDS: readonly string[] = [
@@ -76,17 +76,38 @@ export const DENIED_COMMANDS: readonly string[] = [
   "pkill",
 ];
 
-/** One denied command and the pattern that finds it as a whole word, never inside `pseudonym` or `sudoers`. */
-interface DeniedPattern {
-  readonly name: string;
-  readonly pattern: RegExp;
-}
+/** {@link DENIED_COMMANDS} as a set, for exact token lookup. */
+const DENIED = new Set(DENIED_COMMANDS);
 
-/** The patterns of {@link DENIED_COMMANDS}, built once. */
-const DENIED_PATTERNS: readonly DeniedPattern[] = DENIED_COMMANDS.map((name) => ({
-  name,
-  pattern: new RegExp(`(^|[^\\w-])${name}([^\\w-]|$)`),
-}));
+/** Words that keep the next word in command position: `if sudo …`, `then sudo …`, `env sudo …`. */
+const SHELL_KEYWORDS = new Set([
+  "!",
+  "case",
+  "command",
+  "do",
+  "done",
+  "elif",
+  "else",
+  "env",
+  "esac",
+  "exec",
+  "fi",
+  "for",
+  "if",
+  "in",
+  "nohup",
+  "then",
+  "time",
+  "until",
+  "while",
+  "xargs",
+]);
+
+/** Characters that end one shell command and start the next. */
+const SHELL_OPERATORS = new Set([";", "\n", "\r", "&", "|", "(", ")", "{", "}"]);
+
+/** Calls that pass a command line or an executable name as their first argument. */
+const COMMAND_CALL = /\b(?:exec|execFile|execFileSync|execSync|fork|spawn|spawnSync)\s*\(\s*(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/g;
 
 /** What {@link runShellExample} needs. */
 export interface RunShellOptions {
@@ -193,15 +214,116 @@ export function sandboxAvailable(): boolean {
   return false;
 }
 
+/** The index just past the quoted literal starting at `start`. An unclosed literal ends at the end of the code. */
+function endOfString(code: string, start: number): number {
+  const quote = code[start];
+  let i = start + 1;
+  while (i < code.length) {
+    if (code[i] === "\\") i += 2;
+    else if (code[i] === quote) return i + 1;
+    else i += 1;
+  }
+  return code.length;
+}
+
+/** Node comments become spaces, so a commented-out `execSync("sudo …")` is not a call. Strings are kept. */
+function withoutNodeComments(code: string): string {
+  let result = "";
+  for (let i = 0; i < code.length; ) {
+    const ch = code[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const end = endOfString(code, i);
+      result += code.slice(i, end);
+      i = end;
+    } else if (ch === "/" && code[i + 1] === "/") {
+      const newline = code.indexOf("\n", i);
+      const end = newline === -1 ? code.length : newline;
+      result += " ".repeat(end - i);
+      i = end;
+    } else if (ch === "/" && code[i + 1] === "*") {
+      const close = code.indexOf("*/", i + 2);
+      const end = close === -1 ? code.length : close + 2;
+      result += code.slice(i, end).replace(/[^\n]/g, " ");
+      i = end;
+    } else {
+      result += ch;
+      i += 1;
+    }
+  }
+  return result;
+}
+
+/** Shell comments and quoted words become spaces, so only unquoted words that can be a command remain. */
+function shellCommandWords(code: string): string {
+  let result = "";
+  for (let i = 0; i < code.length; ) {
+    const ch = code[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const end = endOfString(code, i);
+      result += " ".repeat(end - i);
+      i = end;
+      continue;
+    }
+    const atWordStart = i === 0 || /[\s;&|()]/.test(code[i - 1]!);
+    if (ch === "#" && atWordStart) {
+      const newline = code.indexOf("\n", i);
+      const end = newline === -1 ? code.length : newline;
+      result += " ".repeat(end - i);
+      i = end;
+      continue;
+    }
+    result += ch;
+    i += 1;
+  }
+  return result;
+}
+
+/** The first denied command that `code` invokes, or `undefined`. A word in an argument or a comment is not a command. */
+function deniedShellCommand(code: string): string | undefined {
+  let atCommandStart = true;
+  let word = "";
+  const check = (): string | undefined => {
+    if (word === "") return undefined;
+    const token = word;
+    word = "";
+    if (!atCommandStart) return undefined;
+    // Assignments and keywords leave the command itself in the next word.
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) || SHELL_KEYWORDS.has(token)) return undefined;
+    atCommandStart = false;
+    const name = token.slice(token.lastIndexOf("/") + 1);
+    return DENIED.has(name) ? name : undefined;
+  };
+  for (const ch of shellCommandWords(code)) {
+    if (SHELL_OPERATORS.has(ch)) {
+      const found = check();
+      if (found !== undefined) return found;
+      atCommandStart = true;
+    } else if (/\s/.test(ch)) {
+      const found = check();
+      if (found !== undefined) return found;
+    } else {
+      word += ch;
+    }
+  }
+  return check();
+}
+
 /**
- * The first denied command `code` names as a whole word, or `undefined`.
+ * The first denied command `code` invokes, or `undefined`.
  *
  * This is a static guard for mistakes, not a security boundary: quoting (`s'u'do`), an alias, or a variable hides a
- * command from it. The OS sandbox and the file permissions are the boundary. It is shared by both runners so a shell
- * snippet and a Node snippet that spawns the same command get the same answer.
+ * command from it. The OS sandbox and the file permissions are the boundary. A shell snippet is read as command words,
+ * so a comment or an argument that merely contains `sudo` is allowed. A Node snippet is read for the first argument of
+ * the calls that spawn a command, so `console.log("sudo")` runs while `execSync("sudo …")` does not. It is shared by
+ * both runners so a shell snippet and a Node snippet that spawn the same command get the same answer.
  */
-export function deniedCommand(code: string): string | undefined {
-  return DENIED_PATTERNS.find(({ pattern }) => pattern.test(code))?.name;
+export function deniedCommand(code: string, language: "node" | "shell"): string | undefined {
+  if (language === "shell") return deniedShellCommand(code);
+  for (const match of withoutNodeComments(code).matchAll(COMMAND_CALL)) {
+    const found = deniedShellCommand(match[2]!);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 /** The shell binary, falling back to a bare name when the absolute path is not there (a minimal Linux image). */
@@ -440,7 +562,7 @@ export async function runShellExample(options: RunShellOptions): Promise<ShellEx
       : DEFAULT_SHELL_TIMEOUT_MS;
 
   // Refused before the working folder exists, so a denied snippet leaves nothing behind.
-  const denied = deniedCommand(options.code);
+  const denied = deniedCommand(options.code, "shell");
   if (denied !== undefined) return refused(started, denied, options.cwd);
 
   let workspace: string | undefined;
