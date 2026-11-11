@@ -196,7 +196,11 @@ function absoluteUrl(url: string, site: Site): string {
 function buildIdentityOf(site: Site): PackBuild {
   const sources: Record<string, string> = {};
   for (const page of site.pages) {
-    if (page.kind === "doc") sources[page.url] = hashOf(page.markdown);
+    if (page.kind !== "doc") continue;
+    // `build-hash.ts` names relative identities, so the URL loses its leading and trailing slashes. The full URL
+    // stays in the value, so moving a page changes the identity even when its content does not.
+    const key = page.url.replace(/^\/+|\/+$/g, "") || "index";
+    sources[key] = hashOf(`${absoluteUrl(page.url, site)}\0${hashOf(page.markdown)}`);
   }
   return { engine: version, id: buildHashOf(sources) };
 }

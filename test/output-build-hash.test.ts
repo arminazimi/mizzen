@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -93,6 +93,75 @@ test("the build hash sorts paths by code point and changes when one byte changes
   } finally {
     rmSync(one, { recursive: true });
     rmSync(two, { recursive: true });
+  }
+});
+
+test("a checkout path, a file time, or an operating system's metadata is not an identity input", async () => {
+  const one = tree({ "a.txt": "a\n", "dir/b.txt": "b\n" });
+  const two = tree({ "a.txt": "a\n", "dir/b.txt": "b\n" });
+  const metadata = tree({
+    "a.txt": "a\n",
+    "dir/b.txt": "b\n",
+    ".DS_Store": "finder\n",
+    "Thumbs.db": "explorer\n",
+    "desktop.ini": "explorer\n",
+    "._a.txt": "appledouble\n",
+    "__MACOSX/._b.txt": "appledouble\n",
+  });
+  try {
+    utimesSync(join(one, "a.txt"), new Date("2000-01-01T00:00:00Z"), new Date("2000-01-01T00:00:00Z"));
+    utimesSync(join(two, "a.txt"), new Date("2030-01-01T00:00:00Z"), new Date("2030-01-01T00:00:00Z"));
+
+    const first = await fingerprint(one);
+    assert.deepEqual(await fingerprint(two), first, "the same bytes in another folder at another time hash the same");
+    assert.deepEqual(await fingerprint(metadata), first, "metadata the build did not write is not site content");
+    assert.equal(JSON.stringify(first).includes(one), false, "the folder's absolute path does not leak");
+
+    writeFileSync(join(one, ".DS_Store"), "later\n");
+    assert.deepEqual(await fingerprint(one), first, "metadata landing after the build does not change the hash");
+  } finally {
+    rmSync(one, { recursive: true });
+    rmSync(two, { recursive: true });
+    rmSync(metadata, { recursive: true });
+  }
+});
+
+test("a file named like an object prototype is still one identity", async () => {
+  const root = tree({ "a.txt": "a\n" });
+  try {
+    writeFileSync(join(root, "__proto__"), "proto\n");
+    writeFileSync(join(root, "constructor"), "ctor\n");
+    const record = await fingerprint(root);
+
+    assert.deepEqual(Object.keys(record.files), ["__proto__", "a.txt", "constructor"]);
+    assert.match(record.files["__proto__"] ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(record.hash, buildHashOf(Object.fromEntries(Object.entries(record.files))));
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("buildHashOf refuses a path identity cannot name unambiguously", () => {
+  const hash = "a".repeat(64);
+  for (const path of ["", "/absolute/a.txt", "a\\b.txt", "../escape.txt", "a/./b.txt", "a\nb.txt", "a\u0000b.txt"]) {
+    assert.throws(() => buildHashOf({ [path]: hash }), /not a relative path/, JSON.stringify(path));
+  }
+  assert.equal(buildHashOf({ "a/b.txt": hash }), buildHashOf({ "a/b.txt": hash }));
+});
+
+test("verify ignores the metadata an operating system adds to a built folder", async () => {
+  const root = tree({ "a.txt": "a\n", [MANIFEST_PATH]: "" });
+  try {
+    const record = await fingerprint(root);
+    writeFileSync(join(root, MANIFEST_PATH), `${JSON.stringify({ version: 1, pages: [], build: record })}\n`);
+    assert.equal((await verify({ dir: root })).ok, true);
+
+    writeFileSync(join(root, ".DS_Store"), "finder\n");
+    const ignored = await verify({ dir: root });
+    assert.equal(ignored.ok, true);
+    assert.equal(ignored.files, 1, "only the site file is counted");
+  } finally {
+    rmSync(root, { recursive: true });
   }
 });
 

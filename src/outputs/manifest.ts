@@ -38,6 +38,14 @@ function indexPath(url: string): string {
   return path.replace(/^\//, "");
 }
 
+/**
+ * The source path as an identity names it: forward slashes on every platform, and no `./` prefix, so a Windows
+ * checkout describes the same source as a Linux one.
+ */
+function sourcePath(file: string): string {
+  return file.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+}
+
 /** One page entry: what tools need to read or check a built page without guessing. */
 interface ManifestPage {
   /** Output URL, including `base`. */
@@ -54,6 +62,12 @@ interface ManifestPage {
   readonly hashes: Readonly<Record<string, string>>;
 }
 
+/** Which page owns an output path, for the collision message. */
+interface Claim {
+  readonly url: string;
+  readonly source: string;
+}
+
 /**
  * Writes `.mizzen/manifest.json` into the output folder: the build's index, one entry per doc page, so doctor and the
  * MCP server read the build instead of guessing which URL and file came from which source.
@@ -64,10 +78,11 @@ interface ManifestPage {
  * changes the manifest. Hashing the files themselves is `output.build-hash`'s job (#1252), which runs once every
  * output has written.
  *
- * Pages are sorted by URL and output paths by code point, so the same model gives the same bytes.
- * App pages are left out: they are folders of files copied as assets, not pages the engine renders, and they write no
- * output of their own. A page lists the files its enabled outputs write: the HTML file and the Markdown twin, each
- * unless `outputs` turns that output off.
+ * Pages are sorted by URL and output paths by code point, so the same model gives the same bytes whatever order its
+ * pages arrived in. Two pages that write one file are ambiguous ownership: the page with the lower URL keeps the path,
+ * the other page does not list it, and an error names both sources. App pages are left out: they are folders of files
+ * copied as assets, not pages the engine renders, and they write no output of their own. A page lists the files its
+ * enabled outputs write: the HTML file and the Markdown twin, each unless `outputs` turns that output off.
  *
  */
 export const manifest: Output = {
@@ -75,19 +90,41 @@ export const manifest: Output = {
   async run(site: Site, ctx: OutputContext): Promise<readonly OutputFile[]> {
     const base = site.config.base;
     const writesHtml = site.config.outputs.html !== false;
+    const writesTwins = site.config.outputs.twins !== false;
     const pages: ManifestPage[] = [];
+    const claimed = new Map<string, Claim>();
 
-    for (const page of site.pages) {
-      if (page.kind !== "doc") continue;
-      const outputs: string[] = [];
-      if (writesHtml) outputs.push(indexPath(underBase(page.url, base)));
-      if (site.config.outputs.twins !== false) {
+    const docs = site.pages.filter((page) => page.kind === "doc").sort((a, b) => byCodePoint(a.url, b.url));
+    for (const page of docs) {
+      const source = sourcePath(page.source.file);
+      const candidates: string[] = [];
+      if (writesHtml) candidates.push(indexPath(underBase(page.url, base)));
+      if (writesTwins) {
         const twin = twinUrl(page.url);
-        if (twin !== undefined) outputs.push(underBase(twin, base).replace(/^\//, ""));
+        if (twin !== undefined) candidates.push(underBase(twin, base).replace(/^\//, ""));
       }
+
+      const outputs: string[] = [];
+      for (const path of candidates) {
+        const first = claimed.get(path);
+        if (first !== undefined) {
+          if (first.url === page.url && first.source === source) continue;
+          ctx.report({
+            id: "manifest.output-collision",
+            severity: "error",
+            message: `Two pages write "${path}": ${first.source} (${first.url}) and ${source} (${page.url}).`,
+            pos: page.source,
+            help: "Change one page's `permalink`, or turn off the output that writes the file.",
+          });
+          continue;
+        }
+        claimed.set(path, { url: page.url, source });
+        outputs.push(path);
+      }
+
       pages.push({
         url: page.url,
-        source: page.source.file,
+        source,
         title: page.title,
         layout: page.frontMatter.layout ?? null,
         outputs: outputs.sort(byCodePoint),
@@ -95,7 +132,6 @@ export const manifest: Output = {
       });
     }
 
-    pages.sort((a, b) => byCodePoint(a.url, b.url));
     const json = `${JSON.stringify({ version: 1, pages }, null, 2)}\n`;
     return [{ path: FILE, contents: json }];
   },
