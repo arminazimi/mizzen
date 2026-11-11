@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page, SourcePos } from "../src/contracts/index.ts";
-import { estimateTokens } from "../src/packs/tokens.ts";
+import { estimateTokens, TOKEN_ERROR_MARGIN, TOKEN_METHOD } from "../src/packs/tokens.ts";
 import { trimPages } from "../src/packs/trim.ts";
 
 function pos(file: string): SourcePos {
@@ -244,6 +244,9 @@ test("the estimator can be replaced, and tokens follow it", async () => {
 
   const fits = await trimPages([page("/guide/install/", PAGE)], 10_000, { estimate: width });
   assert.equal(fits.pages[0]?.tokens, PAGE.length);
+  assert.equal(fits.accounting.method, "custom");
+  assert.equal(fits.accounting.margin, 0);
+  assert.equal(fits.accounting.upper, fits.accounting.tokens);
 
   const trimmed = await trimPages([page("/guide/install/", PAGE)], 10_000, { estimate: count });
   assert.equal(trimmed.pages[0]?.tokens, [...PAGE].length);
@@ -347,4 +350,153 @@ B text.`;
   assert.equal(result.diagnostics.length, 1);
   assert.equal(result.diagnostics[0]?.id, "pack.trim.over-budget");
   assert.deepEqual(result.diagnostics[0]?.pos, pos("guide/one.md"));
+});
+
+test("the budget is enforced on the serialized result, not on the sum of page estimates", async () => {
+  const one = `# One
+
+First paragraph of one.
+
+## One detail
+
+A detail that only the first page carries.`;
+  const two = `# Two
+
+First paragraph of two.
+
+## Two detail
+
+A detail that only the second page carries.`;
+  const pages = [page("/guide/one/", one, "guide/one.md"), page("/guide/two/", two, "guide/two.md")];
+  const joined = `${one}\n\n${two}`;
+  const sum = estimateTokens(one).tokens + estimateTokens(two).tokens;
+  const budget = sum;
+
+  // The sum alone would have fit, but joining the pages costs a blank line, so the serialized form does not.
+  assert.ok(estimateTokens(joined).tokens > budget, `${estimateTokens(joined).tokens} against a budget of ${budget}`);
+  const result = await trimPages(pages, budget);
+
+  assert.equal(result.accounting.budget, budget);
+  assert.equal(result.accounting.tokens, estimateTokens(result.markdown).tokens);
+  assert.ok(result.accounting.tokens <= budget, `${result.accounting.tokens} tokens against a budget of ${budget}`);
+  assert.ok(result.accounting.upper >= result.accounting.tokens);
+  assert.equal(result.accounting.method, TOKEN_METHOD);
+  assert.equal(result.accounting.margin, TOKEN_ERROR_MARGIN);
+  assert.deepEqual(
+    result.omissions.map((omission) => [omission.url, omission.text, omission.reason]),
+    [["/guide/two/", "Two detail", "budget"]],
+  );
+});
+
+const EVIDENCE = [
+  { id: "source", kind: "source", text: "- Source: `guide/install.md`" },
+  { id: "version", kind: "version", text: "- Version: 0.1.0" },
+  { id: "warning", kind: "warning", text: "> Warning: the installer API is deprecated.", pos: pos("guide/install.md") },
+  { id: "dependency", kind: "dependency", text: "- Depends on: Node 24 or newer" },
+] as const;
+
+test("required evidence is kept whole, placed first, and counted before optional content", async () => {
+  const lead = LEAD_AND_FIRST.split("\n\n## Requirements")[0]!;
+  const requiredMarkdown = [...EVIDENCE.map((item) => item.text), lead].join("\n\n");
+  const budget = estimateTokens(requiredMarkdown).tokens;
+
+  const result = await trimPages([page("/guide/install/", PAGE)], budget, { required: EVIDENCE });
+
+  assert.equal(result.required.length, EVIDENCE.length);
+  assert.equal(result.markdown, requiredMarkdown);
+  assert.ok(result.markdown.startsWith(EVIDENCE[0].text), "the evidence comes before the page content");
+  for (const item of EVIDENCE) assert.ok(result.markdown.includes(item.text), item.id);
+  assert.deepEqual(result.pages[0]?.keptSections, [], "optional sections give way to the reserved evidence");
+  assert.deepEqual(result.diagnostics, []);
+  assert.equal(result.accounting.required, budget);
+  assert.ok(result.accounting.requiredUpper > result.accounting.required);
+  assert.equal(result.accounting.tokens, budget);
+  assert.deepEqual(
+    result.omissions.map((omission) => [omission.text, omission.reason]),
+    [
+      ["Requirements", "budget"],
+      ["Steps", "budget"],
+      ["Troubleshooting", "budget"],
+    ],
+  );
+});
+
+test("required evidence is never trimmed, and over-budget evidence is reported with its position", async () => {
+  const result = await trimPages([page("/guide/install/", PAGE)], 1, { required: EVIDENCE });
+
+  for (const item of EVIDENCE) {
+    assert.ok(result.markdown.includes(item.text), `${item.id} survives a budget of 1`);
+  }
+  assert.equal(result.required.length, EVIDENCE.length);
+  assert.ok(result.accounting.tokens > 1);
+  assert.ok(result.accounting.required > 1);
+  assert.equal(result.diagnostics.length, 1);
+  assert.equal(result.diagnostics[0]?.id, "pack.trim.required-over-budget");
+  assert.equal(result.diagnostics[0]?.severity, "warning");
+  assert.deepEqual(result.diagnostics[0]?.pos, pos("guide/install.md"));
+  assert.match(result.diagnostics[0]?.message ?? "", /required evidence/);
+});
+
+test("empty required text is dropped, so the accounting never prices nothing", async () => {
+  const result = await trimPages([page("/guide/install/", PAGE)], 10_000, {
+    required: [
+      { id: "blank", kind: "source", text: "  \n " },
+      { id: "kept", kind: "source", text: "- Source: `guide/install.md`" },
+    ],
+  });
+
+  assert.deepEqual(result.required.map((item) => item.id), ["kept"]);
+  assert.ok(!result.markdown.startsWith("  \n"));
+});
+
+const DEPLOY = `## Deploy
+
+Build the site, copy the output directory to the server, restart the service, clear the cache, open the home page, follow the first three links, confirm every page loads without an error, and note the version that is reported in the footer.`;
+
+const DEPLOY_NEAR = `## Deploy
+
+Build the site, copy the output directory to the server, restart the service, clear the cache, open the home page, follow the first four links, confirm every page loads without an error, and note the version that is reported in the header.`;
+
+test("near-duplicate sections are dropped in favour of the first, with the reason reported", async () => {
+  const pages = [
+    page("/guide/alpha/", `# Alpha\n\nAlpha intro.\n\n${DEPLOY}`, "guide/alpha.md"),
+    page("/guide/beta/", `# Beta\n\nBeta intro.\n\n${DEPLOY}\n\n## Unique\n\nBeta-only detail about its own feature.`, "guide/beta.md"),
+    page("/guide/gamma/", `# Gamma\n\nGamma intro.\n\n${DEPLOY_NEAR}`, "guide/gamma.md"),
+  ];
+  const result = await trimPages(pages, 10_000);
+  const canonical = result.pages[0]!.keptSections.find((section) => section.text === "Deploy");
+
+  assert.ok(canonical !== undefined);
+  assert.deepEqual(
+    result.pages.map((entry) => entry.keptSections.map((section) => section.text)),
+    [["Deploy"], ["Unique"], []],
+    "the first copy is canonical, and a unique section is never displaced",
+  );
+  assert.deepEqual(
+    result.omissions.map((omission) => [omission.url, omission.text, omission.reason, omission.duplicateOf?.url, omission.duplicateOf?.id]),
+    [
+      ["/guide/beta/", "Deploy", "duplicate", "/guide/alpha/", canonical.id],
+      ["/guide/gamma/", "Deploy", "duplicate", "/guide/alpha/", canonical.id],
+    ],
+  );
+  assert.equal(result.markdown.split("Build the site, copy the output directory").length, 2, "the repeated body is kept once");
+  assert.deepEqual(
+    result.pages[1]!.droppedSections.map((section) => section.text),
+    ["Deploy"],
+    "a duplicate is also a dropped section",
+  );
+  assert.equal(result.accounting.tokens, estimateTokens(result.markdown).tokens);
+  assert.ok(result.omissions.every((omission) => omission.tokens > 0 && omission.pos.file !== ""));
+});
+
+test("the same required evidence and pages give identical accounting and omissions", async () => {
+  const pages = [page("/guide/alpha/", `# Alpha\n\nAlpha intro.\n\n${DEPLOY}`, "guide/alpha.md")];
+  const options = { required: EVIDENCE };
+
+  const first = await trimPages(pages, 20, options);
+  const second = await trimPages(pages, 20, options);
+
+  assert.deepEqual(second, first);
+  assert.equal(first.accounting.tokens, estimateTokens(first.markdown).tokens);
+  assert.equal(first.accounting.required, estimateTokens([...EVIDENCE.map((item) => item.text), "# Alpha\n\nAlpha intro."].join("\n\n")).tokens);
 });
