@@ -10,8 +10,8 @@ import { build } from "../pipeline/build.ts";
 import { formatJson, formatSarif, formatText } from "../pipeline/diagnostics.ts";
 import { DEFAULT_DEV_HOST, DEFAULT_DEV_OUT, DEFAULT_DEV_PORT, dev } from "./dev.ts";
 import { doctor } from "./doctor.ts";
-import { editApply, EditApplyError } from "./edit-apply.ts";
-import { verifyProof, verifyProofMessage } from "./edit-verify.ts";
+import { editApply, EditApplyError, formatEditApplyJson } from "./edit-apply.ts";
+import { formatVerifyProofJson, verifyProof, verifyProofMessage } from "./edit-verify.ts";
 import { pack } from "./pack.ts";
 import { verify, verifyMessage } from "./verify.ts";
 import { DEFAULT_WATCH_OUT, watch as watchSite } from "./watch.ts";
@@ -24,6 +24,15 @@ export const COMMANDS = ["build", "check", "dev", "doctor", "edit", "pack", "ver
 
 const FORMATS = ["text", "json", "sarif"] as const;
 type Format = (typeof FORMATS)[number];
+
+/** What `edit apply` and `edit verify` print: the human default, or the machine report. */
+const EDIT_FORMATS = ["text", "json"] as const;
+type EditFormat = (typeof EDIT_FORMATS)[number];
+
+/** Reads the `--format` value of an edit command, or `undefined` when it is not one it prints. */
+function editFormat(raw: string): EditFormat | undefined {
+  return (EDIT_FORMATS as readonly string[]).includes(raw) ? (raw as EditFormat) : undefined;
+}
 
 /** Layout used when a page names none and the site's defaults name none. */
 const DEFAULT_LAYOUT = "doc";
@@ -48,7 +57,7 @@ Commands:
 Options:
   --out <path>         Output folder: build (default: dist), dev (default: .mizzen/dev), watch (default: .mizzen/watch); pack writes a file here instead of stdout
   --theme <dir>        Theme root folder (layouts/, chrome/, components/)
-  --format <format>    text, json, or sarif (check and doctor; default: text)
+  --format <format>    text, json, or sarif (check and doctor; default: text); text or json for edit apply and edit verify
   --hash <hex>         Expected build hash for verify (default: the manifest's)
   --site <dir>         Site root for edit verify (default: .)
   --doctor             Rerun the doctor for edit verify
@@ -121,6 +130,7 @@ type EditVerifyOpts = {
   readonly proof: string;
   readonly site: string;
   readonly doctor: boolean;
+  readonly format: EditFormat;
 };
 
 type WatchOpts = {
@@ -136,6 +146,7 @@ type EditApplyOpts = {
   readonly patch: string;
   readonly dryRun: boolean;
   readonly proof?: string;
+  readonly format: EditFormat;
 };
 
 type Parsed =
@@ -217,6 +228,7 @@ function parseEditApply(args: readonly string[]): Parsed {
   let root: string | undefined;
   let proof: string | undefined;
   let dryRun = false;
+  let format: EditFormat = "text";
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
     const value = (): string => {
@@ -228,7 +240,12 @@ function parseEditApply(args: readonly string[]): Parsed {
       if (arg === "-h" || arg === "--help") return { help: true };
       if (arg === "--dry-run") dryRun = true;
       else if (arg === "--proof") proof = value();
-      else if (arg.startsWith("-")) return { error: `unknown option: ${arg}` };
+      else if (arg === "--format") {
+        const raw = value();
+        const parsed = editFormat(raw);
+        if (parsed === undefined) return { error: `--format for edit apply must be text or json, not ${raw}` };
+        format = parsed;
+      } else if (arg.startsWith("-")) return { error: `unknown option: ${arg}` };
       else if (patch === undefined) patch = arg;
       else if (root === undefined) root = arg;
       else return { error: `unexpected argument: ${arg}` };
@@ -244,6 +261,7 @@ function parseEditApply(args: readonly string[]): Parsed {
       root: root ?? ".",
       patch,
       dryRun,
+      format,
       ...(proof === undefined ? {} : { proof }),
     },
   };
@@ -259,6 +277,7 @@ function parseEditVerify(args: readonly string[]): Parsed {
   let proof: string | undefined;
   let site = ".";
   let doctor = false;
+  let format: EditFormat = "text";
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
     const value = (): string => {
@@ -270,7 +289,12 @@ function parseEditVerify(args: readonly string[]): Parsed {
       if (arg === "-h" || arg === "--help") return { help: true };
       if (arg === "--site") site = value();
       else if (arg === "--doctor") doctor = true;
-      else if (arg.startsWith("-")) return { error: `unknown option: ${arg}` };
+      else if (arg === "--format") {
+        const raw = value();
+        const parsed = editFormat(raw);
+        if (parsed === undefined) return { error: `--format for edit verify must be text or json, not ${raw}` };
+        format = parsed;
+      } else if (arg.startsWith("-")) return { error: `unknown option: ${arg}` };
       else if (proof === undefined) proof = arg;
       else return { error: `unexpected argument: ${arg}` };
     } catch (err) {
@@ -279,7 +303,7 @@ function parseEditVerify(args: readonly string[]): Parsed {
   }
 
   if (proof === undefined) return { error: `edit verify needs a proof file: ${NAME} edit verify <proof.json>` };
-  return { options: { command: "edit-verify", proof, site, doctor } };
+  return { options: { command: "edit-verify", proof, site, doctor, format } };
 }
 
 /** Parses `argv` after the process name. */
@@ -546,6 +570,10 @@ export async function main(args: readonly string[], io: Io = {}): Promise<number
         ...(options.proof === undefined ? {} : { proof: options.proof }),
         ...(options.dryRun ? { dryRun: true } : {}),
       });
+      if (options.format === "json") {
+        log(formatEditApplyJson(result, 0).replace(/\n$/, ""));
+        return 0;
+      }
       if (result.dryRun) {
         if (result.diff !== undefined) log(result.diff.replace(/\n$/, ""));
         log(`${NAME} edit apply: dry run: ${result.file} would change; nothing was written`);
@@ -556,8 +584,10 @@ export async function main(args: readonly string[], io: Io = {}): Promise<number
       return 0;
     } catch (err) {
       if (err instanceof EditApplyError) {
-        error(`${NAME}: ${err.message}`);
-        return err.usage ? 2 : 1;
+        const exitCode = err.usage ? 2 : 1;
+        if (options.format === "json") log(formatEditApplyJson(err, exitCode).replace(/\n$/, ""));
+        else error(`${NAME}: ${err.message}`);
+        return exitCode;
       }
       error(`${NAME}: ${err instanceof Error ? err.message : String(err)}`);
       return 2;
@@ -570,12 +600,18 @@ export async function main(args: readonly string[], io: Io = {}): Promise<number
       siteRoot: options.site,
       doctor: options.doctor,
     });
-    if (result.ok) {
-      log(verifyProofMessage(result));
-      return 0;
+    const exitCode = result.ok
+      ? 0
+      : result.failure?.kind === "proof" || result.failure?.kind === "doctor-unavailable"
+        ? 2
+        : 1;
+    if (options.format === "json") {
+      log(formatVerifyProofJson(result, exitCode).replace(/\n$/, ""));
+      return exitCode;
     }
-    error(`${NAME}: ${verifyProofMessage(result)}`);
-    return result.failure?.kind === "proof" || result.failure?.kind === "doctor-unavailable" ? 2 : 1;
+    if (result.ok) log(verifyProofMessage(result));
+    else error(`${NAME}: ${verifyProofMessage(result)}`);
+    return exitCode;
   }
 
   const root = resolve(options.root);

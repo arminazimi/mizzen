@@ -16,7 +16,7 @@
  *
  * Exit codes follow the rest of the CLI: `0` applied (or a dry run that would apply), `1` a refused
  * patch or a refused path (the file is unchanged), `2` a usage problem, such as a patch that is
- * missing or is not a patch.
+ * missing or is not a patch. `--format json` prints the same outcome as one {@link EditApplyReport}.
  *
  */
 import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -68,12 +68,23 @@ export type EditApplyErrorCode =
 export class EditApplyError extends Error {
   readonly code: EditApplyErrorCode;
   readonly usage: boolean;
+  /** The file the refusal names: site-relative for a source file, as given for a patch file. */
+  readonly path: string | undefined;
+  /** The patch span the refusal names, when it has one. */
+  readonly span: PatchSpan | undefined;
 
-  constructor(code: EditApplyErrorCode, message: string, usage: boolean) {
+  constructor(
+    code: EditApplyErrorCode,
+    message: string,
+    usage: boolean,
+    details: { readonly path?: string; readonly span?: PatchSpan } = {},
+  ) {
     super(message);
     this.name = "EditApplyError";
     this.code = code;
     this.usage = usage;
+    this.path = details.path;
+    this.span = details.span;
   }
 }
 
@@ -152,20 +163,32 @@ async function readPatch(path: string): Promise<Patch> {
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     const reason = code === "ENOENT" ? "it does not exist" : error instanceof Error ? error.message : String(error);
-    throw new EditApplyError("edit.patch-missing", `${path}: cannot read the patch: ${reason}.`, true);
+    throw new EditApplyError("edit.patch-missing", `${path}: cannot read the patch: ${reason}.`, true, { path });
   }
   let value: unknown;
   try {
     value = JSON.parse(text) as unknown;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    throw new EditApplyError("edit.patch-invalid", `${path}: the patch is not JSON: ${reason}.`, true);
+    throw new EditApplyError("edit.patch-invalid", `${path}: the patch is not JSON: ${reason}.`, true, { path });
   }
-  return patchOf(value, path);
+  try {
+    return patchOf(value, path);
+  } catch (error) {
+    // A malformed patch names no source file, so the patch itself is the path the report can give.
+    if (error instanceof EditApplyError && error.path === undefined) {
+      throw new EditApplyError(error.code, error.message, error.usage, { path });
+    }
+    throw error;
+  }
 }
 
 /** The target's path inside the site root, refusing a `span.file` that would leave it. */
-function insideRoot(siteRoot: string, file: string): { readonly path: string; readonly record: string } {
+function insideRoot(
+  siteRoot: string,
+  file: string,
+  span: PatchSpan,
+): { readonly path: string; readonly record: string } {
   const root = resolve(siteRoot);
   const path = resolve(root, file);
   const inside = relative(root, path);
@@ -174,6 +197,7 @@ function insideRoot(siteRoot: string, file: string): { readonly path: string; re
       "edit.path-escape",
       `${file}: the patch's file is outside the site root "${root}"; refusing it.`,
       false,
+      { path: file, span },
     );
   }
   return { path, record: inside.split(sep).join("/") };
@@ -261,9 +285,11 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
   const patch = await readPatch(options.patch);
   const spanFile = patch.span.file;
   if (spanFile === undefined) {
-    throw new EditApplyError("edit.patch-invalid", `${options.patch}: the patch names no file.`, true);
+    throw new EditApplyError("edit.patch-invalid", `${options.patch}: the patch names no file.`, true, {
+      path: options.patch,
+    });
   }
-  const target = insideRoot(siteRoot, spanFile);
+  const target = insideRoot(siteRoot, spanFile, patch.span);
 
   let source: string;
   try {
@@ -275,6 +301,7 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
       "edit.source-missing",
       `${target.record}: the patch's file cannot be read; nothing was written.`,
       false,
+      { path: target.record, span: patch.span },
     );
   }
 
@@ -287,6 +314,7 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
       "edit.patch-refused",
       `${target.record}: the patch was refused and the file is unchanged: ${error.message}`,
       false,
+      { path: target.record, span: error.span },
     );
   }
 
@@ -308,7 +336,9 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
     await writeAtomic(target.path, after);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    throw new EditApplyError("edit.write-failed", `${target.record}: writing the file failed: ${reason}.`, false);
+    throw new EditApplyError("edit.write-failed", `${target.record}: writing the file failed: ${reason}.`, false, {
+      path: target.record,
+    });
   }
 
   const proof = options.proof === undefined ? `${resolve(options.patch)}.proof.json` : resolve(options.proof);
@@ -326,6 +356,7 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
       "edit.write-failed",
       `${target.record}: the file was written, but the proof at "${proof}" was not: ${reason}.`,
       false,
+      { path: target.record },
     );
   }
 
@@ -358,4 +389,96 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
   }
 
   return { dryRun: false, siteRoot, file: target.record, proof, beforeHash, afterHash };
+}
+
+/** How a command ended: `ok` is exit 0, `failed` exit 1, `invalid` exit 2. */
+export type EditStatus = "ok" | "failed" | "invalid";
+
+/** Why an application did not happen, with the file and span it names when they are known. */
+export interface EditApplyDiagnostic {
+  /** Stable code, the same one the {@link EditApplyError} carries. */
+  readonly code: EditApplyErrorCode;
+  /** The refusal sentence, without the `mizzen: ` prefix the text mode adds. */
+  readonly message: string;
+  /** The file the refusal names: site-relative for a source file, as given for a patch file; null when none. */
+  readonly path: string | null;
+  /** The patch span, 1-based with an inclusive end; its `file` repeats `path` when there is one. */
+  readonly span: PatchSpan | null;
+}
+
+/** The JSON `mizzen edit apply --format json` prints: one shape for success, dry run, and refusal. */
+export interface EditApplyReport {
+  readonly version: 1;
+  readonly command: "edit.apply";
+  readonly status: EditStatus;
+  readonly ok: boolean;
+  /** The code the command returns; `status` names it. */
+  readonly exitCode: number;
+  readonly dryRun: boolean;
+  /** True only when the source and its proof were written. */
+  readonly applied: boolean;
+  readonly siteRoot: string | null;
+  /** The edited file, relative to the site root, when the patch named one. */
+  readonly file: string | null;
+  readonly proof: string | null;
+  readonly beforeHash: string | null;
+  readonly afterHash: string | null;
+  /** The unified diff; a dry run only. */
+  readonly diff: string | null;
+  readonly diagnostics: readonly EditApplyDiagnostic[];
+}
+
+/** The status an exit code names. */
+function statusOf(exitCode: number): EditStatus {
+  return exitCode === 0 ? "ok" : exitCode === 2 ? "invalid" : "failed";
+}
+
+/**
+ * The machine-readable result of `edit apply`. `exitCode` is the code the command returns, so the
+ * report and the exit status always agree: a dry run that would apply is a success, while a refusal
+ * is `failed` (exit 1) or `invalid` (exit 2) and names its file and span.
+ */
+export function formatEditApplyJson(outcome: EditApplyResult | EditApplyError, exitCode: number): string {
+  const report: EditApplyReport =
+    outcome instanceof EditApplyError
+      ? {
+          version: 1,
+          command: "edit.apply",
+          status: statusOf(exitCode),
+          ok: exitCode === 0,
+          exitCode,
+          dryRun: false,
+          applied: false,
+          siteRoot: null,
+          file: null,
+          proof: null,
+          beforeHash: null,
+          afterHash: null,
+          diff: null,
+          diagnostics: [
+            {
+              code: outcome.code,
+              message: outcome.message,
+              path: outcome.path ?? null,
+              span: outcome.span ?? null,
+            },
+          ],
+        }
+      : {
+          version: 1,
+          command: "edit.apply",
+          status: statusOf(exitCode),
+          ok: exitCode === 0,
+          exitCode,
+          dryRun: outcome.dryRun,
+          applied: !outcome.dryRun,
+          siteRoot: outcome.siteRoot,
+          file: outcome.file,
+          proof: outcome.proof ?? null,
+          beforeHash: outcome.beforeHash,
+          afterHash: outcome.afterHash,
+          diff: outcome.diff ?? null,
+          diagnostics: [],
+        };
+  return `${JSON.stringify(report, null, 2)}\n`;
 }
