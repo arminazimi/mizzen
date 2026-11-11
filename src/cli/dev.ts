@@ -6,8 +6,8 @@
  * The reload and overlay client is added to HTML responses as they are served. Nothing on disk is changed: the output
  * folder stays exactly what `mizzen build` writes, so it can be published as it is.
  */
-import { watch, type FSWatcher } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { constants, watch, type FSWatcher } from "node:fs";
+import { open, realpath, stat, type FileHandle } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { loadConfig } from "../config/load.ts";
@@ -38,6 +38,15 @@ export const DEFAULT_DEV_HOST = "127.0.0.1";
 
 /** How long changes are collected before one rebuild, so an editor's burst of writes builds once. */
 const WATCH_DELAY = 40;
+
+/** Upper bound on simultaneous reload connections, so a burst of open tabs cannot exhaust file descriptors. */
+const MAX_EVENT_CLIENTS = 64;
+
+/** A file opened for one response: the handle is read and closed by the sender, never reopened from a path. */
+interface ServedFile {
+  readonly handle: FileHandle;
+  readonly path: string;
+}
 
 /** Folders that never affect a build and would otherwise make the watcher rebuild in a loop. */
 const IGNORED = new Set(["node_modules", ".git", ".tmp", ".mizzen"]);
@@ -196,6 +205,7 @@ export function withReloadClient(html: string): string {
 export async function dev(options: DevOptions): Promise<DevServer> {
   const root = resolve(options.root);
   const out = resolve(options.out);
+  let outReal = out;
   const themeRoot = resolve(options.themeRoot);
   const host = options.host ?? DEFAULT_DEV_HOST;
   const port = options.port ?? DEFAULT_DEV_PORT;
@@ -217,6 +227,10 @@ export async function dev(options: DevOptions): Promise<DevServer> {
   const broadcast = (): void => {
     const message = `event: reload\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`;
     for (const client of clients) {
+      if (client.destroyed || client.writableEnded) {
+        clients.delete(client);
+        continue;
+      }
       try {
         client.write(message);
       } catch {
@@ -305,75 +319,156 @@ export async function dev(options: DevOptions): Promise<DevServer> {
     }
   };
 
-  const fileAt = async (path: string): Promise<string | undefined> => {
+  /**
+   * Opens a regular file only when its real location is inside the output folder. The handle is opened without
+   * following a final symlink and without blocking, so a symlink swapped in after the check, a FIFO or a device
+   * cannot be served or hang the server. `undefined` means "not a servable file", whatever the reason.
+   */
+  const openInside = async (candidate: string): Promise<ServedFile | undefined> => {
+    let handle: FileHandle;
     try {
-      if ((await stat(path)).isFile()) return path;
+      const info = await stat(candidate);
+      if (!info.isFile()) return undefined;
+      const real = await realpath(candidate);
+      if (!isInside(outReal, real)) return undefined;
+      handle = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch {
-      // A missing file falls through to the next candidate.
+      return undefined;
     }
+    try {
+      if ((await handle.stat()).isFile()) return { handle, path: candidate };
+    } catch {
+      // A file that cannot be inspected is not served.
+    }
+    await handle.close().catch(() => undefined);
     return undefined;
   };
 
-  /** Maps a URL path to a file: `a/` → `a/index.html`, `a` → `a`, `a/index.html`, or `a.html`. */
-  const fileFor = async (pathname: string): Promise<string | undefined> => {
+  /** Maps a URL path to an open file, or says why it cannot: `a/` → `a/index.html`, `a` → `a`, `a/index.html`, `a.html`. */
+  const fileFor = async (
+    pathname: string,
+  ): Promise<{ status: "ok"; file: ServedFile } | { status: "malformed" } | { status: "missing" }> => {
     let path = pathname;
     if (base !== "" && (path === base || path.startsWith(`${base}/`))) path = path.slice(base.length) || "/";
     let decoded: string;
     try {
       decoded = decodeURIComponent(path);
     } catch {
-      return undefined;
+      return { status: "malformed" };
     }
-    if (decoded.includes("\0")) return undefined;
+    if (decoded.includes("\0")) return { status: "malformed" };
     const relativePath = decoded.replace(/\\/g, "/").replace(/^\/+/, "");
-    if (relativePath.split("/").some((segment) => segment === "..")) return undefined;
+    if (relativePath.split("/").some((segment) => segment === "..")) return { status: "missing" };
     const candidate = resolve(out, relativePath);
-    if (!isInside(out, candidate)) return undefined;
-    if (relativePath === "" || relativePath.endsWith("/")) return fileAt(join(candidate, "index.html"));
-    return (await fileAt(candidate)) ?? (await fileAt(join(candidate, "index.html"))) ?? (await fileAt(`${candidate}.html`));
+    if (!isInside(out, candidate)) return { status: "missing" };
+    const candidates =
+      relativePath === "" || relativePath.endsWith("/")
+        ? [join(candidate, "index.html")]
+        : [candidate, join(candidate, "index.html"), `${candidate}.html`];
+    for (const next of candidates) {
+      const file = await openInside(next);
+      if (file !== undefined) return { status: "ok", file };
+    }
+    return { status: "missing" };
   };
 
-  const send = async (req: IncomingMessage, res: ServerResponse, file: string, status: number): Promise<void> => {
-    let body = await readFile(file);
-    const type = contentType(file);
-    if (type.startsWith("text/html")) body = Buffer.from(withReloadClient(body.toString("utf8")), "utf8");
+  const send = async (req: IncomingMessage, res: ServerResponse, file: ServedFile, status: number): Promise<void> => {
+    let body: Buffer;
+    try {
+      body = await file.handle.readFile();
+    } finally {
+      await file.handle.close().catch(() => undefined);
+    }
+    const type = contentType(file.path);
+    const empty = status === 204 || status === 304;
+    const headers: Record<string, string | number> = { "Content-Type": type, "X-Content-Type-Options": "nosniff" };
+    if (!empty) {
+      if (type.startsWith("text/html")) body = Buffer.from(withReloadClient(body.toString("utf8")), "utf8");
+      headers["Content-Length"] = body.byteLength;
+      headers["Cache-Control"] = "no-store";
+    }
+    res.writeHead(status, headers);
+    if (req.method === "HEAD" || empty) res.end();
+    else res.end(body);
+  };
+
+  /** Writes a small text response with the boundary headers; HEAD gets the headers and no body. */
+  const plain = (
+    req: IncomingMessage,
+    res: ServerResponse,
+    status: number,
+    body: string,
+    extra: Record<string, string | number> = {},
+  ): void => {
     res.writeHead(status, {
-      "Content-Type": type,
-      "Content-Length": body.byteLength,
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": Buffer.byteLength(body),
       "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      ...extra,
     });
     if (req.method === "HEAD") res.end();
     else res.end(body);
   };
 
   const events = (req: IncomingMessage, res: ServerResponse): void => {
-    res.writeHead(200, {
+    if (closing || clients.size >= MAX_EVENT_CLIENTS) {
+      plain(req, res, 503, "503\n");
+      return;
+    }
+    const headers = {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
-    });
+      "X-Content-Type-Options": "nosniff",
+    };
+    if (req.method === "HEAD") {
+      res.writeHead(200, headers);
+      res.end();
+      return;
+    }
+    res.writeHead(200, headers);
     res.write("retry: 1000\n\n");
     clients.add(res);
-    req.on("close", () => clients.delete(res));
-    res.on("error", () => clients.delete(res));
+    const drop = (): void => {
+      clients.delete(res);
+    };
+    req.on("close", drop);
+    res.on("close", drop);
+    res.on("error", drop);
   };
 
+  const active = new Set<Promise<void>>();
   const server: Server = createServer((req, res) => {
     const fail = (err: unknown): void => {
-      const message = `mizzen dev: ${err instanceof Error ? err.message : String(err)}`;
-      if (!res.headersSent) res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-      res.end(`${message}\n`);
+      if (closing) {
+        res.destroy();
+        return;
+      }
+      const body = `mizzen dev: ${err instanceof Error ? err.message : String(err)}\n`;
+      if (!res.headersSent) plain(req, res, 500, body);
+      else res.end(body);
     };
     const handle = async (): Promise<void> => {
-      const url = new URL(req.url ?? "/", "http://localhost");
-      if (url.pathname === EVENTS_PATH) {
-        events(req, res);
+      // A request that arrives once shutdown began gets no response at all; the socket is dropped.
+      if (closing) {
+        res.destroy();
         return;
       }
       if (req.method !== "GET" && req.method !== "HEAD") {
-        res.writeHead(405, { Allow: "GET, HEAD" });
-        res.end();
+        plain(req, res, 405, "", { Allow: "GET, HEAD" });
+        return;
+      }
+      let url: URL;
+      try {
+        url = new URL(req.url ?? "/", "http://localhost");
+      } catch {
+        plain(req, res, 400, "400\n");
+        return;
+      }
+      if (url.pathname === EVENTS_PATH) {
+        events(req, res);
         return;
       }
       if (url.pathname === DIAGNOSTICS_PATH) {
@@ -382,24 +477,29 @@ export async function dev(options: DevOptions): Promise<DevServer> {
           "Content-Type": "application/json; charset=utf-8",
           "Content-Length": Buffer.byteLength(body),
           "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
         });
         if (req.method === "HEAD") res.end();
         else res.end(body);
         return;
       }
-      const file = await fileFor(url.pathname);
-      if (file !== undefined) {
-        await send(req, res, file, 200);
+      const lookup = await fileFor(url.pathname);
+      if (lookup.status === "malformed") {
+        plain(req, res, 400, "400\n");
         return;
       }
-      const notFound = await fileAt(join(out, "404.html"));
-      if (notFound !== undefined) await send(req, res, notFound, 404);
-      else {
-        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end("404\n");
+      if (lookup.status === "ok") {
+        await send(req, res, lookup.file, 200);
+        return;
       }
+      const notFound = await openInside(join(outReal, "404.html"));
+      if (notFound !== undefined) await send(req, res, notFound, 404);
+      else plain(req, res, 404, "404\n");
     };
-    handle().catch(fail);
+    const run = handle()
+      .catch(fail)
+      .finally(() => active.delete(run));
+    active.add(run);
   });
 
   try {
@@ -408,6 +508,8 @@ export async function dev(options: DevOptions): Promise<DevServer> {
     log(`mizzen dev: initial build failed: ${err instanceof Error ? err.message : String(err)}`);
     throw err;
   }
+  // The output exists now. Checking against its canonical path means a symlinked output folder still serves its own files.
+  outReal = await realpath(out).catch(() => out);
 
   await new Promise<void>((resolveListen, rejectListen) => {
     const onError = (err: Error): void => rejectListen(err);
@@ -436,7 +538,6 @@ export async function dev(options: DevOptions): Promise<DevServer> {
         timer = undefined;
       }
       for (const watcher of watchers) watcher.close();
-      await tail.catch(() => undefined);
       for (const client of clients) {
         try {
           client.end();
@@ -445,6 +546,9 @@ export async function dev(options: DevOptions): Promise<DevServer> {
         }
       }
       clients.clear();
+      // A build in flight finishes, and in-flight responses finish, before the server stops listening.
+      await tail.catch(() => undefined);
+      await Promise.allSettled([...active]);
       await new Promise<void>((resolveClose) => {
         server.close(() => resolveClose());
         server.closeIdleConnections();
