@@ -1,22 +1,119 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Mizzen trust report",
-  "description": "`trust.json` in the output folder: one entry per doc page, keyed by the page URL including `base`. Keys are sorted by code point. Each entry has `level`, `reasons`, and, when known, `lastReviewer`, in that order, with exactly three reasons in the fixed order examples, drift, review. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes. App and asset pages are left out.",
+  "description": "`trust.json` in the output folder: a build identifier plus one entry per rendered content page, keyed by the page URL including `base`. Keys are sorted by code point. Every entry names its stable `key`, its `url`, its `source`, the state of each evidence signal, `level`, `reasons`, and, when known, `lastReviewer`, in that order. `build.id` is a deterministic hash of the final HTML documents the build renders, layouts included, so evidence can be joined to the build that produced them. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes. App and asset pages are left out.",
   "type": "object",
-  "propertyNames": {
-    "pattern": "^/"
+  "required": [
+    "version",
+    "build",
+    "pages"
+  ],
+  "properties": {
+    "version": {
+      "description": "The shape version of `trust.json`.",
+      "const": 1
+    },
+    "build": {
+      "description": "The identity of the rendered pages the evidence belongs to.",
+      "type": "object",
+      "required": [
+        "algorithm",
+        "id",
+        "pages"
+      ],
+      "properties": {
+        "algorithm": {
+          "description": "The digest `id` was made with.",
+          "const": "sha256"
+        },
+        "id": {
+          "description": "SHA-256 over every doc page's key, Markdown hash, and final HTML hash, sorted by URL. The HTML is the document the build writes, layout included, so changing a page's URL, source, Markdown, or layout-rendered HTML changes it.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pages": {
+          "description": "How many rendered content pages the build has.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "pages": {
+      "description": "One entry per rendered content page, keyed by the page URL including `base`, in code-point order.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^/"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/entry"
+      }
+    }
   },
-  "additionalProperties": {
-    "$ref": "#/$defs/entry"
-  },
+  "additionalProperties": false,
   "$defs": {
     "entry": {
       "type": "object",
       "required": [
+        "key",
+        "url",
+        "source",
+        "evidence",
         "level",
         "reasons"
       ],
       "properties": {
+        "key": {
+          "description": "Stable page key: SHA-256 of the page's URL, a NUL, and its source file. The same page has the same key across builds.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "url": {
+          "description": "Output URL, including `base`.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "source": {
+          "description": "The source file, relative to the site root, with forward slashes.",
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "description": "What each signal measured, or why it did not. `missing` means no source for the signal existed; `unknown` means a source existed but gave no answer. A signal that is not `measured` also has an explaining reason.",
+          "type": "object",
+          "required": [
+            "examples",
+            "drift",
+            "review"
+          ],
+          "properties": {
+            "examples": {
+              "description": "`measured`, `none` when the page declares no test fence, or `unknown` when it declares examples but their result is unavailable.",
+              "enum": [
+                "measured",
+                "none",
+                "unknown"
+              ]
+            },
+            "drift": {
+              "description": "`measured`, `missing` when no drift data or root was available, or `unknown` when a source existed but gave no usable answer (a malformed data entry, or a check that named no count).",
+              "enum": [
+                "measured",
+                "missing",
+                "unknown"
+              ]
+            },
+            "review": {
+              "description": "`measured`, `missing` when no reviewer data or root was available, or `unknown` when a data entry or git named no readable date.",
+              "enum": [
+                "measured",
+                "missing",
+                "unknown"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
         "level": {
           "description": "The worst level the reasons support: `at-risk` beats `review-due` beats `verified`.",
           "enum": [

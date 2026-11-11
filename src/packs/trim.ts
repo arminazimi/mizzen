@@ -1,5 +1,5 @@
 /**
- * Trims a set of pages to a token budget by dropping whole sections, from the least important end first.
+ * Trims a set of pages to a token budget without losing evidence the caller requires.
  *
  * A page is split at its top-level headings: the lead (the title heading and the text before the
  * first section) and one section per heading, from a heading to the block before the next one.
@@ -9,11 +9,28 @@
  * when that alone costs more than the budget. Sections are atomic: a fenced code block is part of
  * one section and is never cut, and a `#` line inside a fence is code, not a heading.
  *
- * The budget covers the trimmed set as a whole: it is the sum of the pages' token estimates. The
- * input order is the caller's ranking, so dropping starts at the last page and its last section,
- * moves towards the first page, and stops at the first collection of mandatory content. The
- * `keep` option pins sections by id or heading text, and a pinned section can keep the output
- * above the budget; both over-budget cases are reported as diagnostics with a source position.
+ * **Budget allocation.** Required evidence — the caller's `required` items (source, version,
+ * warnings, dependency information) and every page's mandatory content — is placed first in the
+ * serialization and counted before any optional section. The optional sections are then dropped
+ * from the last page and its last section backwards, so the input order is the caller's ranking.
+ * Required evidence is never trimmed: when it alone costs more than the budget, it is kept whole,
+ * the output is over budget, and a warning names it. The `keep` option pins further sections by
+ * id or heading text; a pinned section can also keep the output above the budget, and both
+ * over-budget cases are reported as diagnostics with a source position.
+ *
+ * **The contract is measured on the serialization.** The budget applies to
+ * {@link TrimResult.markdown}, the required evidence and the kept pages joined with one blank
+ * line, not to the sum of per-page estimates: joining costs tokens too. The measure is the
+ * estimator's estimate, and {@link TrimAccounting.upper} reports the planning bound above it,
+ * because no model-agnostic estimator is exact (see `tokens.ts`).
+ *
+ * **Diversification.** Once the budget is met, a kept section whose words repeat an earlier kept
+ * section's is dropped as a near-duplicate: a short section must match exactly, while a longer one
+ * must share {@link DUPLICATE_OVERLAP} of its distinct words. Deduplication runs after the budget,
+ * so it only removes content that already survived, and it never costs a unique section its place.
+ * Every section left out is reported in {@link TrimResult.omissions} with its reason, and the
+ * required evidence is reported separately, so a caller can explain every omission and every
+ * token.
  *
  * When the input already fits, each page's Markdown is returned byte for byte. Otherwise the kept
  * lead and sections are joined with one blank line between them, so the output is a deterministic
@@ -28,7 +45,16 @@ import type { Page } from "../contracts/content.ts";
 import type { SourcePos } from "../contracts/source.ts";
 import { parseMarkdown } from "../markdown/parse.ts";
 import { blockIdOf, spanFromPosition } from "../source/spans.ts";
-import { estimateTokens } from "./tokens.ts";
+import { estimateTokens, TOKEN_ERROR_MARGIN, TOKEN_METHOD } from "./tokens.ts";
+
+/** Distinct words a section needs before near-duplicate matching applies; shorter sections must match exactly. */
+const DUPLICATE_MIN_WORDS = 12;
+
+/** The share of two sections' distinct words that makes them near-duplicates. */
+const DUPLICATE_OVERLAP = 0.8;
+
+/** The words a section is compared by, case-folded: Markdown syntax and whitespace do not matter. */
+const WORD = /[\p{L}\p{N}]+/gu;
 
 /** One top-level heading and the blocks under it, up to the next top-level heading. */
 export interface TrimSection {
@@ -52,10 +78,65 @@ export interface TrimmedPage {
   readonly markdown: string;
   /** The top-level sections that were kept, in document order. */
   readonly keptSections: readonly TrimSection[];
-  /** The top-level sections that were dropped, in document order. */
+  /** The top-level sections that were dropped, in document order, for either reason. */
   readonly droppedSections: readonly TrimSection[];
   /** The token estimate of {@link markdown}, by the configured estimator. */
   readonly tokens: number;
+}
+
+/**
+ * A piece of evidence the caller requires, such as a source path, a version, a build warning, or a
+ * dependency note. `trimPages` keeps it whole and prices it before optional content; it does not
+ * interpret the text or the kind.
+ */
+export interface RequiredEvidence {
+  /** Stable id, echoed in {@link TrimResult.required}; the caller maps it into its own output. */
+  readonly id: string;
+  /** What the item is, such as `source`, `version`, `warning`, or `dependency`. */
+  readonly kind: string;
+  /** The exact Markdown kept before the optional content in {@link TrimResult.markdown}. */
+  readonly text: string;
+  /** Where the item came from, when it has a place; an over-budget diagnostic prefers it. */
+  readonly pos?: SourcePos;
+}
+
+/** Why a section is missing from the output. */
+export type TrimOmissionReason = "budget" | "duplicate";
+
+/** One section that was left out, and why. */
+export interface TrimOmission {
+  /** The page the section belongs to. */
+  readonly url: string;
+  /** The heading's block id, `<file>:<line>:<column>`. */
+  readonly id: string;
+  /** The heading's plain text. */
+  readonly text: string;
+  /** The section's token estimate, by the configured estimator. */
+  readonly tokens: number;
+  /** The heading's span in the page's source file. */
+  readonly pos: SourcePos;
+  /** `budget` when the budget could not keep it, `duplicate` when an earlier section repeated it. */
+  readonly reason: TrimOmissionReason;
+  /** The kept section this one repeated, when the reason is `duplicate`; `undefined` otherwise. */
+  readonly duplicateOf: { readonly url: string; readonly id: string } | undefined;
+}
+
+/** The token accounting of a trimmed result, so a caller can inspect every number the contract used. */
+export interface TrimAccounting {
+  /** The budget the caller asked for, after rounding down and clamping at 0. */
+  readonly budget: number;
+  /** The estimate of {@link TrimResult.markdown}, the serialized result. */
+  readonly tokens: number;
+  /** {@link tokens} grown by {@link margin}: a planning bound that a hard limit should reserve. */
+  readonly upper: number;
+  /** The estimate of the required evidence and each page's mandatory content alone. */
+  readonly required: number;
+  /** {@link required} grown by {@link margin}, for the same reason as {@link upper}. */
+  readonly requiredUpper: number;
+  /** The estimator's name: {@link TOKEN_METHOD} by default, `custom` for an override. */
+  readonly method: string;
+  /** The relative margin behind {@link upper}; 0 for a custom estimator, which states its own. */
+  readonly margin: number;
 }
 
 /** The trimmed pages and what could not be trimmed. */
@@ -64,6 +145,17 @@ export interface TrimResult {
   readonly pages: readonly TrimmedPage[];
   /** Over-budget findings, in page order; empty when the output fits. */
   readonly diagnostics: readonly Diagnostic[];
+  /** The required evidence that was kept, in the input order, with empty text removed. */
+  readonly required: readonly RequiredEvidence[];
+  /**
+   * The canonical serialization: the required evidence first, then the pages, one blank line
+   * between parts. This is the text the budget contract measures.
+   */
+  readonly markdown: string;
+  /** How the budget was spent, with the estimator's uncertainty. */
+  readonly accounting: TrimAccounting;
+  /** Every section left out and why, in page and document order. */
+  readonly omissions: readonly TrimOmission[];
 }
 
 /** Options for {@link trimPages}. */
@@ -71,6 +163,7 @@ export interface TrimOptions {
   /**
    * Counts the tokens of a text. Defaults to `estimateTokens(text).tokens`. An override is useful
    * for a caller that prices a particular vocabulary; the result is rounded up and clamped at 0.
+   * A custom estimator reports no margin, because this module cannot know its error.
    */
   readonly estimate?: (text: string) => number;
   /**
@@ -78,6 +171,12 @@ export interface TrimOptions {
    * Pinned sections take precedence over the budget; an over-budget result is reported.
    */
   readonly keep?: readonly string[];
+  /**
+   * Evidence that must survive whatever the budget: source, version, warnings, and dependency
+   * information. It is counted before optional sections and never trimmed; when it alone exceeds
+   * the budget the output is over budget and the finding id is `pack.trim.required-over-budget`.
+   */
+  readonly required?: readonly RequiredEvidence[];
 }
 
 /** A section as building and trimming see it: its description plus whether it may be dropped. */
@@ -101,14 +200,35 @@ interface BuiltPage {
   readonly mandatoryTokens: number;
   /** The first mandatory block's span, used to place an over-budget diagnostic. */
   readonly mandatoryPos: SourcePos;
-  /** The token estimate of the page as currently kept. Updated as sections are dropped. */
-  tokens: number;
+}
+
+/** A section's words, for near-duplicate comparison. */
+interface Signature {
+  /** The words joined by one space: two sections with the same words in the same order match exactly. */
+  readonly text: string;
+  /** The distinct words. */
+  readonly words: ReadonlySet<string>;
 }
 
 /** Estimates a text's tokens, rounding up, and clamps a missing or negative estimate to 0. */
 function tokensOf(estimate: (text: string) => number, text: string): number {
   const value = estimate(text);
   return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0;
+}
+
+/** Grows a token count by a relative margin, rounding up: the planning upper bound. */
+function upperOf(tokens: number, margin: number): number {
+  return Math.ceil(tokens * (1 + margin));
+}
+
+/** Joins the non-empty parts with one blank line: the serialization the budget contract measures. */
+function serializeParts(parts: readonly string[]): string {
+  return parts.filter((part) => part !== "").join("\n\n");
+}
+
+/** The required evidence that carries text, in the input order. */
+function evidenceOf(required: readonly RequiredEvidence[] | undefined): readonly RequiredEvidence[] {
+  return (required ?? []).filter((item) => typeof item.text === "string" && item.text.trim() !== "");
 }
 
 /** A node's start offset in the parsed body. `remark` sets it on every node and plugin-created node. */
@@ -203,6 +323,25 @@ function assemble(lead: string, sections: readonly BuiltSection[], kept: readonl
   return parts.join("\n\n");
 }
 
+/** A page's Markdown after trimming; the original text when nothing was dropped. */
+function pageMarkdown(page: BuiltPage): string {
+  return page.kept.some((kept) => !kept) ? assemble(page.lead, page.sections, page.kept) : page.page.markdown;
+}
+
+/** A page's mandatory content: its lead and its mandatory sections. */
+function mandatoryMarkdown(page: BuiltPage): string {
+  return assemble(page.lead, page.sections, page.sections.map((section) => section.mandatory));
+}
+
+/** The serialized token estimate of the required evidence and the kept pages. */
+function totalOf(
+  built: readonly BuiltPage[],
+  evidence: readonly RequiredEvidence[],
+  estimate: (text: string) => number,
+): number {
+  return tokensOf(estimate, serializeParts([...evidence.map((item) => item.text), ...built.map(pageMarkdown)]));
+}
+
 /** Parses and splits one page, and measures its mandatory content. */
 async function buildPage(
   page: Page,
@@ -224,7 +363,7 @@ async function buildPage(
 
   const mandatoryText = assemble(
     lead,
-    sections.filter((section) => section.mandatory),
+    sections,
     sections.map((section) => section.mandatory),
   );
   const mandatoryPos =
@@ -239,7 +378,6 @@ async function buildPage(
     kept,
     mandatoryTokens: tokensOf(estimate, mandatoryText),
     mandatoryPos,
-    tokens: tokensOf(estimate, markdown),
   };
 }
 
@@ -253,6 +391,74 @@ function droppable(pages: readonly BuiltPage[]): { page: number; section: number
     }
   }
   return undefined;
+}
+
+/** A section's words, for near-duplicate comparison. */
+function signatureOf(markdown: string): Signature {
+  const words = markdown.toLowerCase().match(WORD) ?? [];
+  return { text: words.join(" "), words: new Set(words) };
+}
+
+/**
+ * Whether two sections repeat each other. A section with fewer than {@link DUPLICATE_MIN_WORDS}
+ * distinct words has to match exactly; a longer one is a near-duplicate when it shares
+ * {@link DUPLICATE_OVERLAP} of the two sections' distinct words.
+ */
+function isDuplicate(a: Signature, b: Signature): boolean {
+  if (a.text === b.text) return a.text !== "";
+  if (a.words.size < DUPLICATE_MIN_WORDS || b.words.size < DUPLICATE_MIN_WORDS) return false;
+  let shared = 0;
+  for (const word of a.words) if (b.words.has(word)) shared += 1;
+  return shared / (a.words.size + b.words.size - shared) >= DUPLICATE_OVERLAP;
+}
+
+/**
+ * Drops each kept section that repeats an earlier kept section, in page and document order. Mandatory and
+ * pinned sections are never dropped; they can still be the earlier section that later ones repeat.
+ */
+function removeDuplicates(built: readonly BuiltPage[]): ReadonlyMap<BuiltSection, { url: string; id: string }> {
+  const canonical: { readonly url: string; readonly section: BuiltSection; readonly signature: Signature }[] = [];
+  const duplicates = new Map<BuiltSection, { url: string; id: string }>();
+  for (const page of built) {
+    for (let index = 0; index < page.sections.length; index += 1) {
+      const section = page.sections[index]!;
+      if (!page.kept[index]) continue;
+      const signature = signatureOf(section.markdown);
+      const first = canonical.find((entry) => isDuplicate(entry.signature, signature));
+      if (first !== undefined && !section.mandatory && !section.pinned) {
+        page.kept[index] = false;
+        duplicates.set(section, { url: first.url, id: first.section.id });
+        continue;
+      }
+      canonical.push({ url: page.page.url, section, signature });
+    }
+  }
+  return duplicates;
+}
+
+/** Every section left out, in page and document order, with its reason. */
+function omissionsOf(
+  built: readonly BuiltPage[],
+  duplicates: ReadonlyMap<BuiltSection, { url: string; id: string }>,
+): readonly TrimOmission[] {
+  const omissions: TrimOmission[] = [];
+  for (const page of built) {
+    for (let index = 0; index < page.sections.length; index += 1) {
+      if (page.kept[index]) continue;
+      const section = page.sections[index]!;
+      const duplicateOf = duplicates.get(section);
+      omissions.push({
+        url: page.page.url,
+        id: section.id,
+        text: section.text,
+        tokens: section.tokens,
+        pos: section.pos,
+        reason: duplicateOf === undefined ? "budget" : "duplicate",
+        duplicateOf,
+      });
+    }
+  }
+  return omissions;
 }
 
 /** A page's over-budget diagnostic: its mandatory content alone does not fit the budget. */
@@ -277,17 +483,38 @@ function setDiagnostic(first: Page, limit: number, total: number, count: number)
   };
 }
 
+/** The over-budget diagnostic for required evidence that cannot fit on its own. */
+function requiredDiagnostic(
+  evidence: readonly RequiredEvidence[],
+  evidenceTokens: number,
+  limit: number,
+  total: number,
+): Diagnostic {
+  const diagnostic: Diagnostic = {
+    id: "pack.trim.required-over-budget",
+    severity: "warning",
+    message: `The required evidence takes ${evidenceTokens} tokens, above the budget of ${limit}; it is kept whole, and the output is ${total} tokens.`,
+    help: "Raise the budget, or remove required evidence deliberately: required evidence is never trimmed.",
+  };
+  const pos = evidence.find((item) => item.pos !== undefined)?.pos;
+  return pos === undefined ? diagnostic : { ...diagnostic, pos };
+}
+
 /**
- * Trims pages to a token budget by dropping whole trailing sections.
+ * Trims pages to a token budget by dropping whole trailing sections, then near-duplicates.
  *
- * The budget is the total token estimate of the result. While it is exceeded, the last kept
- * section of the last page in the input order is dropped; a page that has only its mandatory
- * content left is skipped and the previous page's last section is dropped. Mandatory content is
- * the lead (the title heading and the text before the first section) plus, when the lead has no
- * paragraph, the first section. Therefore every page keeps its heading and first paragraph.
+ * The budget is the total token estimate of {@link TrimResult.markdown}: the required evidence
+ * first, then the pages in the input order, joined with one blank line between parts. While it is
+ * exceeded, the last kept section of the last page in the input order is dropped; a page that has
+ * only its mandatory content left is skipped and the previous page's last section is dropped.
+ * Mandatory content is the lead (the title heading and the text before the first section) plus,
+ * when the lead has no paragraph, the first section. Therefore every page keeps its heading and
+ * first paragraph, and the required evidence is always kept.
  *
- * The result is deterministic: pages stay in the input order, sections in document order, and
- * parsing gives the same spans on every run. The input pages are not mutated.
+ * After the budget is met, a kept section that repeats an earlier kept section is dropped and
+ * reported as a `duplicate` omission. The result is deterministic: pages stay in the input order,
+ * sections in document order, and parsing gives the same spans on every run. The input pages are
+ * not mutated.
  */
 export async function trimPages(
   pages: readonly Page[],
@@ -295,43 +522,71 @@ export async function trimPages(
   options: TrimOptions = {},
 ): Promise<TrimResult> {
   const estimate = options.estimate ?? ((text: string): number => estimateTokens(text).tokens);
+  const margin = options.estimate === undefined ? TOKEN_ERROR_MARGIN : 0;
+  const method = options.estimate === undefined ? TOKEN_METHOD : "custom";
   const keep = new Set(options.keep ?? []);
+  const evidence = evidenceOf(options.required);
   const limit = Number.isFinite(budget) ? Math.max(0, Math.floor(budget)) : 0;
 
   const built: BuiltPage[] = [];
   for (const page of pages) built.push(await buildPage(page, estimate, keep));
 
-  let total = built.reduce((sum, page) => sum + page.tokens, 0);
+  let total = totalOf(built, evidence, estimate);
   let next = droppable(built);
   while (total > limit && next !== undefined) {
-    const page = built[next.page]!;
-    page.kept[next.section] = false;
-    const before = page.tokens;
-    page.tokens = tokensOf(estimate, assemble(page.lead, page.sections, page.kept));
-    total += page.tokens - before;
+    built[next.page]!.kept[next.section] = false;
+    total = totalOf(built, evidence, estimate);
     next = droppable(built);
   }
 
+  const duplicates = removeDuplicates(built);
+  const markdown = serializeParts([...evidence.map((item) => item.text), ...built.map(pageMarkdown)]);
+  const tokens = tokensOf(estimate, markdown);
+  const required = tokensOf(
+    estimate,
+    serializeParts([...evidence.map((item) => item.text), ...built.map(mandatoryMarkdown)]),
+  );
+
   const trimmed: TrimmedPage[] = built.map((page) => {
-    const dropped = page.kept.some((keptSection) => !keptSection);
+    const pageText = pageMarkdown(page);
     return {
       url: page.page.url,
-      markdown: dropped ? assemble(page.lead, page.sections, page.kept) : page.page.markdown,
+      markdown: pageText,
       keptSections: page.sections.filter((_, index) => page.kept[index]),
       droppedSections: page.sections.filter((_, index) => !page.kept[index]),
-      tokens: page.tokens,
+      tokens: tokensOf(estimate, pageText),
     };
   });
 
   const diagnostics: Diagnostic[] = [];
-  if (total > limit && built.length > 0) {
-    const over = built.filter((page) => page.mandatoryTokens > limit);
-    if (over.length > 0) {
-      for (const page of over) diagnostics.push(pageDiagnostic(page, limit, total));
-    } else {
-      diagnostics.push(setDiagnostic(built[0]!.page, limit, total, built.length));
+  if (tokens > limit) {
+    const evidenceTokens = tokensOf(estimate, serializeParts(evidence.map((item) => item.text)));
+    if (evidence.length > 0 && evidenceTokens > limit) {
+      diagnostics.push(requiredDiagnostic(evidence, evidenceTokens, limit, tokens));
+    } else if (built.length > 0) {
+      const over = built.filter((page) => page.mandatoryTokens > limit);
+      if (over.length > 0) {
+        for (const page of over) diagnostics.push(pageDiagnostic(page, limit, tokens));
+      } else {
+        diagnostics.push(setDiagnostic(built[0]!.page, limit, tokens, built.length));
+      }
     }
   }
 
-  return { pages: trimmed, diagnostics };
+  return {
+    pages: trimmed,
+    diagnostics,
+    required: evidence,
+    markdown,
+    accounting: {
+      budget: limit,
+      tokens,
+      upper: upperOf(tokens, margin),
+      required,
+      requiredUpper: upperOf(required, margin),
+      method,
+      margin,
+    },
+    omissions: omissionsOf(built, duplicates),
+  };
 }

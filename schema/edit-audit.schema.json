@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/velella-sh/mizzen/schema/edit-audit.schema.json",
+  "title": "Mizzen agent-edit provenance record",
+  "description": "One line of an append-only edit ledger: the plan's file and span, the SHA-256 of the source before and after, the outcome, and the verification that followed. The cross-field rules JSON Schema cannot express, such as an applied outcome requiring an after hash and a rejected one requiring none, are checked by src/edits/audit.ts before a record is written. Records are one compact JSON object per line, keys in this order, with checks sorted by id. Free text is redacted: no credentials, environment dumps, or absolute machine-local paths.",
+  "type": "object",
+  "required": [
+    "version",
+    "id",
+    "outcome",
+    "plan",
+    "verification"
+  ],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "The format version. Only 1 exists."
+    },
+    "id": {
+      "$ref": "#/$defs/hash",
+      "description": "SHA-256 over the plan's identity; the key that correlates a plan with its record."
+    },
+    "outcome": {
+      "enum": [
+        "applied",
+        "rejected"
+      ],
+      "description": "How the plan ended. `rejected` means nothing was written to the source."
+    },
+    "plan": {
+      "$ref": "#/$defs/plan"
+    },
+    "verification": {
+      "$ref": "#/$defs/verification"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "description": "When the plan ended, ISO 8601 UTC. Omitted when neither the caller nor SOURCE_DATE_EPOCH supplied a date."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the source bytes, as 64 lowercase hexadecimal characters."
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^([a-zA-Z]:)?[\\\\/]|(^|/)\\.\\.(/|$)|\\\\"
+      },
+      "description": "A relative path with forward slashes: no leading slash, drive letter, backslash, or `..` segment."
+    },
+    "span": {
+      "type": "object",
+      "description": "One source span, 1-based lines and columns, the end inclusive.",
+      "required": [
+        "line",
+        "column",
+        "endLine",
+        "endColumn"
+      ],
+      "properties": {
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Line where the replaced text starts."
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Column where the replaced text starts, in Unicode code points."
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Line where the replaced text ends."
+        },
+        "endColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Column of the span's last character, inclusive."
+        }
+      },
+      "additionalProperties": false
+    },
+    "plan": {
+      "type": "object",
+      "description": "The plan the record is about: where it applied and the hashes on each side.",
+      "required": [
+        "file",
+        "span",
+        "beforeHash",
+        "afterHash"
+      ],
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/path",
+          "description": "The source file, relative to the site root, with forward slashes."
+        },
+        "span": {
+          "$ref": "#/$defs/span"
+        },
+        "beforeHash": {
+          "$ref": "#/$defs/hash",
+          "description": "SHA-256 of the whole source the plan was computed from."
+        },
+        "afterHash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/hash"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SHA-256 of the whole source after the plan; null when the plan was rejected."
+        }
+      },
+      "additionalProperties": false
+    },
+    "check": {
+      "type": "object",
+      "description": "One verification check. Its message is redacted before it is written.",
+      "required": [
+        "id",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "description": "A stable identifier for the check, such as `doctor.L1`."
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "skipped"
+          ],
+          "description": "How the check ended."
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\r\\n]+$",
+          "description": "What the check found, with credentials and machine-local paths redacted."
+        },
+        "file": {
+          "$ref": "#/$defs/path",
+          "description": "The file the check is about, relative to the site root, with forward slashes."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The line, 1-based, front matter included."
+        }
+      },
+      "additionalProperties": false
+    },
+    "verification": {
+      "type": "object",
+      "description": "The verification that followed a plan: its worst status and its checks, sorted by id. A skipped verification has no checks.",
+      "required": [
+        "status",
+        "checks"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "skipped"
+          ],
+          "description": "The worst status the checks support. `skipped` means no verification ran."
+        },
+        "checks": {
+          "type": "array",
+          "description": "The checks, sorted by id comparing code points, without duplicate ids.",
+          "items": {
+            "$ref": "#/$defs/check"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

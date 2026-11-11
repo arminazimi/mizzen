@@ -1,8 +1,12 @@
 import { posix } from "node:path";
+import { discoverVersions, type VersionOptions } from "../content/versions.ts";
 import { permalink } from "../content/permalink.ts";
-import type { Page } from "../contracts/content.ts";
+import type { Page, PageStatus } from "../contracts/content.ts";
 
-/** The weight of one query-term occurrence in each part of a page. */
+/**
+ * The weight of one query-term occurrence in each part of a page, and of each task signal relative
+ * to a page's lexical relevance.
+ */
 export interface RankWeights {
   /** A term in the page title. */
   readonly title: number;
@@ -12,14 +16,34 @@ export interface RankWeights {
   readonly body: number;
   /** How much inbound links may raise a page that already matches the query. */
   readonly links: number;
+  /** How much a page close to the task focus gains, per unit of proximity. */
+  readonly navigation: number;
+  /** How much a page in the requested (or newest) version gains, and one in another version loses. */
+  readonly version: number;
+  /** How much a page in the requested language gains, and one in another language loses. */
+  readonly locale: number;
+  /** The most a page loses for low-trust evidence: a weak status, a generated body, or duplication. */
+  readonly trust: number;
+  /** How much a page gains for being required by a page the query matches. */
+  readonly dependency: number;
 }
 
-/** The documented default weights: a title term is worth eight body terms, a heading term four. */
+/**
+ * The documented default weights: a title term is worth eight body terms, a heading term four. The
+ * task signals are fractions of a page's lexical relevance; by default the three that can demote a
+ * page (`version`, `locale`, `trust`) add up to less than one, so a matching page never scores
+ * below zero.
+ */
 export const defaultRankWeights: RankWeights = Object.freeze({
   title: 8,
   headings: 4,
   body: 1,
   links: 0.5,
+  navigation: 0.35,
+  version: 0.25,
+  locale: 0.15,
+  trust: 0.5,
+  dependency: 0.4,
 });
 
 /** Options for {@link rankPages}. */
@@ -33,16 +57,53 @@ export interface RankOptions {
   readonly base?: string;
   /** Weights to override; defaults are {@link defaultRankWeights}. */
   readonly weights?: Partial<RankWeights>;
+  /** URL or source path of the page the task starts from; pages near it gain navigation proximity. */
+  readonly focus?: string;
+  /** BCP 47 language tag the task asks for; pages in it outrank pages in another language. */
+  readonly lang?: string;
+  /** Version folder the task asks for, such as `v2`; the newest detected version is the default. */
+  readonly version?: string;
+  /** How version folders are detected; see {@link discoverVersions}. */
+  readonly versionOptions?: VersionOptions;
+}
+
+/** The signal that contributed to a page's score. */
+export type RankFactor = "lexical" | "links" | "navigation" | "version" | "locale" | "trust" | "dependency";
+
+/**
+ * One machine-readable selection reason: a factor, the evidence that produced it, and what it added
+ * to the score. A negative contribution demotes a page; `0` records evidence that did not change the
+ * score, such as a page being the canonical member of a duplicate group.
+ */
+export interface RankReason {
+  /** Which signal produced this contribution. */
+  readonly factor: RankFactor;
+  /**
+   * Stable evidence for the contribution: `title:<term>`, `headings:<term>`, `body:<term>`,
+   * `inbound:<count>`, `focus:<url>`, `version:<name>`, `locale:<tag>`, `status:<value>`, `generated`,
+   * `duplicate:<canonical url>`, `canonical`, or `dependency:<url>`.
+   */
+  readonly code: string;
+  /** The amount this reason added to {@link RankedPage.score}; negative when it demoted the page. */
+  readonly contribution: number;
 }
 
 /** One page and why it ranked where it did. */
 export interface RankedPage {
   /** The page that was ranked. */
   readonly page: Page;
-  /** Its relevance score; higher is better. Zero means no query term matched. */
+  /**
+   * Its relevance score; higher is better. It is the sum of {@link reasons}. A page that matches no
+   * query term scores zero unless a matching page depends on it.
+   */
   readonly score: number;
   /** The number of distinct other pages on this site that link to it. */
   readonly inboundLinks: number;
+  /**
+   * The factor contributions that produced {@link score}, in a stable order. Empty when the page
+   * matched no term and no matching page depends on it, so it is not selected.
+   */
+  readonly reasons: readonly RankReason[];
 }
 
 /** Function words that carry no topic, in the languages the engine's sites use. */
@@ -315,14 +376,152 @@ function resolveWeights(weights: Partial<RankWeights> | undefined): RankWeights 
   return resolved;
 }
 
+/** A language tag in the form matching compares: trimmed, lower case, `_` read as `-`. */
+function normalizeTag(tag: string): string {
+  return tag.trim().toLowerCase().replace(/_/g, "-");
+}
+
+/** The non-empty segments of a page path. */
+function keySegments(key: string): readonly string[] {
+  return key.split("/").filter((segment) => segment !== "");
+}
+
+/**
+ * How close a page is to the focus page, from 0 to 1: the shared leading URL segments over the
+ * focus page's depth. Navigation folders mirror URLs, so a sibling scores a half and a page in
+ * another section scores zero.
+ */
+function proximityOf(key: string, focusKey: string): number {
+  const page = keySegments(key);
+  const focus = keySegments(focusKey);
+  if (focus.length === 0) return 0;
+  let shared = 0;
+  while (shared < page.length && shared < focus.length && page[shared] === focus[shared]) shared++;
+  return shared / focus.length;
+}
+
+/** The page a focus URL or source path names; an absent or ambiguous focus names no page. */
+function resolveFocus(pages: readonly Page[], focus: string, base: string): Page | undefined {
+  const wanted = focus.trim();
+  if (wanted === "") return undefined;
+  const urlKey = keyOfUrl(wanted, base);
+  if (urlKey !== undefined) {
+    const byUrl = pages.filter((page) => keyOfUrl(page.url, base) === urlKey);
+    if (byUrl.length === 1) return byUrl[0];
+  }
+  const source = wanted.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+  const bySource = pages.filter((page) => page.source.file.replace(/\\/g, "/").replace(/^\.\//, "") === source);
+  return bySource.length === 1 ? bySource[0] : undefined;
+}
+
+/** The `translation_key` a page declares, or undefined when it declares none. */
+function translationKeyOf(page: Page): string | undefined {
+  const key = page.frontMatter.translation_key;
+  return typeof key === "string" && key.trim() !== "" ? key.trim() : undefined;
+}
+
+/** How much a status lowers trust, as a fraction of the trust weight; `0` for a settled status. */
+const STATUS_TRUST: Readonly<Record<PageStatus, number>> = Object.freeze({
+  accepted: 0,
+  experimental: 0.5,
+  beta: 0.5,
+  proposed: 0.5,
+  deprecated: 1,
+  rejected: 1,
+  superseded: 1,
+});
+
+/** One reason a page is less trustworthy, as a fraction of the trust weight. */
+interface TrustEvidence {
+  readonly code: string;
+  readonly fraction: number;
+}
+
+/** The trust evidence a page carries: a weak status, a generated body, or duplication. */
+function trustEvidenceOf(page: Page, duplicateOf: ReadonlyMap<Page, string>): readonly TrustEvidence[] {
+  const evidence: TrustEvidence[] = [];
+  const status = page.frontMatter.status;
+  const statusFraction = status === undefined ? 0 : STATUS_TRUST[status];
+  if (statusFraction > 0) evidence.push({ code: `status:${status}`, fraction: statusFraction });
+  if (page.frontMatter.agent?.edit === false) evidence.push({ code: "generated", fraction: 1 });
+  const canonicalUrl = duplicateOf.get(page);
+  if (canonicalUrl !== undefined) evidence.push({ code: `duplicate:${canonicalUrl}`, fraction: 1 });
+  return evidence;
+}
+
+/** A group of pages that represent one document, and the predicate that marks its canonical member. */
+interface DuplicateGroup {
+  readonly members: readonly Page[];
+  readonly preferred: (page: Page) => boolean;
+}
+
+/** Groups pages that represent the same document across versions or declared translations. */
+function duplicateGroups(
+  pages: readonly Page[],
+  versions: ReadonlyMap<Page, { readonly version: string | null; readonly path: string }>,
+  canonicalVersion: string | undefined,
+  lang: string | undefined,
+): readonly DuplicateGroup[] {
+  const byVersion = new Map<string, Page[]>();
+  const byTranslation = new Map<string, Page[]>();
+  for (const page of pages) {
+    const info = versions.get(page);
+    if (info !== undefined && info.version !== null) {
+      const group = byVersion.get(info.path);
+      if (group === undefined) byVersion.set(info.path, [page]);
+      else group.push(page);
+    }
+    const translation = lang === undefined ? undefined : translationKeyOf(page);
+    if (translation !== undefined) {
+      const group = byTranslation.get(translation);
+      if (group === undefined) byTranslation.set(translation, [page]);
+      else group.push(page);
+    }
+  }
+
+  const groups: DuplicateGroup[] = [];
+  for (const members of byVersion.values()) {
+    if (members.length < 2) continue;
+    groups.push({
+      members,
+      preferred: (page) => versions.get(page)?.version === canonicalVersion,
+    });
+  }
+  for (const members of byTranslation.values()) {
+    if (members.length < 2) continue;
+    groups.push({ members, preferred: (page) => normalizeTag(page.lang) === lang });
+  }
+  return groups;
+}
+
 /**
  * Ranks pages for a query without a network call or a model.
  *
  * Each distinct query term scores once per occurrence in the title, the heading texts, and the
  * body (the rendered HTML without its headings), with the weights in {@link defaultRankWeights}.
- * A page's score is then multiplied by `1 + links × inbound / maxInbound`, where `inbound` is the
- * number of distinct other pages whose internal links point at it. A page that matches no term
- * keeps a score of zero however many links it has.
+ * That lexical relevance is then adjusted by task signals, each of which is a fraction of it:
+ *
+ * - **Links**: `links × inbound / maxInbound`, where `inbound` is the number of distinct other
+ *   pages whose internal links point at it.
+ * - **Navigation**: how close the page is to `focus` in the URL hierarchy, which mirrors the
+ *   navigation folders. A sibling of the focus page scores a half.
+ * - **Version**: a page in `version` — or in the newest detected version when none is named — gains
+ *   `version`, and a page in another version loses as much. A site without version folders is
+ *   unaffected.
+ * - **Locale**: a page in `lang` gains `locale`, and a page in another language loses as much.
+ * - **Trust**: a deprecated, rejected, or superseded page, a generated page (`agent.edit: false`),
+ *   or a duplicate loses at most the `trust` weight. The duplicate loss names the canonical page in
+ *   its reason, and the canonical page gets a zero-contribution `canonical` reason, so a duplicate
+ *   never displaces its canonical source silently.
+ * - **Dependency**: a page that a matching page links to and that matches no query term gains
+ *   `dependency ×` the strongest linking page's relevance. This keeps required supporting pages
+ *   (a requirements page, say) next to the primary source the task names.
+ *
+ * Duplicates are versioned pages with the same path inside their version, and pages sharing a
+ * non-empty `translation_key` when `lang` is requested; the canonical member is the one in the
+ * requested version or language, else the lowest URL. The order is deterministic: score descending,
+ * then URL, then source file by code point. Equivalent inputs give an identical ranking and
+ * identical reasons, and pages are not mutated.
  *
  * Text is tokenised after {@link normalizeRankText}: Persian and Arabic letter variants, Arabic
  * diacritics, tatweel, and zero-width characters (including ZWNJ) do not split a word, and Latin
@@ -333,13 +532,13 @@ function resolveWeights(weights: Partial<RankWeights> | undefined): RankWeights 
  * (resolved through {@link permalink}), so a page without rendered HTML still contributes its
  * links. Self-links are ignored, links from one page to the same target count once, and a link
  * counts only when it names exactly one page.
- *
- * The order is deterministic: score descending, then URL by code point. Pages are not mutated.
  */
 export function rankPages(pages: readonly Page[], query: string, options: RankOptions = {}): readonly RankedPage[] {
   const base = normalizeBase(options.base ?? "");
   const weights = resolveWeights(options.weights);
   const terms = queryTerms(query);
+  const requestedLang = options.lang === undefined ? undefined : normalizeTag(options.lang);
+  const requestedVersion = options.version?.trim();
 
   const keys: string[] = [];
   const byKey = new Map<string, Page>();
@@ -350,38 +549,186 @@ export function rankPages(pages: readonly Page[], query: string, options: RankOp
     byKey.set(key, page);
   }
 
-  const inbound = new Map<string, number>();
+  const versionByPage = new Map<Page, { readonly version: string | null; readonly path: string }>();
+  let newestVersion: string | undefined;
+  for (const entry of discoverVersions(pages, options.versionOptions)) {
+    versionByPage.set(entry.page, { version: entry.version, path: entry.path });
+    if (entry.version !== null) newestVersion = entry.version;
+  }
+  const knownVersion =
+    requestedVersion !== undefined && [...versionByPage.values()].some((info) => info.version === requestedVersion);
+  const canonicalVersion = knownVersion ? requestedVersion : newestVersion;
+
+  const focusPage = options.focus === undefined ? undefined : resolveFocus(pages, options.focus, base);
+  const focusKey = focusPage === undefined ? undefined : keyOfUrl(focusPage.url, base);
+
+  const outbound = new Map<string, { readonly url: string; readonly targets: ReadonlySet<string> }>();
   for (const page of pages) {
     const from = keyOfUrl(page.url, base);
-    if (from === undefined) continue;
+    if (from === undefined || outbound.has(from)) continue;
     const targets = new Set<string>();
     for (const target of outboundKeys(page, base)) {
       const linked = pageOfKey(target, keys, byKey);
       const to = linked === undefined ? undefined : keyOfUrl(linked.url, base);
-      if (to === undefined || to === from) continue;
-      targets.add(to);
+      if (to !== undefined && to !== from) targets.add(to);
     }
-    for (const target of targets) inbound.set(target, (inbound.get(target) ?? 0) + 1);
+    outbound.set(from, { url: page.url, targets });
   }
 
+  const inbound = new Map<string, number>();
+  for (const links of outbound.values()) {
+    for (const target of links.targets) inbound.set(target, (inbound.get(target) ?? 0) + 1);
+  }
   let maxInbound = 0;
   for (const count of inbound.values()) if (count > maxInbound) maxInbound = count;
 
-  const ranked = pages.map((page): RankedPage => {
+  const lexical = new Map<Page, { readonly relevance: number; readonly reasons: readonly RankReason[] }>();
+  for (const page of pages) {
     const title = frequencies(page.title);
     const headings = frequencies(page.headings.map((heading) => heading.text).join(" "));
     const body = frequencies(bodyText(page));
+    const reasons: RankReason[] = [];
     let relevance = 0;
     for (const term of terms) {
-      relevance += weights.title * (title.get(term) ?? 0);
-      relevance += weights.headings * (headings.get(term) ?? 0);
-      relevance += weights.body * (body.get(term) ?? 0);
+      const titleCount = title.get(term) ?? 0;
+      if (titleCount > 0) {
+        const contribution = weights.title * titleCount;
+        relevance += contribution;
+        reasons.push({ factor: "lexical", code: `title:${term}`, contribution });
+      }
+      const headingCount = headings.get(term) ?? 0;
+      if (headingCount > 0) {
+        const contribution = weights.headings * headingCount;
+        relevance += contribution;
+        reasons.push({ factor: "lexical", code: `headings:${term}`, contribution });
+      }
+      const bodyCount = body.get(term) ?? 0;
+      if (bodyCount > 0) {
+        const contribution = weights.body * bodyCount;
+        relevance += contribution;
+        reasons.push({ factor: "lexical", code: `body:${term}`, contribution });
+      }
     }
+    lexical.set(page, { relevance, reasons });
+  }
+
+  const relevanceByKey = new Map<string, number>();
+  for (const page of pages) {
     const key = keyOfUrl(page.url, base);
+    const relevance = lexical.get(page)?.relevance ?? 0;
+    if (key !== undefined && relevance > (relevanceByKey.get(key) ?? 0)) relevanceByKey.set(key, relevance);
+  }
+
+  const dependency = new Map<string, { readonly from: string; readonly relevance: number }>();
+  for (const [from, links] of outbound) {
+    const relevance = relevanceByKey.get(from) ?? 0;
+    if (relevance <= 0) continue;
+    for (const target of links.targets) {
+      if ((relevanceByKey.get(target) ?? 0) > 0) continue;
+      const current = dependency.get(target);
+      const better =
+        current === undefined ||
+        relevance > current.relevance ||
+        (relevance === current.relevance && byCodePoint(links.url, current.from) < 0);
+      if (better) dependency.set(target, { from: links.url, relevance });
+    }
+  }
+
+  const duplicateOf = new Map<Page, string>();
+  const canonical = new Set<Page>();
+  for (const group of duplicateGroups(pages, versionByPage, canonicalVersion, requestedLang)) {
+    const preferred = group.members.filter(group.preferred);
+    const pool = preferred.length > 0 ? preferred : group.members;
+    const first = [...pool].sort((a, b) => byCodePoint(a.url, b.url))[0];
+    if (first === undefined) continue;
+    canonical.add(first);
+    for (const member of group.members) {
+      if (member === first) continue;
+      const existing = duplicateOf.get(member);
+      // A page can be non-canonical in both a version and a translation group; keep one stable name.
+      if (existing === undefined || byCodePoint(first.url, existing) < 0) duplicateOf.set(member, first.url);
+    }
+  }
+
+  const ranked = pages.map((page): RankedPage => {
+    const key = keyOfUrl(page.url, base);
+    const entry = lexical.get(page);
+    const relevance = entry?.relevance ?? 0;
+    const reasons: RankReason[] = [...(entry?.reasons ?? [])];
     const inboundLinks = key === undefined ? 0 : inbound.get(key) ?? 0;
-    const centrality = maxInbound === 0 ? 0 : inboundLinks / maxInbound;
-    return { page, score: relevance * (1 + weights.links * centrality), inboundLinks };
+
+    if (relevance > 0 && inboundLinks > 0 && maxInbound > 0) {
+      reasons.push({
+        factor: "links",
+        code: `inbound:${inboundLinks}`,
+        contribution: relevance * weights.links * (inboundLinks / maxInbound),
+      });
+    }
+
+    if (relevance > 0 && focusPage !== undefined && focusKey !== undefined && key !== undefined) {
+      const proximity = proximityOf(key, focusKey);
+      if (proximity > 0) {
+        reasons.push({
+          factor: "navigation",
+          code: `focus:${focusPage.url}`,
+          contribution: relevance * weights.navigation * proximity,
+        });
+      }
+    }
+
+    const versionInfo = versionByPage.get(page);
+    if (relevance > 0 && versionInfo !== undefined && versionInfo.version !== null && canonicalVersion !== undefined) {
+      const sign = versionInfo.version === canonicalVersion ? 1 : -1;
+      reasons.push({
+        factor: "version",
+        code: `version:${versionInfo.version}`,
+        contribution: relevance * weights.version * sign,
+      });
+    }
+
+    if (relevance > 0 && requestedLang !== undefined) {
+      const pageLang = normalizeTag(page.lang);
+      const sign = pageLang === requestedLang ? 1 : -1;
+      reasons.push({
+        factor: "locale",
+        code: `locale:${pageLang}`,
+        contribution: relevance * weights.locale * sign,
+      });
+    }
+
+    if (relevance > 0) {
+      const evidence = trustEvidenceOf(page, duplicateOf);
+      let total = 0;
+      for (const item of evidence) total += item.fraction;
+      const capped = Math.min(1, total);
+      for (const item of evidence) {
+        reasons.push({
+          factor: "trust",
+          code: item.code,
+          contribution: -(weights.trust * relevance * capped * item.fraction) / total,
+        });
+      }
+      if (canonical.has(page)) reasons.push({ factor: "trust", code: "canonical", contribution: 0 });
+    }
+
+    const required = key === undefined ? undefined : dependency.get(key);
+    if (relevance === 0 && required !== undefined) {
+      reasons.push({
+        factor: "dependency",
+        code: `dependency:${required.from}`,
+        contribution: required.relevance * weights.dependency,
+      });
+    }
+
+    let score = 0;
+    for (const reason of reasons) score += reason.contribution;
+    return { page, score, inboundLinks, reasons };
   });
 
-  return ranked.sort((a, b) => b.score - a.score || byCodePoint(a.page.url, b.page.url));
+  return ranked.sort(
+    (a, b) =>
+      b.score - a.score ||
+      byCodePoint(a.page.url, b.page.url) ||
+      byCodePoint(a.page.source.file, b.page.source.file),
+  );
 }

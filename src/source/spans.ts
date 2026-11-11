@@ -97,6 +97,44 @@ export function parseSpan(value: string): SourcePos | undefined {
   return undefined;
 }
 
+/**
+ * Why `span` does not name text in `source`, or `undefined` when it does. `source` is a file's text or
+ * one body of it, and `firstLine` is the 1-based line of the file where `source` starts.
+ *
+ * A span is invalid when a part is not a whole number of at least 1, when its end runs before its
+ * start, or when it names a line or a column the text does not have. Columns are counted in JavaScript
+ * string units, the way `remark` reports them, so a non-BMP character is two columns as it is two units;
+ * that is what keeps a span and `sliceSpan` telling the same story on every line ending. A caller
+ * reports the reason and leaves the location out: a stale span is never clamped into a new one.
+ */
+export function spanProblem(source: string, span: SourcePos, firstLine = 1): string | undefined {
+  if (!positive(span.line, span.column, span.endLine, span.endColumn)) {
+    return "the line and column must be whole numbers of at least 1";
+  }
+  if (span.endLine < span.line || (span.endLine === span.line && span.endColumn < span.column)) {
+    return "the end runs before the start";
+  }
+
+  const lines = source.split("\n");
+  const lastLine = firstLine + lines.length - 1;
+  if (span.line < firstLine || span.line > lastLine) {
+    return `line ${span.line} is outside lines ${firstLine} to ${lastLine}`;
+  }
+  if (span.endLine > lastLine) {
+    return `end line ${span.endLine} is outside lines ${firstLine} to ${lastLine}`;
+  }
+
+  const first = lines[span.line - firstLine] ?? "";
+  if (span.column > first.length + 1) {
+    return `column ${span.column} is past the end of line ${span.line}`;
+  }
+  const last = lines[span.endLine - firstLine] ?? "";
+  if (span.endColumn > last.length) {
+    return `end column ${span.endColumn} is past the end of line ${span.endLine}`;
+  }
+  return undefined;
+}
+
 /** Every `data-src` span in a page's HTML, in document order. */
 export function spansIn(html: string): SourcePos[] {
   const spans: SourcePos[] = [];

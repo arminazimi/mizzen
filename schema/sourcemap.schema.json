@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/velella-sh/mizzen/schema/sourcemap.schema.json",
   "title": "Mizzen source map",
-  "description": "/sourcemap.json at the site root: which source file, and which line in it, produced each built page, section, and link. Version 0 is a draft; see spec/sourcemap/v0.md. A url must not appear twice, which JSON Schema cannot express; tools/theme/sourcemap.ts checks it.",
+  "description": "/sourcemap.json at the site root: which source file, and which range in it, produced each built page, section, link, and trust or drift claim. Version 0 is a draft; see spec/sourcemap/v0.md. A url must not appear twice, which JSON Schema cannot express; tools/theme/sourcemap.ts checks it.",
   "type": "object",
   "required": [
     "version",
@@ -39,6 +39,13 @@
         "source"
       ],
       "properties": {
+        "claims": {
+          "type": "array",
+          "description": "Trust and drift evidence claims in document order.",
+          "items": {
+            "$ref": "#/$defs/claim"
+          }
+        },
         "links": {
           "type": "array",
           "description": "Links in document order.",
@@ -110,6 +117,37 @@
       },
       "additionalProperties": false
     },
+    "target": {
+      "type": "object",
+      "description": "The code range a drift claim cites, exactly as the page writes it. It is never adjusted; whether the code still holds is the drift check's finding.",
+      "required": [
+        "file",
+        "line"
+      ],
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/column",
+          "description": "The cited column. Absent when the page names only lines."
+        },
+        "endLine": {
+          "$ref": "#/$defs/line",
+          "description": "The last cited line of a range. Absent when the page names one line."
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The cited file, relative to the repository root, with forward slashes.",
+          "not": {
+            "pattern": "^([a-zA-Z]:)?[\\\\/]|(^|/)\\.\\.(/|$)|\\\\"
+          }
+        },
+        "line": {
+          "$ref": "#/$defs/line",
+          "description": "The first cited line."
+        }
+      },
+      "additionalProperties": false
+    },
     "link": {
       "type": "object",
       "required": [
@@ -136,6 +174,98 @@
         },
         "line": {
           "$ref": "#/$defs/line"
+        }
+      },
+      "additionalProperties": false
+    },
+    "claim": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/trustClaim"
+        },
+        {
+          "$ref": "#/$defs/driftClaim"
+        }
+      ],
+      "description": "One piece of evidence behind a page's trust or drift signals, with its exact span in the page's own source file."
+    },
+    "trustClaim": {
+      "type": "object",
+      "description": "A runnable example (`test` fence): the trust evidence of the page, with the fence's exact span in the page's own source file (the page's `source`).",
+      "required": [
+        "kind",
+        "line",
+        "column",
+        "endLine",
+        "endColumn",
+        "example"
+      ],
+      "properties": {
+        "kind": {
+          "const": "trust"
+        },
+        "line": {
+          "$ref": "#/$defs/line"
+        },
+        "column": {
+          "$ref": "#/$defs/column",
+          "description": "1-based column where the claim starts."
+        },
+        "endLine": {
+          "$ref": "#/$defs/line",
+          "description": "1-based line where the claim ends."
+        },
+        "endColumn": {
+          "$ref": "#/$defs/column",
+          "description": "Column of the claim's last character (inclusive)."
+        },
+        "example": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The runnable example's id, as `examples.json` and the theme use it."
+        }
+      },
+      "additionalProperties": false
+    },
+    "driftClaim": {
+      "type": "object",
+      "description": "A `path:line` code reference: the drift evidence of the page, with the reference's exact span in the page's own source file (the page's `source`) and the target range it cites.",
+      "required": [
+        "kind",
+        "line",
+        "column",
+        "endLine",
+        "endColumn",
+        "reference",
+        "target"
+      ],
+      "properties": {
+        "kind": {
+          "const": "drift"
+        },
+        "line": {
+          "$ref": "#/$defs/line"
+        },
+        "column": {
+          "$ref": "#/$defs/column",
+          "description": "1-based column where the claim starts."
+        },
+        "endLine": {
+          "$ref": "#/$defs/line",
+          "description": "1-based line where the claim ends."
+        },
+        "endColumn": {
+          "$ref": "#/$defs/column",
+          "description": "Column of the claim's last character (inclusive)."
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The citation as `drift.json` writes it, such as `src/app.ts:12`."
+        },
+        "target": {
+          "$ref": "#/$defs/target",
+          "description": "The file and range the page points at."
         }
       },
       "additionalProperties": false

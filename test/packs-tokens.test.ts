@@ -42,13 +42,22 @@ test("every fixture stays within the documented error margin of the reference co
       error <= TOKEN_ERROR_MARGIN,
       `${name}: ${estimate.tokens} tokens against ${reference}, ${(error * 100).toFixed(1)}% off, margin ${TOKEN_ERROR_MARGIN * 100}%`,
     );
+    assert.ok(estimate.upper >= reference, `${name}: the upper bound ${estimate.upper} covers the reference ${reference}`);
   }
+});
+
+test("the estimate reports its uncertainty, and the upper bound is the estimate plus the margin", () => {
+  const estimate = estimateTokens(ENGLISH);
+  assert.equal(estimate.margin, TOKEN_ERROR_MARGIN);
+  assert.equal(estimate.upper, Math.ceil(estimate.tokens * (1 + TOKEN_ERROR_MARGIN)));
+  assert.ok(estimate.upper > estimate.tokens);
+  assert.deepEqual(estimateTokens(""), { tokens: 0, method: TOKEN_METHOD, margin: TOKEN_ERROR_MARGIN, upper: 0 });
 });
 
 test("the estimate is deterministic and reports the script-aware method", () => {
   assert.deepEqual(estimateTokens(ENGLISH), estimateTokens(ENGLISH));
-  assert.deepEqual(estimateTokens(ENGLISH), { tokens: 75, method: "script-aware" });
-  assert.deepEqual(estimateTokens(""), { tokens: 0, method: TOKEN_METHOD });
+  assert.deepEqual(estimateTokens(ENGLISH), { tokens: 75, method: "script-aware", margin: TOKEN_ERROR_MARGIN, upper: 87 });
+  assert.equal(estimateTokens("").tokens, 0);
   assert.equal(TOKEN_METHOD, "script-aware");
 });
 

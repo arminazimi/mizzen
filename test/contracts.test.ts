@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type {
   Chrome, CodeConfig, Component, Diagnostic, Head, Island, Layout, NavTree, Output, Page, Pager, Plugin, Site, SiteConfig, SourcePos, Trail,
@@ -89,4 +90,15 @@ test("example values of every contract type type-check and carry what the contra
   const files = await output.run(site, { renderPage: async () => "", report: (d) => reported.push(d) });
   assert.deepEqual(files, [{ path: "example.txt", contents: page.url }]);
   assert.equal(reported.length, 1);
+});
+
+test("the contracts entry re-exports types only, one line per contract module", () => {
+  const lines = readFileSync(new URL("../src/contracts/index.ts", import.meta.url), "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("//") && !line.startsWith("/*") && !line.startsWith("*"));
+  assert.ok(lines.length > 0);
+  for (const line of lines) {
+    assert.match(line, /^export type \{ [\w, ]+ \} from "\.\/[\w-]+\.ts";$/, `${line} is a type-only re-export`);
+  }
 });
