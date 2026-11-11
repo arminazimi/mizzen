@@ -101,6 +101,26 @@ test("the code file lists the plugins a build runs, in order", async () => {
   }
 });
 
+test("an edited code file is imported again, and unchanged content reuses its module", async () => {
+  const first = codeFile(`const plugin: Plugin = { name: "first" };\n`, "plugin");
+  const root = siteRoot(first);
+  try {
+    const before = await loadCodeConfig(root);
+    assert.deepEqual(before.plugins.map((plugin) => plugin.name), ["first"]);
+
+    const unchanged = await loadCodeConfig(root);
+    assert.equal(unchanged.plugins[0], before.plugins[0], "unchanged content reuses the same module instance");
+
+    const second = codeFile(`const plugin: Plugin = { name: "second" };\n`, "plugin");
+    writeFileSync(join(root, CODE_CONFIG_FILE), second[CODE_CONFIG_FILE]!);
+
+    const after = await loadCodeConfig(root);
+    assert.deepEqual(after.plugins.map((plugin) => plugin.name), ["second"]);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
 test("a code file with an empty list is an ordinary site", async () => {
   const root = siteRoot(codeFile("", ""));
   try {

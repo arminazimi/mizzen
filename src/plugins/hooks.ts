@@ -1,4 +1,5 @@
-import { access } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Diagnostic, MaybePromise, OutputFile, Page, Plugin, PluginHooks, Site } from "../contracts/index.ts";
@@ -109,8 +110,10 @@ export async function loadCodeConfig(siteRoot: string, options: LoadCodeOptions 
 
   let mod: Record<string, unknown>;
   try {
-    // Node keeps an imported module for the life of the process, so an edited code file needs a new one.
-    mod = (await import(pathToFileURL(abs).href)) as Record<string, unknown>;
+    // Node keeps a module for the life of the process, so key the URL by the file's content: an edit is a new module,
+    // while unchanged content reuses the one already imported.
+    const digest = createHash("sha256").update(await readFile(abs)).digest("hex");
+    mod = (await import(`${pathToFileURL(abs).href}?v=${digest}`)) as Record<string, unknown>;
   } catch (err) {
     return {
       plugins: [],
