@@ -1,0 +1,724 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mizzen context pack evidence",
+  "description": "`pack/<topic>.json` in the output folder: the structured twin of a context pack, in the order `version`, `build`, `topic`, `selection`, `items`, `accounting`, `coverage`, `warnings`. It names the selected pages and sections with their source spans, the rank reasons and trim omissions that explain the selection, every token the budget spent, and the required evidence the pack can and cannot prove. Both files are written from this one model, so the Markdown names the same items. It reads no clock, network, environment, or output folder; the same site writes the same bytes.",
+  "type": "object",
+  "required": [
+    "version",
+    "build",
+    "topic",
+    "selection",
+    "items",
+    "accounting",
+    "coverage",
+    "warnings"
+  ],
+  "properties": {
+    "version": {
+      "description": "The shape version of `pack/<topic>.json`.",
+      "const": 1
+    },
+    "build": {
+      "description": "The documentation build the selected evidence came from.",
+      "$ref": "#/$defs/build"
+    },
+    "topic": {
+      "description": "The topic the pack was compiled for.",
+      "$ref": "#/$defs/topic"
+    },
+    "selection": {
+      "description": "Why the candidate pages and their sections are in the pack or not.",
+      "$ref": "#/$defs/selection"
+    },
+    "items": {
+      "description": "The selected pages, in pack order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "accounting": {
+      "description": "How the budget was spent, with every cost visible.",
+      "$ref": "#/$defs/accounting"
+    },
+    "coverage": {
+      "description": "What required evidence the pack covers, and what it explicitly cannot.",
+      "$ref": "#/$defs/coverage"
+    },
+    "warnings": {
+      "description": "Every warning the pack's own compilation produced, in report order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/warning"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "build": {
+      "type": "object",
+      "required": [
+        "engine",
+        "id"
+      ],
+      "properties": {
+        "engine": {
+          "description": "The engine version that wrote the pack.",
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "description": "SHA-256 over every doc page's relative URL and full URL plus source hash, by `build-hash.ts`'s rule.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "topic": {
+      "type": "object",
+      "required": [
+        "name",
+        "query",
+        "budget"
+      ],
+      "properties": {
+        "name": {
+          "description": "The topic's display name.",
+          "type": "string",
+          "minLength": 1
+        },
+        "query": {
+          "description": "The ranking query that selected the pages.",
+          "type": "string",
+          "minLength": 1
+        },
+        "budget": {
+          "description": "The token budget the Markdown pack was trimmed to.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "reason": {
+      "type": "object",
+      "description": "One rank contribution: the factor, the stable evidence code, and what it added to the score.",
+      "required": [
+        "factor",
+        "code",
+        "contribution"
+      ],
+      "properties": {
+        "factor": {
+          "description": "The signal that produced this contribution.",
+          "enum": [
+            "lexical",
+            "links",
+            "navigation",
+            "version",
+            "locale",
+            "trust",
+            "dependency"
+          ]
+        },
+        "code": {
+          "description": "Stable evidence, such as `title:install`, `inbound:3`, `version:v2`, or `dependency:/guide/install/`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "contribution": {
+          "description": "The amount this reason added to the score; negative when it demoted the page.",
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rank": {
+      "type": "object",
+      "required": [
+        "score",
+        "reasons"
+      ],
+      "properties": {
+        "score": {
+          "description": "The page's relevance score: exactly the sum of `reasons`.",
+          "type": "number"
+        },
+        "reasons": {
+          "description": "The factor contributions, in the ranker's stable order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reason"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "section": {
+      "type": "object",
+      "description": "One kept top-level section.",
+      "required": [
+        "id",
+        "text",
+        "span"
+      ],
+      "properties": {
+        "id": {
+          "description": "The section's block id, `<file>:<line>:<column>`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "description": "The heading's plain text.",
+          "type": "string"
+        },
+        "span": {
+          "description": "The heading's span, `path:line:column-endLine:endColumn`, with forward slashes.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "trust": {
+      "type": "object",
+      "description": "The page's trust entry, from the same signals and thresholds as `trust.json`.",
+      "required": [
+        "evidence",
+        "level",
+        "reasons"
+      ],
+      "properties": {
+        "evidence": {
+          "description": "What each signal measured, or why it did not.",
+          "type": "object",
+          "required": [
+            "examples",
+            "drift",
+            "review"
+          ],
+          "properties": {
+            "examples": {
+              "description": "`measured`, `none` when the page declares no example, or `unknown` when results are unavailable.",
+              "enum": [
+                "measured",
+                "none",
+                "unknown"
+              ]
+            },
+            "drift": {
+              "description": "`measured`, `missing` when no drift data was available, or `unknown` when the check gave no answer.",
+              "enum": [
+                "measured",
+                "missing",
+                "unknown"
+              ]
+            },
+            "review": {
+              "description": "`measured`, `missing` when no review source was available, or `unknown` when it named no date.",
+              "enum": [
+                "measured",
+                "missing",
+                "unknown"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "level": {
+          "description": "The worst level the reasons support.",
+          "enum": [
+            "verified",
+            "review-due",
+            "at-risk"
+          ]
+        },
+        "reasons": {
+          "description": "Exactly three reasons, in the fixed order examples, drift, review.",
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "description": "A stable identifier for one trust finding.",
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "description": "The sentence a reader sees.",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "lastReviewer": {
+          "description": "The last commit's author name, when it is known; absent otherwise.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "item": {
+      "type": "object",
+      "description": "One selected page, with everything needed to trace its claims to the source.",
+      "required": [
+        "id",
+        "title",
+        "url",
+        "origin",
+        "version",
+        "locale",
+        "build",
+        "hash",
+        "rank",
+        "sections",
+        "content"
+      ],
+      "properties": {
+        "id": {
+          "description": "The page's URL: stable while the page keeps its address, and unique within a pack.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "title": {
+          "description": "The page title, as the pack section shows it.",
+          "type": "string"
+        },
+        "url": {
+          "description": "The output URL, including `base`.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "origin": {
+          "description": "The source file and the span its content starts at.",
+          "type": "object",
+          "required": [
+            "source",
+            "span"
+          ],
+          "properties": {
+            "source": {
+              "description": "The source file, relative to the site root, with forward slashes.",
+              "type": "string",
+              "minLength": 1
+            },
+            "span": {
+              "description": "The source span, `path:line:column-endLine:endColumn`, with forward slashes.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "version": {
+          "description": "The documentation version folder, or `null` when the page is outside every version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locale": {
+          "description": "The page's language and text direction.",
+          "type": "object",
+          "required": [
+            "lang",
+            "dir"
+          ],
+          "properties": {
+            "lang": {
+              "description": "The page's BCP 47 language tag.",
+              "type": "string",
+              "minLength": 1
+            },
+            "dir": {
+              "description": "The page's text direction.",
+              "enum": [
+                "ltr",
+                "rtl"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "build": {
+          "description": "The pack's build identity, repeated so an item stands on its own.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "hash": {
+          "description": "SHA-256 of the page's source body, the manifest's `hashes.source` value.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "rank": {
+          "description": "Why the page was selected: its score and the factor contributions behind it.",
+          "$ref": "#/$defs/rank"
+        },
+        "trust": {
+          "description": "The page's trust entry; absent when trust could not be read.",
+          "$ref": "#/$defs/trust"
+        },
+        "sections": {
+          "description": "The kept top-level sections, in document order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/section"
+          }
+        },
+        "content": {
+          "description": "The exact Markdown the human-readable pack shows for this page.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "pageOmission": {
+      "type": "object",
+      "description": "A candidate page that ranked but did not survive the budget.",
+      "required": [
+        "id",
+        "span",
+        "score",
+        "reasons",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "description": "The page's URL.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "span": {
+          "description": "The page's source span, `path:line:column-endLine:endColumn`, with forward slashes.",
+          "type": "string",
+          "minLength": 1
+        },
+        "score": {
+          "description": "Its relevance score.",
+          "type": "number"
+        },
+        "reasons": {
+          "description": "The factor contributions that produced `score`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reason"
+          }
+        },
+        "reason": {
+          "description": "Why the page is not in the pack; only the budget can leave a ranked candidate out.",
+          "const": "budget"
+        }
+      },
+      "additionalProperties": false
+    },
+    "omission": {
+      "type": "object",
+      "description": "One section left out of a selected page, with its source span and the stable reason.",
+      "required": [
+        "item",
+        "id",
+        "text",
+        "span",
+        "tokens",
+        "reason"
+      ],
+      "properties": {
+        "item": {
+          "description": "The selected page the section belongs to.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "id": {
+          "description": "The section's block id, `<file>:<line>:<column>`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "description": "The heading's plain text.",
+          "type": "string"
+        },
+        "span": {
+          "description": "The heading's span, `path:line:column-endLine:endColumn`, with forward slashes.",
+          "type": "string",
+          "minLength": 1
+        },
+        "tokens": {
+          "description": "The section's token estimate.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "`budget` when the budget could not keep it, `duplicate` when an earlier section repeated it.",
+          "enum": [
+            "budget",
+            "duplicate"
+          ]
+        },
+        "duplicateOf": {
+          "description": "The kept item and section this one repeated; present exactly when `reason` is `duplicate`.",
+          "type": "object",
+          "required": [
+            "item",
+            "section"
+          ],
+          "properties": {
+            "item": {
+              "description": "The URL of the item that kept the section.",
+              "type": "string",
+              "pattern": "^/"
+            },
+            "section": {
+              "description": "The kept section's block id.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "selection": {
+      "type": "object",
+      "required": [
+        "omitted",
+        "omissions"
+      ],
+      "properties": {
+        "omitted": {
+          "description": "Candidate pages the budget left out, in rank order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pageOmission"
+          }
+        },
+        "omissions": {
+          "description": "Sections left out of selected pages, in item and document order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/omission"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "cost": {
+      "type": "object",
+      "description": "The minimum serialization that keeps every mandatory section.",
+      "required": [
+        "tokens",
+        "upper"
+      ],
+      "properties": {
+        "tokens": {
+          "description": "The token estimate of that serialization.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "upper": {
+          "description": "`tokens` grown by the estimator's margin, rounded up.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "accounting": {
+      "type": "object",
+      "description": "How the pack's budget was spent. `selected + required + overhead` is exactly `used`.",
+      "required": [
+        "requested",
+        "reserved",
+        "selected",
+        "required",
+        "overhead",
+        "used",
+        "remaining",
+        "method",
+        "margin",
+        "upper",
+        "minimum"
+      ],
+      "properties": {
+        "requested": {
+          "description": "The topic's token budget: what the pack was asked to fit.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "reserved": {
+          "description": "The planning upper bound of the content the pack cannot drop; optional sections cannot use it.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "selected": {
+          "description": "The estimate of the selected item bodies: the content trimming may drop.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "required": {
+          "description": "The estimate of the provenance evidence the pack publishes: each item's URL, source, and version lines.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "overhead": {
+          "description": "The estimate the serialization adds: the title, the section headings, and the separators.",
+          "type": "integer"
+        },
+        "used": {
+          "description": "The estimate of the final Markdown file, byte for byte.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "remaining": {
+          "description": "`requested - used`; negative only when the pack is over budget.",
+          "type": "integer"
+        },
+        "method": {
+          "description": "The estimator's name.",
+          "type": "string",
+          "minLength": 1
+        },
+        "margin": {
+          "description": "The estimator's relative error margin.",
+          "type": "number",
+          "minimum": 0
+        },
+        "upper": {
+          "description": "`used` grown by `margin`, rounded up: the bound a hard limit should reserve.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "minimum": {
+          "description": "The smallest feasible serialization when `used` exceeds `requested`; `null` otherwise.",
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/cost"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "coverageRequirement": {
+      "type": "object",
+      "description": "One evidence kind and whether the pack covers it for every selected item.",
+      "required": [
+        "kind",
+        "satisfied",
+        "missing"
+      ],
+      "properties": {
+        "kind": {
+          "description": "The evidence kind a context request can demand.",
+          "enum": [
+            "source",
+            "version",
+            "warning",
+            "dependency"
+          ]
+        },
+        "satisfied": {
+          "description": "Whether every selected item carries this evidence.",
+          "type": "boolean"
+        },
+        "missing": {
+          "description": "The item URLs the evidence is missing for; empty when satisfied.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "reason": {
+          "description": "A stable code when the requirement is unsatisfied.",
+          "enum": [
+            "source.missing",
+            "version.unknown",
+            "warning.unavailable",
+            "dependency.unavailable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "required": [
+        "requirements",
+        "unsatisfied"
+      ],
+      "properties": {
+        "requirements": {
+          "description": "One requirement per kind, in the fixed order source, version, warning, dependency.",
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/coverageRequirement"
+          }
+        },
+        "unsatisfied": {
+          "description": "The kinds that are not satisfied, in the same order.",
+          "type": "array",
+          "items": {
+            "enum": [
+              "source",
+              "version",
+              "warning",
+              "dependency"
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "warning": {
+      "type": "object",
+      "description": "One warning the pack's own compilation produced.",
+      "required": [
+        "id",
+        "severity",
+        "message"
+      ],
+      "properties": {
+        "id": {
+          "description": "Stable identifier, such as `pack.trim.over-budget`.",
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "description": "The finding's severity.",
+          "enum": [
+            "error",
+            "warning",
+            "info"
+          ]
+        },
+        "message": {
+          "description": "What is wrong, in one sentence.",
+          "type": "string",
+          "minLength": 1
+        },
+        "span": {
+          "description": "The source span, with forward slashes, when the warning has a place.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

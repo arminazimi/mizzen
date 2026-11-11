@@ -1,12 +1,13 @@
-import type { Diagnostic } from "../contracts/diagnostic.ts";
+import type { Diagnostic, Severity } from "../contracts/diagnostic.ts";
 import type { Direction } from "../contracts/config.ts";
 import type { Page, Site } from "../contracts/content.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
+import type { SourcePos } from "../contracts/source.ts";
 import { discoverVersions } from "../content/versions.ts";
 import { version } from "../index.ts";
-import { rankPages } from "../packs/rank.ts";
+import { rankPages, type RankedPage, type RankReason } from "../packs/rank.ts";
 import { estimateTokens } from "../packs/tokens.ts";
-import { trimPages, type TrimmedPage } from "../packs/trim.ts";
+import { trimPages, type TrimmedPage, type TrimResult } from "../packs/trim.ts";
 import { blockIdOf, formatSpan } from "../source/spans.ts";
 import { buildHashOf, hashOf } from "./build-hash.ts";
 import { trustReport, type TrustEntry, type TrustPageEntry } from "./trust.ts";
@@ -66,8 +67,27 @@ import { trustReport, type TrustEntry, type TrustPageEntry } from "./trust.ts";
  *   (`./trust.ts`), or left out when trust cannot be read.
  * - `build`: the identity of the documentation build, and `hash`: the SHA-256 of the page's source body, the same
  *   value `.mizzen/manifest.json` records under `hashes.source`.
+ * - `rank`: the page's score and the factor contributions that produced it, from the same ranking the pack
+ *   used, so a reader sees why the page was selected.
  * - `sections`: the kept top-level sections, with their stable block ids and spans, and `content`: the exact
  *   Markdown the human-readable pack shows.
+ *
+ * The evidence also explains what is missing:
+ *
+ * - `selection.omitted`: every candidate page that ranked but did not fit the budget, in rank order, with its
+ *   score and reasons and the stable reason `budget`.
+ * - `selection.omissions`: every top-level section left out of a selected page, with its source span, token
+ *   count, and the stable reason `budget` or `duplicate`; a duplicate names the kept item and section that
+ *   replaced it.
+ * - `accounting`: the requested budget, the tokens reserved for content the pack cannot drop, the selected
+ *   bodies, the provenance evidence, the serialization overhead, the final Markdown estimate, what remains,
+ *   the estimator's method and margin, its planning upper bound, and the minimum feasible cost when the pack
+ *   is over budget. `selected + required + overhead` is exactly `used`, so no cost is hidden.
+ * - `coverage`: one requirement per evidence kind a context request can demand (`source`, `version`,
+ *   `warning`, `dependency`), each satisfied or explicitly unsatisfied with the item URLs it is missing for.
+ *   Selecting a page never satisfies version or dependency evidence on its own; `warning` covers exactly the
+ *   warnings this pack's own compilation published.
+ * - `warnings`: every warning the pack's own compilation produced, with its source span.
  *
  * The build identity is the engine version plus one SHA-256 over every doc page's URL and source hash, using
  * `build-hash.ts`'s rule. No absolute path, clock, environment, or unselected page reaches either file.
@@ -104,6 +124,14 @@ export interface PackSection {
   readonly span: string;
 }
 
+/** Why a page's rank placed it where it did: the score and the contributions that sum to it. */
+export interface PackRank {
+  /** The relevance score; exactly the sum of {@link reasons}. */
+  readonly score: number;
+  /** The factor contributions, in the ranker's stable order. */
+  readonly reasons: readonly RankReason[];
+}
+
 /** One selected page in the structured pack, with everything needed to trace its claims to the source. */
 export interface PackItem {
   /** The page's URL: stable while the page keeps its address, and unique within a pack. */
@@ -122,12 +150,130 @@ export interface PackItem {
   readonly build: string;
   /** SHA-256 of the page's source body, the manifest's `hashes.source` value. */
   readonly hash: string;
+  /** Why the page was selected: its score and the factor contributions behind it. */
+  readonly rank: PackRank;
   /** The trust level, reasons, and per-signal evidence, or omitted when trust could not be read. */
   readonly trust?: TrustEntry;
   /** The kept top-level sections, in document order. */
   readonly sections: readonly PackSection[];
   /** The exact Markdown the human-readable pack shows for this page. */
   readonly content: string;
+}
+
+/** A candidate page that ranked but did not survive the budget. */
+export interface PackPageOmission {
+  /** The page's URL. */
+  readonly id: string;
+  /** The source file and the span its content starts at. */
+  readonly span: string;
+  /** Its relevance score. */
+  readonly score: number;
+  /** The factor contributions that produced {@link score}. */
+  readonly reasons: readonly RankReason[];
+  /** Why the page is not in the pack; only the budget can leave a ranked candidate out. */
+  readonly reason: "budget";
+}
+
+/** One section left out of a selected page, with its source span and the stable reason. */
+export interface PackOmission {
+  /** The selected page the section belongs to. */
+  readonly item: string;
+  /** The section's block id, `<file>:<line>:<column>`. */
+  readonly id: string;
+  /** The heading's plain text. */
+  readonly text: string;
+  /** The heading's span in the source file. */
+  readonly span: string;
+  /** The section's token estimate. */
+  readonly tokens: number;
+  /** `budget` when the budget could not keep it, `duplicate` when an earlier section repeated it. */
+  readonly reason: "budget" | "duplicate";
+  /** The kept item and section this one repeated, when the reason is `duplicate`. */
+  readonly duplicateOf?: { readonly item: string; readonly section: string };
+}
+
+/** Why a candidate was selected or left out, in stable order. */
+export interface PackSelection {
+  /** Candidate pages the budget left out, in rank order. */
+  readonly omitted: readonly PackPageOmission[];
+  /** Sections left out of selected pages, in item and document order. */
+  readonly omissions: readonly PackOmission[];
+}
+
+/** The minimum serialization that keeps every mandatory section. */
+export interface PackMinimum {
+  /** The token estimate of that serialization. */
+  readonly tokens: number;
+  /** {@link tokens} grown by the estimator's margin, rounded up. */
+  readonly upper: number;
+}
+
+/** How the pack's budget was spent, with every cost visible. */
+export interface PackAccounting {
+  /** The topic's token budget: what the pack was asked to fit. */
+  readonly requested: number;
+  /** The planning upper bound of the content the pack cannot drop; optional sections cannot use it. */
+  readonly reserved: number;
+  /** The estimate of the selected item bodies: the content trimming may drop. */
+  readonly selected: number;
+  /** The estimate of the provenance evidence the pack publishes: each item's URL, source, and version lines. */
+  readonly required: number;
+  /** The estimate the serialization adds: the title, the section headings, and the separators. */
+  readonly overhead: number;
+  /** The estimate of the final Markdown file, byte for byte. */
+  readonly used: number;
+  /** `requested - used`; negative only when the pack is over budget. */
+  readonly remaining: number;
+  /** The estimator's name. */
+  readonly method: string;
+  /** The estimator's relative error margin. */
+  readonly margin: number;
+  /** `used` grown by {@link margin}, rounded up: the bound a hard limit should reserve. */
+  readonly upper: number;
+  /** The smallest feasible serialization when `used` exceeds {@link requested}; `null` otherwise. */
+  readonly minimum: PackMinimum | null;
+}
+
+/** One kind of evidence a context request can demand. */
+export type PackEvidenceKind = "source" | "version" | "warning" | "dependency";
+
+/** Why a required evidence kind is not satisfied for some items. */
+export type PackCoverageReason =
+  | "source.missing"
+  | "version.unknown"
+  | "warning.unavailable"
+  | "dependency.unavailable";
+
+/** One evidence kind and whether the pack covers it for every selected item. */
+export interface PackCoverageRequirement {
+  /** The evidence kind. */
+  readonly kind: PackEvidenceKind;
+  /** Whether every selected item carries this evidence. */
+  readonly satisfied: boolean;
+  /** The item URLs the evidence is missing for; empty when satisfied. */
+  readonly missing: readonly string[];
+  /** A stable code when the requirement is unsatisfied. */
+  readonly reason?: PackCoverageReason;
+}
+
+/** What required evidence the pack can prove, and what it explicitly cannot. */
+export interface PackCoverage {
+  /** One requirement per kind, in the fixed order source, version, warning, dependency. */
+  readonly requirements: readonly PackCoverageRequirement[];
+  /** The kinds that are not satisfied, in the same order. */
+  readonly unsatisfied: readonly PackEvidenceKind[];
+}
+
+/** One warning the pack's own compilation produced. */
+export interface PackWarning {
+  /** Stable identifier, such as `pack.trim.over-budget`. */
+  readonly id: string;
+  /** The finding's severity. */
+  readonly severity: Severity;
+  /** What is wrong, in one sentence. */
+  readonly message: string;
+  /** The source span, with forward slashes, when the warning has a place. */
+  readonly span?: string;
 }
 
 /** The identity of the documentation a pack was compiled from. */
@@ -156,8 +302,16 @@ export interface PackEvidence {
   readonly build: PackBuild;
   /** Why this evidence was selected. */
   readonly topic: PackTopicEvidence;
+  /** Why each candidate was selected or left out. */
+  readonly selection: PackSelection;
   /** The selected pages, in pack order. */
   readonly items: readonly PackItem[];
+  /** How the budget was spent, with every cost visible. */
+  readonly accounting: PackAccounting;
+  /** What required evidence the pack covers, and what it explicitly cannot. */
+  readonly coverage: PackCoverage;
+  /** Every warning the pack's own compilation produced. */
+  readonly warnings: readonly PackWarning[];
 }
 
 /** Compares by code point, never by locale. */
@@ -236,13 +390,18 @@ async function trustIndexOf(site: Site): Promise<ReadonlyMap<string, TrustEntry>
   return new Map(Object.values(report.pages).map((entry) => [entry.url, trustEntryOf(entry)]));
 }
 
+/** A span with the page's normalized source path, so a Windows model still writes forward slashes. */
+function normalizedSpan(pos: SourcePos): string {
+  return formatSpan({ ...pos, file: pos.file.replace(/\\/g, "/") });
+}
+
 /** A section's span with the page's normalized source path, so a Windows model still writes forward slashes. */
 function sectionOf(page: Page, section: { readonly pos: Page["source"]; readonly text: string }): PackSection {
   const span = { ...section.pos, file: sourceOf(page) };
   return { id: blockIdOf(span), text: section.text, span: formatSpan(span) };
 }
 
-/** One selected page, with its origin, build identity, locale, trust, kept sections, and shown Markdown. */
+/** One selected page, with its origin, build identity, locale, rank, trust, kept sections, and shown Markdown. */
 function itemOf(
   page: Page,
   content: string,
@@ -250,6 +409,7 @@ function itemOf(
   build: PackBuild,
   versions: ReadonlyMap<string, string>,
   trust: ReadonlyMap<string, TrustEntry>,
+  ranked: RankedPage,
 ): PackItem {
   const source = sourceOf(page);
   const entry = trust.get(page.url);
@@ -262,20 +422,114 @@ function itemOf(
     locale: { lang: page.lang, dir: page.dir },
     build: build.id,
     hash: hashOf(page.markdown),
+    rank: { score: ranked.score, reasons: ranked.reasons },
     ...(entry === undefined ? {} : { trust: entry }),
     sections: (trimmed?.keptSections ?? []).map((section) => sectionOf(page, section)),
     content,
   };
 }
 
+/** The facts a page header shows, which a page and a structured item both carry. */
+interface HeaderFacts {
+  readonly title: string;
+  readonly url: string;
+  readonly origin: { readonly source: string };
+  readonly version: string | null;
+}
+
+/** The required provenance evidence of one item: its URL, source, and version when known. */
+function evidenceLinesOf(facts: HeaderFacts, site: Site): readonly string[] {
+  return [
+    `- URL: ${absoluteUrl(facts.url, site)}`,
+    `- Source: \`${facts.origin.source}\``,
+    ...(facts.version === null ? [] : [`- Version: ${facts.version}`]),
+  ];
+}
+
+/** A page section's header, built from facts both the page model and the structured item carry. */
+function headerOfFacts(facts: HeaderFacts, site: Site): string {
+  return `## ${oneLine(facts.title)}\n\n${evidenceLinesOf(facts, site).join("\n")}`;
+}
+
 /** The header of one page section, without the body. */
-function headerOf(page: Page, site: Site): string {
-  return `## ${oneLine(page.title)}\n\n- URL: ${absoluteUrl(page.url, site)}\n- Source: \`${sourceOf(page)}\``;
+function headerOfPage(page: Page, site: Site, pageVersion: string | null): string {
+  return headerOfFacts(
+    { title: page.title, url: page.url, origin: { source: sourceOf(page) }, version: pageVersion },
+    site,
+  );
 }
 
 /** The header of one structured item, so the Markdown and the JSON name the same origin. */
 function headerOfItem(item: PackItem, site: Site): string {
-  return `## ${oneLine(item.title)}\n\n- URL: ${absoluteUrl(item.url, site)}\n- Source: \`${item.origin.source}\``;
+  return headerOfFacts(item, site);
+}
+
+/** One candidate page's mandatory content: its lead and any mandatory section, with its token estimate. */
+interface MandatoryContent {
+  readonly tokens: number;
+  readonly markdown: string;
+}
+
+/** Every candidate page trimmed to zero, so its mandatory content and cost are known before selection. */
+async function mandatoryOf(pages: readonly Page[]): Promise<ReadonlyMap<string, MandatoryContent>> {
+  const probe = await trimPages(pages, 0);
+  const costs = new Map<string, MandatoryContent>();
+  for (const page of probe.pages) costs.set(page.url, { tokens: page.tokens, markdown: page.markdown });
+  return costs;
+}
+
+/** One page's rank reasons that produced its score. */
+function rankOf(page: Page, ranked: ReadonlyMap<Page, RankedPage>): RankedPage {
+  const entry = ranked.get(page);
+  if (entry === undefined) throw new Error(`page ${page.url} was not ranked`);
+  return entry;
+}
+
+/** Every warning the compiler emitted, with the source path in forward slashes. */
+function warningOf(diagnostic: Diagnostic): PackWarning {
+  return {
+    id: diagnostic.id,
+    severity: diagnostic.severity,
+    message: diagnostic.message,
+    ...(diagnostic.pos === undefined ? {} : { span: normalizedSpan(diagnostic.pos) }),
+  };
+}
+
+/** One coverage requirement: satisfied when no item is missing the evidence. */
+function requirementOf(
+  kind: PackEvidenceKind,
+  missing: readonly string[],
+  reason: PackCoverageReason,
+): PackCoverageRequirement {
+  return missing.length === 0
+    ? { kind, satisfied: true, missing: [] }
+    : { kind, satisfied: false, missing, reason };
+}
+
+/**
+ * What the pack can prove about the four evidence kinds a context request can require.
+ *
+ * `source` is covered by every item's origin. `version` is covered only by items inside a version folder; a
+ * selected page outside one leaves it explicitly unsatisfied, never silently covered. `warning` is covered
+ * because the pack publishes every warning its own compilation produced. `dependency` is not available in
+ * the site model, so it names every item as missing rather than claiming a page selection proved it.
+ */
+function coverageOf(items: readonly PackItem[]): PackCoverage {
+  const source = items
+    .filter((item) => item.origin.source === "" || !item.origin.span.startsWith(`${item.origin.source}:`))
+    .map((item) => item.id);
+  const version = items.filter((item) => item.version === null).map((item) => item.id);
+  const dependency = items.map((item) => item.id);
+  const requirements: readonly PackCoverageRequirement[] = [
+    requirementOf("source", source, "source.missing"),
+    requirementOf("version", version, "version.unknown"),
+    requirementOf("warning", [], "warning.unavailable"),
+    requirementOf("dependency", dependency, "dependency.unavailable"),
+  ];
+  return {
+    requirements,
+    unsatisfied: requirements.filter((requirement) => !requirement.satisfied).map((requirement) => requirement.kind),
+  };
 }
 
 /** The pack's title line. */
@@ -420,25 +674,15 @@ export function readPackTopics(site: Site, ctx: OutputContext): readonly unknown
   return raw;
 }
 
-/** The candidates for a topic, in ranking order. */
-function candidatesOf(site: Site, topic: PackTopic): readonly Page[] {
+/** The candidates for a topic, in ranking order, with the reasons that ranked them. */
+function candidatesOf(site: Site, topic: PackTopic): readonly RankedPage[] {
   const docs = site.pages.filter((page) => page.kind === "doc");
   const ranked = rankPages(docs, topic.query, { base: site.config.base });
   const named = topic.pages;
-  if (named === undefined) {
-    return ranked.filter((entry) => entry.score > 0).map((entry) => entry.page);
-  }
-  return ranked
-    .filter((entry) => named.some((reference) => matchesReference(entry.page, reference, site.config.base)))
-    .map((entry) => entry.page);
-}
-
-/** The tokens of the mandatory content of every candidate, measured by trimming each page to zero. */
-async function mandatoryTokensOf(pages: readonly Page[]): Promise<ReadonlyMap<string, number>> {
-  const probe = await trimPages(pages, 0);
-  const costs = new Map<string, number>();
-  for (const page of probe.pages) costs.set(page.url, page.tokens);
-  return costs;
+  if (named === undefined) return ranked.filter((entry) => entry.score > 0);
+  return ranked.filter((entry) =>
+    named.some((reference) => matchesReference(entry.page, reference, site.config.base)),
+  );
 }
 
 /** A topic with no pages is reported, not written. */
@@ -483,21 +727,23 @@ export async function buildPack(
     return undefined;
   }
 
-  const mandatory = await mandatoryTokensOf(candidates);
+  const versions = versionsOf(site);
+  const ranked = new Map(candidates.map((entry) => [entry.page, entry]));
+  const pageVersion = (page: Page): string | null => versions.get(page.url) ?? null;
+  const headerOf = (page: Page): string => headerOfPage(page, site, pageVersion(page));
+  const pairs = candidates.map((entry) => entry.page);
+  const mandatory = await mandatoryOf(pairs);
 
   // Select pages in ranking order while their headers and mandatory content fit. The first page is always
   // kept, so a topic whose best page alone exceeds the budget still produces a pack and a warning.
   const selected: Page[] = [];
   let mandatorySum = 0;
-  for (const page of candidates) {
+  for (const page of pairs) {
     const next = [...selected, page];
     const overhead = estimateTokens(
-      assemble(
-        topic.topic,
-        next.map((candidate) => ({ header: headerOf(candidate, site), body: "" })),
-      ),
+      assemble(topic.topic, next.map((candidate) => ({ header: headerOf(candidate), body: "" }))),
     ).tokens;
-    const cost = mandatory.get(page.url) ?? 0;
+    const cost = mandatory.get(page.url)?.tokens ?? 0;
     if (selected.length === 0 || overhead + mandatorySum + cost <= topic.budget) {
       selected.push(page);
       mandatorySum += cost;
@@ -506,34 +752,33 @@ export async function buildPack(
 
   let chosen = selected;
   let diagnostics: readonly Diagnostic[] = [];
-  let contents = "";
-  let kept: readonly TrimmedPage[] = [];
+  let trim: TrimResult | undefined;
   let bodies: readonly string[] = [];
   for (;;) {
     const overhead = estimateTokens(
-      assemble(
-        topic.topic,
-        chosen.map((page) => ({ header: headerOf(page, site), body: "" })),
-      ),
+      assemble(topic.topic, chosen.map((page) => ({ header: headerOf(page), body: "" }))),
     ).tokens;
     const trimmed = await trimPages(chosen, Math.max(0, topic.budget - overhead));
     bodies = chosen.map((page, index) => withoutLeadHeading(trimmed.pages[index]?.markdown ?? page.markdown));
-    contents = assemble(
+    const contents = assemble(
       topic.topic,
-      chosen.map((page, index) => ({ header: headerOf(page, site), body: bodies[index]! })),
+      chosen.map((page, index) => ({ header: headerOf(page), body: bodies[index]! })),
     );
     const total = estimateTokens(contents).tokens;
     if (total <= topic.budget || chosen.length <= 1) {
       diagnostics = trimmed.diagnostics;
-      kept = trimmed.pages;
+      trim = trimmed;
       if (total > topic.budget && diagnostics.length === 0) {
-        ctx.report({
-          id: "context-pack.over-budget",
-          severity: "warning",
-          message: `Context pack "${topic.topic}" is ${total} tokens, above its budget of ${topic.budget}; its mandatory lead is kept.`,
-          pos: chosen[0]!.source,
-          help: "Raise `budget`, shorten the page's lead, or rank a different page.",
-        });
+        diagnostics = [
+          ...diagnostics,
+          {
+            id: "context-pack.over-budget",
+            severity: "warning",
+            message: `Context pack "${topic.topic}" is ${total} tokens, above its budget of ${topic.budget}; its mandatory lead is kept.`,
+            pos: chosen[0]!.source,
+            help: "Raise `budget`, shorten the page's lead, or rank a different page.",
+          },
+        ];
       }
       break;
     }
@@ -543,22 +788,78 @@ export async function buildPack(
   for (const diagnostic of diagnostics) ctx.report(diagnostic);
 
   const build = buildIdentityOf(site);
-  const versions = versionsOf(site);
   const trust = options.trust ?? (await trustIndexOf(site));
+  const items = chosen.map((page, index) =>
+    itemOf(page, bodies[index] ?? "", trim?.pages[index], build, versions, trust, rankOf(page, ranked)),
+  );
+
+  // The human-readable pack is rendered from the same items, so the two files cannot name different evidence.
+  const contents = assemble(
+    topic.topic,
+    items.map((item) => ({ header: headerOfItem(item, site), body: item.content })),
+  );
+
+  const omitted = candidates
+    .filter((entry) => !chosen.includes(entry.page))
+    .map((entry): PackPageOmission => ({
+      id: entry.page.url,
+      span: formatSpan({ ...entry.page.source, file: sourceOf(entry.page) }),
+      score: entry.score,
+      reasons: entry.reasons,
+      reason: "budget",
+    }));
+  const omissions = (trim?.omissions ?? []).map((omission): PackOmission => ({
+    item: omission.url,
+    id: omission.id,
+    text: omission.text,
+    span: normalizedSpan(omission.pos),
+    tokens: omission.tokens,
+    reason: omission.reason,
+    ...(omission.duplicateOf === undefined
+      ? {}
+      : { duplicateOf: { item: omission.duplicateOf.url, section: omission.duplicateOf.id } }),
+  }));
+
+  // The accounting splits the exact final serialization: bodies, provenance evidence, and the rest.
+  const estimate = estimateTokens(contents);
+  const selectedTokens = items.reduce((sum, item) => sum + estimateTokens(item.content).tokens, 0);
+  const requiredTokens = items.reduce(
+    (sum, item) => sum + estimateTokens(evidenceLinesOf(item, site).join("\n")).tokens,
+    0,
+  );
+  const floorMarkdown = assemble(
+    topic.topic,
+    chosen.map((page) => ({
+      header: headerOf(page),
+      body: withoutLeadHeading(mandatory.get(page.url)?.markdown ?? page.markdown),
+    })),
+  );
+  const floor = estimateTokens(floorMarkdown).tokens;
+  const floorUpper = Math.ceil(floor * (1 + estimate.margin));
+  const accounting: PackAccounting = {
+    requested: topic.budget,
+    reserved: floorUpper,
+    selected: selectedTokens,
+    required: requiredTokens,
+    overhead: estimate.tokens - selectedTokens - requiredTokens,
+    used: estimate.tokens,
+    remaining: topic.budget - estimate.tokens,
+    method: estimate.method,
+    margin: estimate.margin,
+    upper: estimate.upper,
+    minimum: estimate.tokens > topic.budget ? { tokens: floor, upper: floorUpper } : null,
+  };
+
   const evidence: PackEvidence = {
     version: 1,
     build,
     topic: { name: topic.topic, query: topic.query, budget: topic.budget },
-    items: chosen.map((page, index) =>
-      itemOf(page, bodies[index] ?? "", kept[index], build, versions, trust),
-    ),
+    selection: { omitted, omissions },
+    items,
+    accounting,
+    coverage: coverageOf(items),
+    warnings: diagnostics.map(warningOf),
   };
-
-  // The human-readable pack is rendered from the same items, so the two files cannot name different evidence.
-  contents = assemble(
-    topic.topic,
-    evidence.items.map((item) => ({ header: headerOfItem(item, site), body: item.content })),
-  );
 
   return { slug: slugOf(topic.topic), contents, evidence };
 }
