@@ -1,24 +1,38 @@
 /**
- * `mizzen edit verify <proof.json> [--site <dir>] [--doctor]`: check a proof record against the working tree (#1512).
+ * `mizzen edit verify <proof.json> [--site <dir>] [--doctor]`: check a proof record against the working tree (#1512, #60).
  *
- * The proof record ([N29](../edits/proof.ts)) keeps the SHA-256 of every touched file after the edit. This command
- * re-hashes the files it names under the site root and stops at the first one that changed, went missing, or came
- * back after the proof recorded it as deleted, so an edit an agent reports is checked against what is on disk.
+ * The proof record ([N29](../edits/proof.ts)) keeps the SHA-256 of every touched file after the edit, the resulting
+ * source spans with the SHA-256 of the text each covers, and, optionally, the doctor's findings. This command checks
+ * every one of those claims against what is on disk: each recorded path must resolve to a real path inside the site
+ * root, each after hash must match, and each span must still cover the text it hashed. Every file is checked in path
+ * order, so all mismatches are reported instead of only the first.
  *
  * The doctor is a separate package, so it runs as a command and never as an import: `mizzen doctor <dir> --format
- * json`, whose `level` is compared with the one the proof recorded. Without `--doctor` the hashes are still checked
- * and the command says that the doctor check did not run. A matching proof exits 0, a mismatching file or doctor
- * level exits 1, and a proof that cannot be read is a usage error and exits 2. `--format json` prints the same
- * outcome as one {@link VerifyProofReport}, naming the failed check and its location.
+ * json`, whose `diagnostics` are compared with the findings the proof recorded. A proof that records only a level, or
+ * no doctor result, has no evidence the current doctor JSON can verify, so it can never be a match. Without `--doctor`
+ * the files and spans are still checked and the command says that the doctor check did not run.
+ *
+ * A matching proof exits 0; a mismatching file, span, or finding exits 1; a proof that cannot be read, or a doctor
+ * check that cannot run or has no comparable evidence, is a usage error and exits 2. `--format json` prints the same
+ * outcome as one {@link VerifyProofReport}, naming every failed check and where it is.
  *
  */
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROOF_LEVELS, PROOF_VERSION, type ProofLevel } from "../edits/proof.ts";
+import {
+  compareDoctorFindings,
+  DoctorReportError,
+  parseDoctorReport,
+  parseProof,
+  verifyProofFiles,
+  type ParsedProof,
+  type ProofVerifyIssue,
+} from "../edits/proof-verifier.ts";
+import { formatPatchSpan } from "../edits/patch.ts";
+import type { ProofLevel, ProofSpan } from "../edits/proof.ts";
 
 /** A command that runs the doctor CLI, as an executable and the arguments before `doctor`. */
 export interface DoctorCommand {
@@ -34,7 +48,7 @@ export interface VerifyProofOptions {
   readonly proof: string;
   /** The site root the record's paths are relative to. Default: the current directory. */
   readonly siteRoot?: string;
-  /** Rerun the doctor and compare its level with the recorded one. Default: false. */
+  /** Rerun the doctor and compare its diagnostics with the recorded findings. Default: false. */
   readonly doctor?: boolean;
   /** How to run the doctor; default: a local doctor checkout, else `mizzen` on the PATH. */
   readonly doctorCommand?: DoctorCommand;
@@ -45,24 +59,42 @@ export interface VerifyProofOptions {
 /** What a recorded file looks like now, compared with the proof's `after` hash. */
 export type VerifyProofFileState = "changed" | "missing" | "extra";
 
+/** Why a recorded span did not verify. */
+export type VerifyProofSpanState = "moved" | "hash" | "range";
+
 /** How the doctor part of the check ended. */
 export type VerifyProofDoctorState =
   | "not-recorded"
   | "not-run"
   | "matched"
   | "mismatched"
+  | "unsupported"
   | "unavailable";
 
-/** Why a proof did not match the working tree. */
+/** Why a proof did not match: one failure per claim that did not verify. */
 export type VerifyProofFailure =
   | { readonly kind: "proof"; readonly message: string }
   | { readonly kind: "file"; readonly path: string; readonly state: VerifyProofFileState }
-  | { readonly kind: "doctor"; readonly expected: ProofLevel; readonly actual: ProofLevel }
-  | { readonly kind: "doctor-unavailable"; readonly message: string };
+  | {
+      readonly kind: "span";
+      readonly path: string;
+      readonly state: VerifyProofSpanState;
+      readonly span: ProofSpan;
+      /** Where a moved span's text was found. */
+      readonly found?: { readonly line: number; readonly column: number; readonly endLine: number; readonly endColumn: number };
+    }
+  | { readonly kind: "escape"; readonly path: string }
+  | { readonly kind: "doctor"; readonly recorded: number; readonly actual: number; readonly difference: string }
+  | {
+      readonly kind: "doctor-unavailable";
+      readonly message: string;
+      /** `unsupported` when the proof has no comparable evidence; `unavailable` when the doctor could not run. */
+      readonly reason: "unsupported" | "unavailable";
+    };
 
 /** What {@link verifyProof} found. */
 export interface VerifyProofResult {
-  /** True when every recorded file still hashes to its `after` value, and the doctor matches when it ran. */
+  /** True when every recorded file, span, and (when it ran) the doctor evidence matches. */
   readonly ok: boolean;
   /** The proof that was checked, as an absolute path. */
   readonly proof: string;
@@ -72,95 +104,14 @@ export interface VerifyProofResult {
   readonly files: number;
   /** How the doctor check ended. */
   readonly doctor: VerifyProofDoctorState;
-  /** The first mismatch, absent when `ok` is true. */
+  /** Every mismatch, in path order, with the doctor check last. */
+  readonly failures: readonly VerifyProofFailure[];
+  /** The first mismatch, absent when `ok` is true. Kept so a caller that reports one failure still can. */
   readonly failure?: VerifyProofFailure;
-}
-
-/** One file entry, kept to the fields a check needs. */
-interface ProofFileEntry {
-  readonly path: string;
-  readonly after: string | null;
-}
-
-/** The parts of a record {@link verifyProof} uses. `doctor` is absent when the record has no doctor result. */
-interface ParsedProof {
-  readonly files: readonly ProofFileEntry[];
-  readonly doctor?: { readonly level: ProofLevel };
-}
-
-/** A proof that cannot be read or does not have the shape the format requires. */
-class ProofReadError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ProofReadError";
-  }
 }
 
 /** A local doctor checkout beside this package, when there is one. */
 const SIBLING_DOCTOR = fileURLToPath(new URL("../../../doctor/bin/mizzen.ts", import.meta.url));
-
-/** Compares by code point, never by locale. */
-function byCodePoint(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** A hash the record may keep: 64 lowercase hex characters, or `null` for a file absent on that side. */
-function isHashOrNull(value: unknown): value is string | null {
-  return value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
-}
-
-function isLevel(value: unknown): value is ProofLevel {
-  return value === null || (typeof value === "string" && (PROOF_LEVELS as readonly string[]).includes(value));
-}
-
-/** A path that stays inside the site root and uses forward slashes, as the proof schema requires. */
-function isProofPath(path: string): boolean {
-  if (path === "" || path === "." || path === ".." || path.startsWith("/") || path.includes("\\")) return false;
-  if (/^[a-zA-Z]:/.test(path)) return false;
-  return !path.split("/").includes("..");
-}
-
-/** Parses the record, refusing anything that is not one complete proof of the current version. */
-function parseProof(text: string): ParsedProof {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    throw new ProofReadError("it is not JSON");
-  }
-  if (!isObject(value)) throw new ProofReadError("it is not a JSON object");
-  if (value.version !== PROOF_VERSION) {
-    throw new ProofReadError(`its version is ${String(value.version)}, not ${PROOF_VERSION}`);
-  }
-  if (!Array.isArray(value.files)) throw new ProofReadError("`files` is not a list");
-
-  const files: ProofFileEntry[] = [];
-  const seen = new Set<string>();
-  for (const entry of value.files) {
-    if (!isObject(entry)) throw new ProofReadError("a `files` entry is not an object");
-    const path = entry.path;
-    if (typeof path !== "string" || !isProofPath(path)) {
-      throw new ProofReadError(`"${String(path)}" is not a path inside the site root`);
-    }
-    if (seen.has(path)) throw new ProofReadError(`"${path}" is listed more than once`);
-    if (!isHashOrNull(entry.before) || !isHashOrNull(entry.after)) {
-      throw new ProofReadError(`"${path}" does not have a before and an after hash`);
-    }
-    seen.add(path);
-    files.push({ path, after: entry.after });
-  }
-
-  if (value.doctor === undefined) return { files };
-  if (!isObject(value.doctor)) throw new ProofReadError("`doctor` is not an object");
-  if (!isLevel(value.doctor.level)) {
-    throw new ProofReadError(`the doctor level ${String(value.doctor.level)} is not one of L0, L1, L2, L3, or null`);
-  }
-  return { files, doctor: { level: value.doctor.level } };
-}
 
 /** Why the proof could not be read, as one phrase. */
 function readReason(err: unknown): string {
@@ -169,43 +120,18 @@ function readReason(err: unknown): string {
   return String(err);
 }
 
-/** SHA-256 of the bytes, as 64 lowercase hex characters. */
-function hashBytes(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
-/** Resolves a record path under the site root, with forward slashes split for the platform. */
-function fileAt(siteRoot: string, path: string): string {
-  return join(siteRoot, ...path.split("/"));
-}
-
-/** Compares one recorded file with the working tree. */
-async function fileState(siteRoot: string, entry: ProofFileEntry): Promise<VerifyProofFileState | "ok"> {
-  let bytes: Buffer | undefined;
-  try {
-    bytes = await readFile(fileAt(siteRoot, entry.path));
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException | undefined)?.code;
-    if (code !== "ENOENT" && code !== "ENOTDIR") return entry.after === null ? "extra" : "changed";
-  }
-
-  if (entry.after === null) return bytes === undefined ? "ok" : "extra";
-  if (bytes === undefined) return "missing";
-  return hashBytes(bytes) === entry.after ? "ok" : "changed";
-}
-
 /** The default doctor command: a local doctor checkout when it exists, else the installed `mizzen`. */
 function defaultDoctorCommand(): DoctorCommand {
   if (existsSync(SIBLING_DOCTOR)) return { command: process.execPath, prefix: [SIBLING_DOCTOR] };
   return { command: "mizzen" };
 }
 
-/** Runs `mizzen doctor <siteRoot> --format json` and reads its level, without importing the doctor package. */
+/** Runs `mizzen doctor <siteRoot> --format json` and reads its diagnostics, without importing the doctor package. */
 function runDoctor(
   siteRoot: string,
   command: DoctorCommand,
   env: NodeJS.ProcessEnv,
-): { readonly level: ProofLevel } | { readonly error: string } {
+): { readonly findings: ReturnType<typeof parseDoctorReport> } | { readonly error: string } {
   const result = spawnSync(command.command, [...(command.prefix ?? []), "doctor", siteRoot, "--format", "json"], {
     cwd: siteRoot,
     encoding: "utf8",
@@ -216,25 +142,53 @@ function runDoctor(
   if (result.status !== 0 && result.status !== 1) {
     return { error: `it exited ${result.status === null ? "on a signal" : result.status}` };
   }
-
-  let report: unknown;
   try {
-    report = JSON.parse(result.stdout);
-  } catch {
-    return { error: "its output is not JSON" };
+    return { findings: parseDoctorReport(result.stdout) };
+  } catch (err) {
+    if (err instanceof DoctorReportError) return { error: err.message };
+    return { error: err instanceof Error ? err.message : String(err) };
   }
-  if (!isObject(report) || !isLevel(report.level)) {
-    return { error: "its report does not have a doctor level" };
-  }
-  return { level: report.level };
+}
+
+/** The verification failure one recorded-file issue stands for. */
+function failureOf(issue: ProofVerifyIssue): VerifyProofFailure {
+  if (issue.code === "verify.path.escape") return { kind: "escape", path: issue.path };
+  if (issue.code === "verify.file.changed") return { kind: "file", path: issue.path, state: "changed" };
+  if (issue.code === "verify.file.missing") return { kind: "file", path: issue.path, state: "missing" };
+  if (issue.code === "verify.file.extra") return { kind: "file", path: issue.path, state: "extra" };
+  const state: VerifyProofSpanState =
+    issue.code === "verify.span.moved" ? "moved" : issue.code === "verify.span.hash" ? "hash" : "range";
+  const span: ProofSpan = {
+    line: issue.line ?? 1,
+    column: issue.column ?? 1,
+    endLine: issue.endLine ?? 1,
+    endColumn: issue.endColumn ?? 1,
+    hash: issue.hash ?? "",
+  };
+  return issue.foundLine === undefined
+    ? { kind: "span", path: issue.path, state, span }
+    : {
+        kind: "span",
+        path: issue.path,
+        state,
+        span,
+        found: {
+          line: issue.foundLine,
+          column: issue.foundColumn ?? 1,
+          endLine: issue.foundEndLine ?? issue.foundLine,
+          endColumn: issue.foundEndColumn ?? 1,
+        },
+      };
 }
 
 /**
  * Checks `options.proof` against the working tree under the site root.
  *
- * Every recorded file is compared with its after-edit hash in path order, and the first difference is returned. Only
- * when every file matches does `--doctor` rerun the doctor; a level it cannot compare is still a failure, and the
- * doctor command never fails the caller by throwing.
+ * Every recorded file is checked in path order: its real path must stay inside the site root, its after hash must
+ * match, and every recorded span must cover text that hashes as recorded. A file whose after hash differs has its
+ * spans skipped, because they point into text that is gone. When the files and spans all match and `--doctor` was
+ * passed, the doctor runs and its diagnostics are compared with the recorded findings; missing, legacy, or
+ * unreadable doctor evidence is a failure, never a match. The doctor command never fails the caller by throwing.
  */
 export async function verifyProof(options: VerifyProofOptions): Promise<VerifyProofResult> {
   const proof = resolve(options.proof);
@@ -245,92 +199,123 @@ export async function verifyProof(options: VerifyProofOptions): Promise<VerifyPr
   try {
     parsed = parseProof(await readFile(proof, "utf8"));
   } catch (err) {
-    return {
-      ...base,
-      ok: false,
-      files: 0,
-      doctor: "not-recorded",
-      failure: { kind: "proof", message: readReason(err) },
-    };
+    const failure: VerifyProofFailure = { kind: "proof", message: readReason(err) };
+    return { ...base, ok: false, files: 0, doctor: "not-recorded", failures: [failure], failure };
   }
 
-  const files = [...parsed.files].sort((a, b) => byCodePoint(a.path, b.path));
+  const checked = await verifyProofFiles(siteRoot, parsed.files);
+  const failures = checked.flatMap((file) => file.issues.map(failureOf));
   const doctor: VerifyProofDoctorState = parsed.doctor === undefined ? "not-recorded" : "not-run";
-  for (const entry of files) {
-    const state = await fileState(siteRoot, entry);
-    if (state !== "ok") {
-      return { ...base, ok: false, files: files.length, doctor, failure: { kind: "file", path: entry.path, state } };
-    }
+
+  if (failures.length > 0) {
+    return { ...base, ok: false, files: checked.length, doctor, failures, failure: failures[0]! };
+  }
+  if (options.doctor !== true) {
+    return { ...base, ok: true, files: checked.length, doctor, failures: [] };
   }
 
-  if (parsed.doctor === undefined || options.doctor !== true) {
-    return { ...base, ok: true, files: files.length, doctor };
+  if (parsed.doctor === undefined) {
+    const failure: VerifyProofFailure = {
+      kind: "doctor-unavailable",
+      reason: "unsupported",
+      message: "the proof records no doctor evidence to compare",
+    };
+    return { ...base, ok: false, files: checked.length, doctor: "unsupported", failures: [failure], failure };
+  }
+  if (parsed.doctor.findings === undefined) {
+    const failure: VerifyProofFailure = {
+      kind: "doctor-unavailable",
+      reason: "unsupported",
+      message: "the proof records only a doctor level, which the current diagnostics JSON cannot verify",
+    };
+    return { ...base, ok: false, files: checked.length, doctor: "unsupported", failures: [failure], failure };
   }
 
   const ran = runDoctor(siteRoot, options.doctorCommand ?? defaultDoctorCommand(), options.env ?? process.env);
   if ("error" in ran) {
-    return {
-      ...base,
-      ok: false,
-      files: files.length,
-      doctor: "unavailable",
-      failure: { kind: "doctor-unavailable", message: ran.error },
-    };
+    const failure: VerifyProofFailure = { kind: "doctor-unavailable", reason: "unavailable", message: ran.error };
+    return { ...base, ok: false, files: checked.length, doctor: "unavailable", failures: [failure], failure };
   }
-  if (ran.level !== parsed.doctor.level) {
-    return {
-      ...base,
-      ok: false,
-      files: files.length,
-      doctor: "mismatched",
-      failure: { kind: "doctor", expected: parsed.doctor.level, actual: ran.level },
+
+  const compared = compareDoctorFindings(parsed.doctor.findings, ran.findings);
+  if (!compared.matched) {
+    const failure: VerifyProofFailure = {
+      kind: "doctor",
+      recorded: compared.recorded,
+      actual: compared.actual,
+      difference: compared.difference ?? "its findings differ",
     };
+    return { ...base, ok: false, files: checked.length, doctor: "mismatched", failures: [failure], failure };
   }
-  return { ...base, ok: true, files: files.length, doctor: "matched" };
+  return { ...base, ok: true, files: checked.length, doctor: "matched", failures: [] };
 }
 
-/** One sentence a person can act on: what did not match, or that the proof holds. */
+/** One sentence a person can act on for one failed claim. */
+function failureMessage(failure: VerifyProofFailure, proof: string): string {
+  if (failure.kind === "proof") return `"${proof}" is not a valid proof: ${failure.message}.`;
+  if (failure.kind === "file") {
+    if (failure.state === "changed") return `"${failure.path}" changed after the proof.`;
+    if (failure.state === "missing") return `"${failure.path}" is missing: the proof records it after the edit.`;
+    return `"${failure.path}" is extra: the proof records it absent after the edit.`;
+  }
+  if (failure.kind === "escape") return `"${failure.path}" resolves outside the site root.`;
+  if (failure.kind === "span") {
+    const where = `"${failure.path}" span ${formatPatchSpan(failure.span)}`;
+    if (failure.state === "moved") {
+      const found = failure.found === undefined ? "another position" : formatPatchSpan(failure.found);
+      return `${where} moved: its text is now at ${found}.`;
+    }
+    if (failure.state === "range") return `${where} is outside the file.`;
+    return `${where} does not match its recorded hash.`;
+  }
+  if (failure.kind === "doctor") {
+    return `the doctor findings do not match the proof: ${failure.difference}.`;
+  }
+  return `could not verify the doctor: ${failure.message}.`;
+}
+
+/** One sentence a person can act on: every claim that did not match, or that the proof holds. */
 export function verifyProofMessage(result: VerifyProofResult): string {
-  const failure = result.failure;
-  if (failure !== undefined) {
-    if (failure.kind === "proof") return `"${result.proof}" is not a valid proof: ${failure.message}.`;
-    if (failure.kind === "file") {
-      if (failure.state === "changed") return `"${failure.path}" changed after the proof.`;
-      if (failure.state === "missing") return `"${failure.path}" is missing: the proof records it after the edit.`;
-      return `"${failure.path}" is extra: the proof records it absent after the edit.`;
-    }
-    if (failure.kind === "doctor") {
-      return `the doctor level is ${failure.actual ?? "none"}, not the recorded ${failure.expected ?? "none"}.`;
-    }
-    return `could not run the doctor: ${failure.message}.`;
+  if (result.failures.length > 0) {
+    return result.failures.map((failure) => failureMessage(failure, result.proof)).join(" ");
   }
 
   const count = `${result.files} ${result.files === 1 ? "file" : "files"}`;
   const verb = result.files === 1 ? "matches" : "match";
-  if (result.doctor === "matched") return `ok: ${count} ${verb} the proof; the doctor level matches.`;
+  if (result.doctor === "matched") return `ok: ${count} ${verb} the proof; the doctor findings match.`;
   if (result.doctor === "not-run") {
     return `ok: ${count} ${verb} the proof. The doctor check was not run; pass --doctor to rerun it.`;
   }
   return `ok: ${count} ${verb} the proof. The proof records no doctor level.`;
 }
 
-/** The check that failed: the proof file itself, a recorded file's hash, or the doctor level. */
-export type VerifyCheck = "proof" | "hash" | "doctor";
+/** The check that failed: the proof file, a file's hash, a recorded span, a real path, or the doctor evidence. */
+export type VerifyCheck = "proof" | "hash" | "span" | "path" | "doctor";
 
-/** One reason a proof did not verify: the failed check, its location, and the levels a doctor comparison had. */
+/** One reason a proof did not verify: the failed check, its location, and any span it named. */
 export interface VerifyDiagnostic {
   readonly code:
     | "verify.proof-invalid"
     | "verify.file.changed"
     | "verify.file.missing"
     | "verify.file.extra"
+    | "verify.path.escape"
+    | "verify.span.moved"
+    | "verify.span.hash"
+    | "verify.span.range"
     | "verify.doctor.mismatch"
+    | "verify.doctor.unsupported"
     | "verify.doctor.unavailable";
   readonly check: VerifyCheck;
   /** The failure sentence, the same one the text mode prints. */
   readonly message: string;
   /** The proof for a proof failure, else the site-relative file; null for a doctor failure. */
   readonly path: string | null;
+  /** The recorded span, for a span failure. */
+  readonly line?: number;
+  readonly column?: number;
+  readonly endLine?: number;
+  readonly endColumn?: number;
   /** The recorded doctor level for a mismatch, else null. */
   readonly expected: ProofLevel;
   /** The level the doctor reported for a mismatch, else null. */
@@ -354,54 +339,60 @@ export interface VerifyProofReport {
 }
 
 /** The file-state failure codes, one per {@link VerifyProofFileState}. */
-const FILE_CODE: Record<VerifyProofFileState, VerifyDiagnostic["code"]> = {
+const FILE_CODE: Record<VerifyProofFileState, "verify.file.changed" | "verify.file.missing" | "verify.file.extra"> = {
   changed: "verify.file.changed",
   missing: "verify.file.missing",
   extra: "verify.file.extra",
 };
 
+/** The span-state failure codes, one per {@link VerifyProofSpanState}. */
+const SPAN_CODE: Record<VerifyProofSpanState, "verify.span.moved" | "verify.span.hash" | "verify.span.range"> = {
+  moved: "verify.span.moved",
+  hash: "verify.span.hash",
+  range: "verify.span.range",
+};
+
 /** The failed check as data, with the sentence the text mode prints. */
 function diagnosticOf(failure: VerifyProofFailure, result: VerifyProofResult): VerifyDiagnostic {
-  const message = verifyProofMessage(result);
+  const message = failureMessage(failure, result.proof);
+  const base = { message, expected: null, actual: null } as const;
   if (failure.kind === "proof") {
-    return {
-      code: "verify.proof-invalid",
-      check: "proof",
-      message,
-      path: result.proof,
-      expected: null,
-      actual: null,
-    };
+    return { code: "verify.proof-invalid", check: "proof", path: result.proof, ...base };
   }
   if (failure.kind === "file") {
+    return { code: FILE_CODE[failure.state], check: "hash", path: failure.path, ...base };
+  }
+  if (failure.kind === "escape") {
+    return { code: "verify.path.escape", check: "path", path: failure.path, ...base };
+  }
+  if (failure.kind === "span") {
     return {
-      code: FILE_CODE[failure.state],
-      check: "hash",
-      message,
+      code: SPAN_CODE[failure.state],
+      check: "span",
       path: failure.path,
-      expected: null,
-      actual: null,
+      line: failure.span.line,
+      column: failure.span.column,
+      endLine: failure.span.endLine,
+      endColumn: failure.span.endColumn,
+      ...base,
     };
   }
   if (failure.kind === "doctor") {
-    return {
-      code: "verify.doctor.mismatch",
-      check: "doctor",
-      message,
-      path: null,
-      expected: failure.expected,
-      actual: failure.actual,
-    };
+    return { code: "verify.doctor.mismatch", check: "doctor", path: null, ...base };
   }
-  return { code: "verify.doctor.unavailable", check: "doctor", message, path: null, expected: null, actual: null };
+  return {
+    code: failure.reason === "unsupported" ? "verify.doctor.unsupported" : "verify.doctor.unavailable",
+    check: "doctor",
+    path: null,
+    ...base,
+  };
 }
 
 /**
  * The machine-readable result of `edit verify`. `exitCode` is the code the command returns, so the
- * report and the exit status always agree; a failure names the check that failed and where it is.
+ * report and the exit status always agree; every failure names the check that failed and where it is.
  */
 export function formatVerifyProofJson(result: VerifyProofResult, exitCode: number): string {
-  const failure = result.failure;
   const report: VerifyProofReport = {
     version: 1,
     command: "edit.verify",
@@ -412,7 +403,7 @@ export function formatVerifyProofJson(result: VerifyProofResult, exitCode: numbe
     siteRoot: result.siteRoot,
     files: result.files,
     doctor: result.doctor,
-    diagnostics: failure === undefined ? [] : [diagnosticOf(failure, result)],
+    diagnostics: result.failures.map((failure) => diagnosticOf(failure, result)),
   };
   return `${JSON.stringify(report, null, 2)}\n`;
 }
