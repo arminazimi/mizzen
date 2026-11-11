@@ -2,6 +2,9 @@ import { posix } from "node:path";
 import { discoverVersions, type VersionOptions } from "../content/versions.ts";
 import { permalink } from "../content/permalink.ts";
 import type { Page, PageStatus } from "../contracts/content.ts";
+import type { TaskKind } from "../contracts/context-request.ts";
+import type { ReviewCoverage } from "../model/reviewers.ts";
+import { DEFAULT_REVIEW_DUE_DAYS } from "../model/trust-score.ts";
 
 /**
  * The weight of one query-term occurrence in each part of a page, and of each task signal relative
@@ -26,13 +29,21 @@ export interface RankWeights {
   readonly trust: number;
   /** How much a page gains for being required by a page the query matches. */
   readonly dependency: number;
+  /** How much measured example evidence may move a page: a passing set gains, any failure loses. */
+  readonly examples: number;
+  /** How much measured drift evidence may move a page: a clean count gains, any finding loses. */
+  readonly drift: number;
+  /** How much review freshness and coverage may move a page, within {@link DEFAULT_REVIEW_DUE_DAYS} days. */
+  readonly review: number;
 }
 
 /**
  * The documented default weights: a title term is worth eight body terms, a heading term four. The
- * task signals are fractions of a page's lexical relevance; by default the three that can demote a
- * page (`version`, `locale`, `trust`) add up to less than one, so a matching page never scores
- * below zero.
+ * task signals are fractions of a page's lexical relevance; the three legacy demoting signals
+ * (`version`, `locale`, `trust`) add up to less than one, so a page without measured trust evidence
+ * never scores below zero. Measured example, drift, and review evidence adds to that demotion, and
+ * {@link rankPages} scales all negative contributions together when their sum would pass the page's
+ * basis, so every matching page still scores at least zero.
  */
 export const defaultRankWeights: RankWeights = Object.freeze({
   title: 8,
@@ -44,7 +55,68 @@ export const defaultRankWeights: RankWeights = Object.freeze({
   locale: 0.15,
   trust: 0.5,
   dependency: 0.4,
+  examples: 0.2,
+  drift: 0.2,
+  review: 0.15,
 });
+
+/**
+ * The documented rank profile of each task kind, merged over {@link defaultRankWeights}. A task kind
+ * changes ranking only through these weights: no branch in the scorer reads the kind itself.
+ *
+ * - `explain` favours navigation and inbound links, and keeps a balanced trust view.
+ * - `implement` weights runnable examples most, because an implementation task needs code that runs.
+ * - `review` weights review freshness and coverage most, then status trust and drift.
+ * - `debug` weights drift findings most, because diagnostics are what a debugging task reads.
+ * - `migrate` weights the requested version and status trust, so stale or deprecated pages lose.
+ * - `other` is the neutral profile: the default weights, unchanged.
+ */
+export const taskRankProfiles: Readonly<Record<TaskKind, Partial<RankWeights>>> = Object.freeze({
+  explain: Object.freeze({ links: 0.6, navigation: 0.4, trust: 0.45, examples: 0.2, drift: 0.2, review: 0.25 }),
+  implement: Object.freeze({ trust: 0.35, examples: 0.5, drift: 0.15, review: 0.1 }),
+  review: Object.freeze({ trust: 0.6, examples: 0.25, drift: 0.25, review: 0.5 }),
+  debug: Object.freeze({ trust: 0.35, examples: 0.25, drift: 0.5, review: 0.1 }),
+  migrate: Object.freeze({ version: 0.5, trust: 0.6, examples: 0.1, drift: 0.2, review: 0.15 }),
+  other: Object.freeze({}),
+});
+
+/** Measured example counts for one page, as `examples.json` records them. */
+export interface RankExampleEvidence {
+  /** Every `test` fence on the page, including ones that were not run. */
+  readonly total: number;
+  /** The examples that passed. */
+  readonly passed: number;
+  /** The examples that failed. */
+  readonly failed: number;
+}
+
+/**
+ * One page's same-build trust evidence. A field that is absent was not measured and is ranked as
+ * missing; `"unknown"` records a source that could not answer; `examples: "none"` records a page
+ * that declares no runnable examples and is neutral, as in the trust score.
+ */
+export interface RankTrustPage {
+  /** Measured example counts, `none` when no example is declared, or `unknown` when results are unavailable. */
+  readonly examples?: RankExampleEvidence | "none" | "unknown";
+  /** The drift finding count; `0` is clean, above zero has findings, and `unknown` was not measured. */
+  readonly drift?: number | "unknown";
+  /** Whole days since the page was last reviewed, or `unknown` when no readable date exists. */
+  readonly reviewAgeDays?: number | "unknown";
+  /** What git knows about the review; `untracked` or `unavailable` cannot confirm a supplied age. */
+  readonly reviewCoverage?: ReviewCoverage | "unknown";
+}
+
+/**
+ * Measured trust evidence, keyed by page URL. It is used only when its `build` matches
+ * {@link RankOptions.build}; evidence from another or an unknown build is ignored, never read as
+ * verified.
+ */
+export interface RankTrustEvidence {
+  /** The identity of the documentation build the evidence was measured in. */
+  readonly build: string;
+  /** One entry per page URL, using the same URLs as {@link Page.url}, including the site `base`. */
+  readonly pages: Readonly<Record<string, RankTrustPage>>;
+}
 
 /** Options for {@link rankPages}. */
 export interface RankOptions {
@@ -65,10 +137,35 @@ export interface RankOptions {
   readonly version?: string;
   /** How version folders are detected; see {@link discoverVersions}. */
   readonly versionOptions?: VersionOptions;
+  /**
+   * The kind of work the agent is doing. Its profile is {@link taskRankProfiles}; an absent or
+   * unknown kind uses the default weights. The kind never changes anything except these weights.
+   */
+  readonly task?: TaskKind;
+  /**
+   * Identity of the build `pages` belong to. {@link RankOptions.trust} is read only when this is a
+   * non-empty string equal to its `build`; otherwise the evidence is ignored.
+   */
+  readonly build?: string;
+  /**
+   * Measured example, drift, and review evidence from the same build. Absent means no measured
+   * evidence, and the ranking is exactly the one without this option.
+   */
+  readonly trust?: RankTrustEvidence;
 }
 
 /** The signal that contributed to a page's score. */
-export type RankFactor = "lexical" | "links" | "navigation" | "version" | "locale" | "trust" | "dependency";
+export type RankFactor =
+  | "lexical"
+  | "links"
+  | "navigation"
+  | "version"
+  | "locale"
+  | "trust"
+  | "examples"
+  | "drift"
+  | "review"
+  | "dependency";
 
 /**
  * One machine-readable selection reason: a factor, the evidence that produced it, and what it added
@@ -81,7 +178,12 @@ export interface RankReason {
   /**
    * Stable evidence for the contribution: `title:<term>`, `headings:<term>`, `body:<term>`,
    * `inbound:<count>`, `focus:<url>`, `version:<name>`, `locale:<tag>`, `status:<value>`, `generated`,
-   * `duplicate:<canonical url>`, `canonical`, or `dependency:<url>`.
+   * `duplicate:<canonical url>`, `canonical`, `examples:passed:<passed>/<total>`,
+   * `examples:failed:<failed>/<total>`, `examples:none`, `examples:missing`, `examples:unknown`,
+   * `examples:invalid`, `drift:clean`, `drift:<findings>`, `drift:missing`, `drift:unknown`,
+   * `drift:invalid`, `review:recent:<days>`, `review:overdue:<days>`,
+   * `review:coverage:<coverage>`, `review:missing`, `review:unknown`, `review:invalid`, or
+   * `dependency:<url>`.
    */
   readonly code: string;
   /** The amount this reason added to {@link RankedPage.score}; negative when it demoted the page. */
@@ -365,9 +467,18 @@ function pageOfKey(key: string, keys: readonly string[], pages: ReadonlyMap<stri
   return matches.length === 1 ? pages.get(matches[0]!) : undefined;
 }
 
-/** Resolves the weights, ignoring invalid overrides rather than letting them break the order. */
-function resolveWeights(weights: Partial<RankWeights> | undefined): RankWeights {
+/** The profile of a task kind, or no overrides for an absent or unknown kind. */
+function profileOf(task: TaskKind | undefined): Partial<RankWeights> {
+  if (task === undefined || !Object.hasOwn(taskRankProfiles, task)) return {};
+  return taskRankProfiles[task];
+}
+
+/** Resolves the weights, ignoring invalid overrides and unknown task kinds rather than breaking the order. */
+function resolveWeights(task: TaskKind | undefined, weights: Partial<RankWeights> | undefined): RankWeights {
   const resolved: Record<keyof RankWeights, number> = { ...defaultRankWeights };
+  for (const [key, value] of Object.entries(profileOf(task)) as (readonly [keyof RankWeights, number])[]) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) resolved[key] = value;
+  }
   if (weights !== undefined) {
     for (const key of Object.keys(resolved) as (keyof RankWeights)[]) {
       const value = weights[key];
@@ -450,6 +561,91 @@ function trustEvidenceOf(page: Page, duplicateOf: ReadonlyMap<Page, string>): re
   return evidence;
 }
 
+/** True for a plain object, which is what a decoded JSON or YAML mapping becomes. */
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A whole, non-negative count; an absent, fractional, negative, or non-finite value is not measured. */
+function measuredCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * The measured evidence a page carries, as a stable code and a bounded fraction of the signal's
+ * weight. A positive fraction supports the page, a negative one demotes it, and a known absence
+ * (`examples: "none"`) is neutral. Missing and malformed evidence is negative but weaker than a
+ * measured failure, so an unmeasured page never borrows a healthy page's rank.
+ */
+interface RankSignal {
+  readonly code: string;
+  readonly fraction: number;
+}
+
+/** The demotion of a signal that was not measured: half the signal's weight. */
+const MISSING_FRACTION = -0.5;
+
+/** Example evidence: any failure loses the full weight, a passing or absent set is positive or neutral. */
+function examplesSignal(value: unknown): RankSignal {
+  if (value === "none") return { code: "examples:none", fraction: 0 };
+  if (value === undefined) return { code: "examples:missing", fraction: MISSING_FRACTION };
+  if (value === "unknown") return { code: "examples:unknown", fraction: MISSING_FRACTION };
+  if (!isMapping(value)) return { code: "examples:invalid", fraction: MISSING_FRACTION };
+  const total = measuredCount(value.total);
+  const passed = measuredCount(value.passed);
+  const failed = measuredCount(value.failed);
+  if (total === undefined || passed === undefined || failed === undefined || passed + failed > total) {
+    return { code: "examples:invalid", fraction: MISSING_FRACTION };
+  }
+  if (failed > 0) return { code: `examples:failed:${failed}/${total}`, fraction: -1 };
+  if (total === 0) return { code: "examples:none", fraction: 0 };
+  return { code: `examples:passed:${passed}/${total}`, fraction: 1 };
+}
+
+/** Drift evidence: a clean count gains, any finding loses, and an unchecked page is missing. */
+function driftSignal(value: unknown): RankSignal {
+  if (value === undefined) return { code: "drift:missing", fraction: MISSING_FRACTION };
+  if (value === "unknown") return { code: "drift:unknown", fraction: MISSING_FRACTION };
+  const findings = measuredCount(value);
+  if (findings === undefined) return { code: "drift:invalid", fraction: MISSING_FRACTION };
+  return findings === 0 ? { code: "drift:clean", fraction: 1 } : { code: `drift:${findings}`, fraction: -1 };
+}
+
+/** Review evidence: a fresh recorded review gains; overdue, uncovered, missing, or invalid evidence loses. */
+function reviewSignal(ageValue: unknown, coverageValue: unknown): RankSignal {
+  if (ageValue === undefined) return { code: "review:missing", fraction: MISSING_FRACTION };
+  if (ageValue === "unknown") return { code: "review:unknown", fraction: MISSING_FRACTION };
+  const age = measuredCount(ageValue);
+  if (age === undefined) return { code: "review:invalid", fraction: MISSING_FRACTION };
+  if (
+    coverageValue !== undefined &&
+    coverageValue !== "recorded" &&
+    coverageValue !== "unknown" &&
+    coverageValue !== "untracked" &&
+    coverageValue !== "unavailable"
+  ) {
+    return { code: "review:invalid", fraction: MISSING_FRACTION };
+  }
+  if (coverageValue === "untracked" || coverageValue === "unavailable") {
+    return { code: `review:coverage:${coverageValue}`, fraction: -1 };
+  }
+  if (age > DEFAULT_REVIEW_DUE_DAYS) return { code: `review:overdue:${age}`, fraction: -1 };
+  return { code: `review:recent:${age}`, fraction: 1 };
+}
+
+/**
+ * The trust entries to read, or `undefined` when the evidence cannot belong to these pages: no
+ * evidence, an absent or empty build, or evidence measured in another build.
+ */
+function trustPagesOf(options: RankOptions): Readonly<Record<string, unknown>> | undefined {
+  const trust: unknown = options.trust;
+  if (!isMapping(trust)) return undefined;
+  const build = typeof options.build === "string" ? options.build.trim() : "";
+  const evidenceBuild = typeof trust.build === "string" ? trust.build.trim() : "";
+  if (build === "" || evidenceBuild === "" || evidenceBuild !== build) return undefined;
+  return isMapping(trust.pages) ? trust.pages : undefined;
+}
+
 /** A group of pages that represent one document, and the predicate that marks its canonical member. */
 interface DuplicateGroup {
   readonly members: readonly Page[];
@@ -516,16 +712,33 @@ function duplicateGroups(
  *   its reason, and the canonical page gets a zero-contribution `canonical` reason, so a duplicate
  *   never displaces its canonical source silently. A dependency-only page is adjusted against its
  *   dependency score.
+ * - **Task**: the kind named by `task` merges its documented profile over the default weights (see
+ *   {@link taskRankProfiles}); it does nothing else. `implement` weights runnable examples,
+ *   `debug` drift findings, `migrate` version and status trust, `review` review freshness and
+ *   coverage, and `explain` navigation and links. An absent or unknown kind keeps the defaults.
+ * - **Examples**, **Drift**, **Review**: with same-build `trust` evidence, each measured signal adds
+ *   or removes its weight times a fraction: a passing example set, a clean drift count, and a fresh
+ *   recorded review gain; any failing example, drift finding, uncovered or overdue review loses the
+ *   full weight; missing, unknown, or malformed evidence loses half, so it is never read as clean.
+ *   `examples: "none"` is neutral, because the page declares nothing to run. The evidence is read
+ *   only when its `build` equals `build`; an absent or different build is ignored entirely.
  * - **Dependency**: a page that a matching page links to and that matches no query term gains
  *   `dependency ×` the strongest linking page's relevance. This keeps required supporting pages
- *   (a requirements page, say) next to the primary source the task names; the version, locale, and
- *   trust signals then apply to that dependency score as they do to a lexical score.
+ *   (a requirements page, say) next to the primary source the task names; the version, locale,
+ *   trust, example, drift, and review signals then apply to that dependency score as they do to a
+ *   lexical score.
+ *
+ * Negative contributions are scaled by one common factor when their sum would pass the page's
+ * basis, so the score of a matching page is never below zero and each reason's contribution still
+ * adds up exactly to the score. The scale depends only on the same weights and evidence, never on
+ * input order.
  *
  * Duplicates are versioned pages with the same path inside their version, and pages sharing a
  * non-empty `translation_key` when `lang` is requested; the canonical member is the one in the
  * requested version or language, else the lowest URL. The order is deterministic: score descending,
  * then URL, then source file by code point. Equivalent inputs give an identical ranking and
- * identical reasons, and pages are not mutated.
+ * identical reasons, and pages are not mutated. A missing, malformed, or cross-build trust entry
+ * cannot add a positive evidence reason, so it can never be mistaken for verified evidence.
  *
  * Text is tokenised after {@link normalizeRankText}: Persian and Arabic letter variants, Arabic
  * diacritics, tatweel, and zero-width characters (including ZWNJ) do not split a word, and Latin
@@ -539,7 +752,8 @@ function duplicateGroups(
  */
 export function rankPages(pages: readonly Page[], query: string, options: RankOptions = {}): readonly RankedPage[] {
   const base = normalizeBase(options.base ?? "");
-  const weights = resolveWeights(options.weights);
+  const weights = resolveWeights(options.task, options.weights);
+  const trustPages = trustPagesOf(options);
   const terms = queryTerms(query);
   const requestedLang = options.lang === undefined ? undefined : normalizeTag(options.lang);
   const requestedVersion = options.version?.trim();
@@ -719,12 +933,36 @@ export function rankPages(pages: readonly Page[], query: string, options: RankOp
       if (canonical.has(page)) reasons.push({ factor: "trust", code: "canonical", contribution: 0 });
     }
 
+    if (basis > 0 && trustPages !== undefined) {
+      const raw = Object.hasOwn(trustPages, page.url) ? trustPages[page.url] : undefined;
+      const measured = isMapping(raw) ? raw : undefined;
+      const signals: readonly (readonly ["examples" | "drift" | "review", RankSignal])[] = [
+        ["examples", examplesSignal(measured?.examples)],
+        ["drift", driftSignal(measured?.drift)],
+        ["review", reviewSignal(measured?.reviewAgeDays, measured?.reviewCoverage)],
+      ];
+      for (const [factor, signal] of signals) {
+        reasons.push({ factor, code: signal.code, contribution: basis * weights[factor] * signal.fraction });
+      }
+    }
+
     if (relevance === 0 && required !== undefined) {
       reasons.push({
         factor: "dependency",
         code: `dependency:${required.from}`,
         contribution: dependencyBase,
       });
+    }
+
+    // Keep a matching page from scoring below zero: one common factor bounds every negative contribution.
+    let penalty = 0;
+    for (const reason of reasons) if (reason.contribution < 0) penalty -= reason.contribution;
+    if (penalty > basis) {
+      const scale = basis / penalty;
+      for (let index = 0; index < reasons.length; index += 1) {
+        const reason = reasons[index]!;
+        if (reason.contribution < 0) reasons[index] = { ...reason, contribution: reason.contribution * scale };
+      }
     }
 
     let score = 0;
