@@ -8,3 +8,4 @@ export type { Output, OutputContext, OutputFile } from "./output.ts";
 export type { Chrome, ChromeProps, Component, ComponentProps, Head, Island, Layout, LayoutProps, LinkTag, MetaTag, RenderNode } from "./render.ts";
 export type { CodeConfig, MaybePromise, Plugin, PluginHooks } from "./plugin.ts";
 export type { ContextConstraints, ContextRequest, ContextRequestProblem, ContextRequestResult, EvidenceRequirement, TaskIntent, TaskKind, TokenBudget, VersionRange } from "./context-request.ts";
+export type { EditAuditCheck, EditAuditCheckStatus, EditAuditOutcome, EditAuditPlan, EditAuditRecord, EditAuditSpan, EditAuditVerification, EditAuditVersion } from "./edit-audit.ts";

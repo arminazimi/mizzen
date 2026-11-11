@@ -10,8 +10,9 @@
  * leaves it byte-identical.
  *
  * After a successful write the command records an N29 proof (`src/edits/proof.ts`) with the SHA-256
- * of the file before and after, at `--proof` or `<patch>.proof.json`. A dry run prints the unified
- * diff and writes neither the source nor the proof.
+ * of the file before and after, at `--proof` or `<patch>.proof.json`, and appends one provenance
+ * record to `<patch>.audit.jsonl` (`src/edits/audit.ts`). A dry run prints the unified
+ * diff and writes neither the source, the proof, nor the ledger.
  *
  * Exit codes follow the rest of the CLI: `0` applied (or a dry run that would apply), `1` a refused
  * patch or a refused path (the file is unchanged), `2` a usage problem, such as a patch that is
@@ -20,6 +21,7 @@
  */
 import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { appendEditAudit } from "../edits/audit.ts";
 import { applyPatch, hashSource, PatchError, type Patch, type PatchSpan } from "../edits/patch.ts";
 import { writeProof } from "../edits/proof.ts";
 
@@ -323,6 +325,34 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
     throw new EditApplyError(
       "edit.write-failed",
       `${target.record}: the file was written, but the proof at "${proof}" was not: ${reason}.`,
+      false,
+    );
+  }
+
+  // One ledger line per applied plan; it is written after the source, like the proof above.
+  const ledger = `${resolve(options.patch)}.audit.jsonl`;
+  try {
+    await appendEditAudit({
+      siteRoot,
+      ledger,
+      outcome: "applied",
+      plan: {
+        file: target.record,
+        span: {
+          line: patch.span.line,
+          column: patch.span.column,
+          endLine: patch.span.endLine,
+          endColumn: patch.span.endColumn,
+        },
+        beforeHash,
+        afterHash,
+      },
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new EditApplyError(
+      "edit.write-failed",
+      `${target.record}: the file was written, but the audit ledger at "${ledger}" was not: ${reason}.`,
       false,
     );
   }
