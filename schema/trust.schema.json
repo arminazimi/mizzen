@@ -217,6 +217,7 @@
             "drift.unknown",
             "examples.conflict",
             "examples.failed",
+            "examples.incomplete",
             "examples.none",
             "examples.passed",
             "examples.unknown",
@@ -345,13 +346,14 @@
       ],
       "properties": {
         "code": {
-          "description": "A stable identifier for one finding. `examples.unknown` is the output's own code: the page declares examples but their result is unavailable, so the page cannot be verified.",
+          "description": "A stable identifier for one finding. `examples.unknown` is the output's own code: the page declares examples but their result is unavailable, so the page cannot be verified. `examples.incomplete` means the declared examples' outcomes do not account for every example, so the page cannot be verified on their strength.",
           "enum": [
             "drift.clean",
             "drift.findings",
             "drift.unknown",
             "examples.conflict",
             "examples.failed",
+            "examples.incomplete",
             "examples.none",
             "examples.passed",
             "examples.unknown",

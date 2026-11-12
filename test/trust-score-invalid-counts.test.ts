@@ -154,7 +154,7 @@ test("valid counts, threshold boundaries, and unknown ages keep their current re
   const healthy: TrustExamples = { total: 3, passed: 3, failed: 0 };
 
   // A whole valid count at the safe-integer boundary is still accepted evidence.
-  const huge = trustScore(withExamples({ total: Number.MAX_SAFE_INTEGER, passed: 0, failed: 0 }));
+  const huge = trustScore(withExamples({ total: Number.MAX_SAFE_INTEGER, passed: Number.MAX_SAFE_INTEGER, failed: 0 }));
   assert.equal(huge.factors[0]!.state, "positive");
   assert.equal(huge.factors[0]!.code, "examples.passed");
 

@@ -11,7 +11,9 @@
  *
  * - **Examples.** A failing example makes a page `at-risk`: passing examples can never outweigh a
  *   failure, and no option can raise that threshold above zero, because a page whose recorded output
- *   does not run is not trustworthy. A page that declares no runnable examples is not penalized.
+ *   does not run is not trustworthy. A declared set whose outcomes do not account for every example is
+ *   incomplete evidence, also `at-risk`: the examples that never ran cannot pass. A page that declares
+ *   no runnable examples is not penalized.
  * - **Drift.** Any drift finding makes a page `at-risk`. A missing drift count is not the same as zero:
  *   an unchecked page cannot be confirmed to match the code, so it is `at-risk` too.
  * - **Review age.** More than {@link DEFAULT_REVIEW_DUE_DAYS} days (180) since the last review makes a
@@ -111,6 +113,7 @@ export type TrustReasonCode =
   | "examples.none"
   | "examples.passed"
   | "examples.failed"
+  | "examples.incomplete"
   | "examples.conflict"
   | "drift.clean"
   | "drift.findings"
@@ -252,6 +255,19 @@ function exampleVerdict(examples: TrustExamples | undefined): SignalVerdict {
       state: "negative",
       value: failed,
       reason: { code: "examples.failed", message: `${failed} of ${total} example${plural(total)} fail.` },
+    };
+  }
+  // A declared set with unaccounted outcomes has examples that never ran: the missing outcomes are
+  // evidence the page does not have, so it can never be verified on the strength of its examples.
+  if (passed + failed < total) {
+    return {
+      level: "at-risk",
+      state: "missing",
+      value: "unknown",
+      reason: {
+        code: "examples.incomplete",
+        message: `Only ${passed + failed} of ${total} example${plural(total)} ran, so the page cannot be verified.`,
+      },
     };
   }
   if (total > 0) {
