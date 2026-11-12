@@ -298,3 +298,70 @@ test("after a timeout and a recovery the ledger keeps every record whole and exa
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("an aged lock held by a live append in this process is never stolen, and concurrent appends keep every record", async () => {
+  const root = scratch();
+  const ledger = join(root, "ledger.jsonl");
+  const lock = `${ledger}.lock`;
+  try {
+    await appendEditAudit({ ...input(), siteRoot: root, ledger });
+    const before = readFileSync(ledger, "utf8");
+
+    // The append whose lock this is is still running in this process, just slower than the stale age.
+    const held = await auditLockInternals.acquireLedgerLock(lock, 5_000);
+    const past = oneHourAgo();
+    utimesSync(lock, past, past);
+
+    const probe = await auditLockInternals.probeStaleLock(lock);
+    assert.ok(probe !== undefined);
+    assert.equal(probe.stale, false, "the token this process is actively holding is live, whatever its age");
+    assert.equal(await auditLockInternals.breakStaleLock(lock), false, "a competing breaker cannot remove it");
+    assert.equal(readFileSync(lock, "utf8"), held.token, "the live append's lock is still in place");
+
+    // Two appends racing in this process must wait, not rename over the live holder, and lose nothing.
+    const results = await Promise.allSettled([
+      appendEditAudit({ ...input({ plan: plan("docs/live-a.md") }), siteRoot: root, ledger, lockTimeoutMs: 100 }),
+      appendEditAudit({ ...input({ plan: plan("docs/live-b.md") }), siteRoot: root, ledger, lockTimeoutMs: 100 }),
+    ]);
+    for (const result of results) {
+      assert.equal(result.status, "rejected");
+      assert.ok(result.status === "rejected" && result.reason instanceof EditAuditError && result.reason.code === "ledger-locked");
+    }
+    assert.equal(readFileSync(ledger, "utf8"), before, "the blocked appends wrote nothing");
+    assert.equal(readFileSync(lock, "utf8"), held.token, "the timed-out appends left the live lock alone");
+
+    await auditLockInternals.releaseLedgerLock(held);
+    await Promise.all([
+      appendEditAudit({ ...input({ plan: plan("docs/live-a.md") }), siteRoot: root, ledger }),
+      appendEditAudit({ ...input({ plan: plan("docs/live-b.md") }), siteRoot: root, ledger }),
+    ]);
+    const lines = completeLines(ledger);
+    assert.equal(lines.length, 3, "both racing appends landed once beside the existing record");
+    assert.equal(new Set(lines).size, 3, "no record was overwritten or duplicated");
+    assert.deepEqual((await verifyEditAuditLedger(ledger)).issues, []);
+    assert.equal(existsSync(lock), false, "no lock is left behind");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an aged token naming this process but no longer held is recovered, not trusted as live", async () => {
+  const root = scratch();
+  const ledger = join(root, "ledger.jsonl");
+  const lock = `${ledger}.lock`;
+  try {
+    writeFileSync(lock, `${process.pid} 999999`, "utf8");
+    const past = oneHourAgo();
+    utimesSync(lock, past, past);
+
+    const probe = await auditLockInternals.probeStaleLock(lock);
+    assert.ok(probe !== undefined);
+    assert.equal(probe.stale, true, "an inactive token with this process's PID is still recoverable");
+
+    await appendEditAudit({ ...input(), siteRoot: root, ledger, lockTimeoutMs: 5_000 });
+    assert.equal(completeLines(ledger).length, 1, "the append recovered the abandoned token and wrote one record");
+    assert.equal(existsSync(lock), false, "the recovered lock is gone after the append");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

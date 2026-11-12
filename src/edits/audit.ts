@@ -468,6 +468,9 @@ const LOCK_POLL_MS = 5;
 /** Distinguishes two appends in this process, so releasing one never removes the other's lock. */
 let lockSequence = 0;
 
+/** Tokens of the locks and recovery guards this process is holding right now. */
+const activeTokens = new Set<string>();
+
 /** One lock this process holds: its path and the token written into it. */
 interface HeldLock {
   readonly path: string;
@@ -488,16 +491,18 @@ function processAlive(pid: number): boolean {
 type LockOwnership = "live" | "dead" | "unowned";
 
 /**
- * Classify a lock token by the process it names. A token that is missing, malformed, or names this
- * process is `unowned`: only {@link STALE_LOCK_MS} makes it recoverable, so a lock still being
- * created is never grabbed mid-write. A PID reused by an unrelated live process can only make a
- * lock look `live` — the check fails closed, refusing to steal, and the waiting writer times out
- * with `ledger-locked` instead of losing records.
+ * Classify a lock token by the process it names. A token this process is actively holding is
+ * `live`, so a concurrent append here is never mistaken for an abandoned one; an old token naming
+ * this process but no longer held is `unowned`, so it stays recoverable after
+ * {@link STALE_LOCK_MS}. A token that is missing or malformed is also `unowned`. A PID reused by
+ * an unrelated live process can only make a lock look `live` — the check fails closed, refusing to
+ * steal, and the waiting writer times out with `ledger-locked` instead of losing records.
  */
 function lockOwnership(token: string | undefined): LockOwnership {
   if (token === undefined) return "unowned";
   const pid = Number.parseInt(token.split(/\s+/)[0] ?? "", 10);
-  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return "unowned";
+  if (!Number.isInteger(pid) || pid <= 0) return "unowned";
+  if (pid === process.pid) return activeTokens.has(token) ? "live" : "unowned";
   return processAlive(pid) ? "live" : "dead";
 }
 
@@ -568,12 +573,14 @@ export async function probeStaleLock(lock: string): Promise<StaleLockProbe | und
  * The guard that serializes stale-lock recovery. It is held for one stat and one unlink, so a
  * missing guard is retried rather than recovered; only one left by a dead breaker is removed.
  */
-async function acquireBreakGuard(lock: string): Promise<string | undefined> {
+async function acquireBreakGuard(lock: string): Promise<HeldLock | undefined> {
   const guard = `${lock}.recover`;
+  const token = `${process.pid} ${++lockSequence}`;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      await writeFile(guard, `${process.pid} ${++lockSequence}`, { encoding: "utf8", flag: "wx" });
-      return guard;
+      await writeFile(guard, token, { encoding: "utf8", flag: "wx" });
+      activeTokens.add(token);
+      return { path: guard, token };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
         throw new EditAuditError(
@@ -621,7 +628,8 @@ export async function breakStaleLock(lock: string, probe?: StaleLockProbe): Prom
     await rm(lock, { force: true });
     return true;
   } finally {
-    await rm(guard, { force: true }).catch(() => undefined);
+    activeTokens.delete(guard.token);
+    await rm(guard.path, { force: true }).catch(() => undefined);
   }
 }
 
@@ -632,6 +640,7 @@ async function acquireLedgerLock(lock: string, waitMs: number): Promise<HeldLock
   for (;;) {
     try {
       await writeFile(lock, token, { encoding: "utf8", flag: "wx" });
+      activeTokens.add(token);
       return { path: lock, token };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
@@ -664,6 +673,8 @@ async function releaseLedgerLock(held: HeldLock): Promise<void> {
     if ((await readFile(held.path, "utf8")) === held.token) await rm(held.path, { force: true });
   } catch {
     /* A missing lock is already released. */
+  } finally {
+    activeTokens.delete(held.token);
   }
 }
 
