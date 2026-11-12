@@ -1,6 +1,5 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Diagnostic, SourcePos } from "../contracts/index.ts";
 import { parseFrontMatter } from "./frontmatter.ts";
 
@@ -13,8 +12,10 @@ import { parseFrontMatter } from "./frontmatter.ts";
  *   `::include[snippets/warning.md]` and `::include[snippets/warning.md]{lines=2-10}`
  *   `::include{path="snippets/warning.md" lines="2-10"}`
  *
- * The path is relative to the file that holds the directive and may never leave the source folder. The file's front
- * matter is stripped, `lines` keeps a 1-based inclusive range of what remains, and the text is spliced in place.
+ * The path is relative to the file that holds the directive and may never leave the source folder — not lexically
+ * and not through a symbolic link: the source root and every target are resolved to real paths before anything is
+ * read, and a target whose real path leaves the real source root is refused. The file's front matter is stripped,
+ * `lines` keeps a 1-based inclusive range of what remains, and the text is spliced in place.
  * Includes inside an included file are expanded too, with that file's folder as the base, up to `maxDepth`.
  * A line inside a fenced code block is text, never a directive.
  *
@@ -22,7 +23,8 @@ import { parseFrontMatter } from "./frontmatter.ts";
  * only until the first include expands, because a snippet adds or removes lines. Diagnostics name the file that
  * holds the directive and its line there — an included file for a nested include, the page for a top-level one —
  * while `data-src` on rendered blocks still counts lines in the page. That is as far as a splice can map without
- * changing the contract's one-file `SourcePos`.
+ * changing the contract's one-file `SourcePos`. Paths shown in diagnostics and dependency records stay
+ * source-relative as spelled, even when the bytes came through a symlink; only cycle keys are canonical.
  */
 
 /** What {@link expandIncludes} needs to expand one body. */
@@ -79,7 +81,7 @@ const DEFAULT_MAX_DEPTH = 10;
 
 /** A file already being expanded, so a cycle names the whole chain. */
 interface Frame {
-  /** Absolute path, the key a cycle is found by. */
+  /** Canonical real path, the key a cycle is found by; a symlink alias cannot miss it. */
   readonly key: string;
   /** Path shown in messages. */
   readonly display: string;
@@ -88,6 +90,8 @@ interface Frame {
 /** What every level of the expansion shares. */
 interface Scope {
   readonly sourceDir: string;
+  /** Real path of {@link Scope.sourceDir}; every include's real path must stay inside it. */
+  readonly realSourceDir: string;
   readonly maxDepth: number;
   /** Prefix that turns a source-relative path into the display path; `""` when the two are the same. */
   readonly prefix: string;
@@ -177,9 +181,53 @@ function displayOf(scope: Scope, path: string): string {
   return scope.prefix + path;
 }
 
-/** The absolute path a cycle is keyed by, `/`-separated so the key is stable. */
-function keyOf(sourceDir: string, path: string): string {
-  return resolve(sourceDir, path).split(sep).join("/");
+/** True when `against`, a `relative()` result against a root, leaves that root. */
+function escapes(against: string): boolean {
+  return against === "" || against === ".." || against.startsWith(`..${sep}`) || isAbsolute(against);
+}
+
+/** The real path {@link canonicalize} answers with, plus whether the path itself exists. */
+interface Canonical {
+  /** Real path, with symbolic links resolved. */
+  readonly real: string;
+  /** False when the path does not exist, or when the filesystem could not be asked at all. */
+  readonly exists: boolean;
+}
+
+/**
+ * The real path of an absolute `path`, resolving every symbolic link on it, which is what makes the source
+ * boundary hold for the file that would actually be read rather than for the spelling of the directive.
+ *
+ * Components that do not exist yet are re-joined onto the real path of the nearest ancestor that does, so a
+ * missing file behind a symlink is still located where its link points. A lookup that fails for another reason
+ * (a loop, a permission the operating system refuses) answers with the lexical path and `exists: false`; the read
+ * that follows then reports the operating system's own error, exactly as it did before, and cannot succeed
+ * either, because reading needs the same permission on every component.
+ */
+async function canonicalize(path: string): Promise<Canonical> {
+  const missing: string[] = [];
+  let current = path;
+  for (;;) {
+    try {
+      const real = await realpath(current);
+      if (missing.length === 0) return { real, exists: true };
+      const rest = missing.slice().reverse();
+      return { real: resolve(real, ...rest), exists: false };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const parent = dirname(current);
+      if ((code !== "ENOENT" && code !== "ENOTDIR" && code !== "ELOOP") || parent === current) {
+        return { real: path, exists: false };
+      }
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/** The real path a cycle is keyed by, `/`-separated so the key is stable. */
+function keyOf(real: string): string {
+  return real.split(sep).join("/");
 }
 
 /** The text of an included file after its front matter, sliced to `range` when one is asked for. */
@@ -255,7 +303,7 @@ async function expandDirective(
   const base = dirname(resolve(scope.sourceDir, input.relPath));
   const absolute = resolve(base, path);
   const inside = relative(scope.sourceDir, absolute);
-  if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+  if (escapes(inside)) {
     scope.diagnostics.push(
       problem(
         "include.outside-source",
@@ -267,10 +315,27 @@ async function expandDirective(
     return undefined;
   }
 
+  // The lexical path is only the first gate: a symbolic link inside the source folder can name a file outside it,
+  // so the boundary is checked again against the real path the read would follow, and the read itself uses that
+  // real path. Nothing outside is opened, so nothing outside can be revealed by a diagnostic either.
+  const target = await canonicalize(absolute);
+  const realInside = relative(scope.realSourceDir, target.real);
+  if (escapes(realInside)) {
+    scope.diagnostics.push(
+      problem(
+        "include.outside-source",
+        `The include ${path} leads outside the source folder through a symbolic link.`,
+        pos,
+        "An include may only read files under the source folder; point the link at a file inside it, or move the file there.",
+      ),
+    );
+    return undefined;
+  }
+
   const rel = inside.split(sep).join("/");
   const display = displayOf(scope, rel);
-  const key = keyOf(scope.sourceDir, rel);
-  scope.includes.push({ from: input.relPath, path: rel, pos, missing: !existsSync(absolute) });
+  const key = keyOf(target.real);
+  scope.includes.push({ from: input.relPath, path: rel, pos, missing: !target.exists });
   if (stack.some((frame) => frame.key === key)) {
     const chain = [...stack.map((frame) => frame.display), display].join(" → ");
     scope.diagnostics.push(
@@ -292,7 +357,7 @@ async function expandDirective(
 
   let text: string;
   try {
-    text = await readFile(absolute, "utf8");
+    text = await readFile(target.real, "utf8");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") {
@@ -369,14 +434,20 @@ export async function expandIncludes(options: ExpandIncludesOptions): Promise<In
   const displayFile = options.displayFile ?? file;
   const diagnostics: Diagnostic[] = [];
   const includes: IncludeDependency[] = [];
+  const sourceDir = resolve(options.sourceDir);
+  // The source root is canonicalized too: it can itself sit behind a symlink, and comparing a real target against
+  // a lexical root would refuse every include.
+  const realSourceDir = (await canonicalize(sourceDir)).real;
   const scope: Scope = {
-    sourceDir: resolve(options.sourceDir),
+    sourceDir,
+    realSourceDir,
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
     prefix: prefixOf(displayFile, file),
     diagnostics,
     includes,
   };
-  const stack: Frame[] = [{ key: keyOf(scope.sourceDir, file), display: displayFile }];
+  const page = await canonicalize(resolve(sourceDir, file));
+  const stack: Frame[] = [{ key: keyOf(page.real), display: displayFile }];
   const body = await expandBody(scope, options.body, options.bodyLine, file, displayFile, stack);
   return { body, bodyLine: options.bodyLine, diagnostics, includes };
 }
