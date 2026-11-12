@@ -74,6 +74,37 @@ function referenceMoved(text: string, length: number, hash: string): MovedPositi
   return undefined;
 }
 
+/** The fingerprint constants the bounded search used before this fix's collision check. */
+const BUGGY_MODULUS_A = 67_108_859;
+const BUGGY_MODULUS_B = 67_108_823;
+const BUGGY_BASE_A = 1_000_003;
+const BUGGY_BASE_B = 999_983;
+const BUGGY_KEY_STRIDE = 67_108_864;
+
+/** The previous bounded search: it skipped every window whose 52-bit fingerprint it had seen. */
+function fingerprintOnlyMoved(text: string, length: number, hash: string): MovedPosition | undefined {
+  const points = Array.from(text);
+  if (length < 1 || length > REFERENCE_SPAN_CODE_POINTS || length > points.length) return undefined;
+  const seen = new Set<number>();
+  for (let start = 0; start + length <= points.length; start += 1) {
+    let a = 0;
+    let b = 0;
+    for (let at = 0; at < length; at += 1) {
+      const value = points[start + at]!.codePointAt(0)!;
+      a = (a * BUGGY_BASE_A + value) % BUGGY_MODULUS_A;
+      b = (b * BUGGY_BASE_B + value) % BUGGY_MODULUS_B;
+    }
+    const key = a * BUGGY_KEY_STRIDE + b;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (sha256(points.slice(start, start + length).join("")) !== hash) continue;
+    const first = positionAt(points, start);
+    const last = positionAt(points, start + length - 1);
+    return { line: first.line, column: first.column, endLine: last.line, endColumn: last.column };
+  }
+  return undefined;
+}
+
 /** The old span check, issue for issue, so the new one can be held to the same contract. */
 function referenceIssues(path: string, text: string, spans: readonly ProofSpan[]): ProofVerifyIssue[] {
   const issues: ProofVerifyIssue[] = [];
@@ -433,6 +464,60 @@ test(
           );
         }
       }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "a fingerprint collision cannot hide the matching candidate that follows it",
+  { timeout: HANG_TIMEOUT_MS },
+  async () => {
+    // Two different three-code-point windows with the same rolling fingerprint. The first is not the
+    // text the proof records; the second is. A fingerprint-only `seen` set skipped the second, so the
+    // old search reported `verify.span.hash` for a span that had really moved.
+    const different = [97, 4_529, 97];
+    const matching = [100_490, 97, 119_979];
+    const differentText = String.fromCodePoint(...different);
+    const matchingText = String.fromCodePoint(...matching);
+    const text = differentText + matchingText;
+    const hash = sha256(matchingText);
+
+    assert.equal(
+      fingerprintOnlyMoved(text, 3, hash),
+      undefined,
+      "the previous fingerprint-only dedup skipped the later matching candidate",
+    );
+    const found = new MovedTextIndex(text).search(3, hash);
+    assert.equal(found.outcome, "found");
+    assert.deepEqual(found.position, referenceMoved(text, 3, hash), "the new search finds what the full hash search finds");
+    assert.deepEqual(found.position, { line: 1, column: 4, endLine: 1, endColumn: 6 });
+    assert.equal(textAt(Array.from(text), found.position!), matchingText);
+
+    // Through the verifier: the recorded span holds the non-matching candidate, so the matching one at
+    // column 4 is the move the proof should report.
+    const recorded = span(1, 3, hash);
+    const root = siteOf([{ path: "docs/collision.md", content: text, spans: [recorded] }]);
+    try {
+      const actual = await verifyProofFiles(root, [{ path: "docs/collision.md", after: sha256(text), spans: [recorded] }]);
+      // A fingerprint-only search would find nothing here and report `verify.span.hash`.
+      assert.equal(fingerprintOnlyMoved(text, 3, hash), undefined);
+      assert.deepEqual(actual[0]?.issues, [
+        {
+          code: "verify.span.moved",
+          path: "docs/collision.md",
+          line: 1,
+          column: 1,
+          endLine: 1,
+          endColumn: 3,
+          hash,
+          foundLine: 1,
+          foundColumn: 4,
+          foundEndLine: 1,
+          foundEndColumn: 6,
+        },
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

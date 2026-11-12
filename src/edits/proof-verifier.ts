@@ -301,11 +301,13 @@ function fileAt(siteRoot: string, path: string): string {
 }
 
 // A moved span is located by a bounded rolling search over the file's code points: every window of
-// the recorded length gets one cheap 52-bit fingerprint, and a full SHA-256 is computed only for the
-// FIRST window carrying a fingerprint the search has not seen yet. Repeated text therefore costs one
-// confirmation instead of one hash per offset, so a long span in a large changed file no longer means
-// quadratic hashing. Two different windows sharing one fingerprint would cost the later one its match;
-// the key is 52 bits, so over a whole 2,000,000-window scan that is a chance under one in a billion.
+// the recorded length gets one cheap 52-bit fingerprint, and a full SHA-256 is computed only for a
+// window whose text has not been seen before under that fingerprint. Repeated text therefore costs
+// one confirmation instead of one hash per offset, so a long span in a large changed file no longer
+// means quadratic hashing. The fingerprint is only a candidate key: a window is skipped as a
+// duplicate only after its code points are compared with the windows already seen under that key, so
+// two different texts sharing a fingerprint cost the second one a confirmation, never its match. The
+// map stores offsets, not text, so its size stays bounded by the scan.
 // shortcut: a search that reaches one of these caps reports a hash mismatch instead of a move, the
 // same honest fallback a span outside the caps has always had. Raise them if larger spans must be
 // located.
@@ -524,7 +526,9 @@ export class MovedTextIndex {
       }
     }
 
-    const seen = new Set<number>();
+    // Fingerprint key to the offsets already confirmed under it. One offset for the common case, a
+    // list only when two different windows collide on the same fingerprint.
+    const seen = new Map<number, number | number[]>();
     let confirmations = 0;
     let candidateCodePoints = 0;
     const windows = points.length - length + 1;
@@ -544,7 +548,14 @@ export class MovedTextIndex {
       scannedOffsets = start + 1;
 
       const key = fingerprintA * FINGERPRINT_KEY_STRIDE + fingerprintB;
-      if (seen.has(key)) continue;
+      const known = seen.get(key);
+      if (known !== undefined) {
+        const duplicate =
+          typeof known === "number"
+            ? this.sameWindow(start, known, length)
+            : known.some((other) => this.sameWindow(start, other, length));
+        if (duplicate) continue;
+      }
       if (confirmations >= maxConfirmations) {
         return { outcome: "capped", cap: "confirmations", scannedOffsets, confirmations, candidateCodePoints };
       }
@@ -557,7 +568,9 @@ export class MovedTextIndex {
           candidateCodePoints,
         };
       }
-      seen.add(key);
+      if (known === undefined) seen.set(key, start);
+      else if (typeof known === "number") seen.set(key, [known, start]);
+      else known.push(start);
       confirmations += 1;
       candidateCodePoints += length;
 
@@ -575,6 +588,18 @@ export class MovedTextIndex {
       };
     }
     return { outcome: "absent", scannedOffsets, confirmations, candidateCodePoints };
+  }
+
+  /** True when the windows starting at `a` and `b` hold the same `length` code points. */
+  private sameWindow(a: number, b: number, length: number): boolean {
+    const points = this.indexPoints();
+    const units = this.indexUnits();
+    const left = units[a] ?? 0;
+    const right = units[b] ?? 0;
+    for (let at = 0; at < length; at += 1) {
+      if (points[left + at] !== points[right + at]) return false;
+    }
+    return true;
   }
 
   /** The code-point values of the text, built once and reused by every search over this file. */
