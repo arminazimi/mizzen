@@ -223,7 +223,16 @@ function ownerRecorded(owner: string): number | undefined {
   return pid !== undefined && (lines[1] ?? "").trim() !== "" ? pid : undefined;
 }
 
-/** True when the process that wrote `owner` (a PID and a token, one per line) is gone. Unknown means alive. */
+/**
+ * True when the process that wrote `owner` (a PID and a token, one per line) is gone. Unknown means alive.
+ *
+ * A signal of `0` proves presence, not identity, and #109 forbids weighing a live PID against age, so nothing here can
+ * notice the OS handing a dead owner's PID to an unrelated process: such a lock reads as owned and is not broken. The
+ * cache stays correct anyway, because a competitor only ever waits {@link LOCK_WAIT_MS} and builds cold, publishes and
+ * prunes nothing, and recovery resumes once that recycled PID is freed: the cost is the speedup, never the output.
+ * `EPERM` (a PID we may not signal, so a process of another user) counts as alive for the same reason: calling it dead
+ * would let a competitor break a lock whose owner is running.
+ */
 function ownerIsDead(owner: string): boolean {
   const pid = ownerPid(owner);
   if (pid === undefined) return false;
@@ -254,7 +263,8 @@ async function probeAbandonedLock(lock: string): Promise<CacheLockProbe | undefi
     return { ino: info.ino, owner, abandoned: Date.now() - info.mtimeMs > OWNER_GRACE_MS };
   }
   // Age alone never abandons a lock. A whole-build restore or write of a large site is expected to take minutes, and
-  // breaking it then would let a second operation publish or prune over it. Recovery waits for the owner to die.
+  // breaking it then would let a second operation publish or prune over it. Recovery waits for the owner to die, and
+  // the one thing it cannot tell apart (a dead owner whose PID was reused) is written on `ownerIsDead`.
   return { ino: info.ino, owner, abandoned: ownerIsDead(owner) };
 }
 
