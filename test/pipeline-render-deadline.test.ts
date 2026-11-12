@@ -17,7 +17,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { Diagnostic, Page, Site } from "../src/contracts/index.ts";
 import { buildModel } from "../src/model/build.ts";
-import { createRenderPool, DEFAULT_RENDER_DEADLINE_MS, renderOnePage, type RenderPool } from "../src/pipeline/parallel.ts";
+import {
+  createRenderPool,
+  DEFAULT_RENDER_DEADLINE_MS,
+  isRenderTimeout,
+  renderOnePage,
+  RENDER_TIMEOUT_DIAGNOSTIC,
+  type RenderPool,
+} from "../src/pipeline/parallel.ts";
 import { loadRegistry, type ThemeRegistry } from "../src/render/registry.ts";
 
 const runChild = promisify(execFile);
@@ -58,9 +65,10 @@ function record(kind: string, url: string): void {
 }
 
 export default function doc({ page }: { page: { title: string; url: string; html: string } }): string {
-  if (!isMainThread && page.url === "${HANG_URL}") {
+  if (page.url === "${HANG_URL}") {
     record("started", page.url);
-    // A worker that never replies: the thread parks here until the pool's deadline terminates it.
+    // The layout never returns on any thread: a worker parks until the deadline terminates it, and the
+    // pool must reject the page instead of parking the main thread on the same layout.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120000);
   }
   record("done", page.url);
@@ -79,7 +87,7 @@ function tree(files: Record<string, string>): string {
   return root;
 }
 
-/** A site with one page that hangs a worker and three that do not. */
+/** A site with one page whose layout hangs any thread and three that do not. */
 function hangSite(): string {
   return tree({
     "hang.md": "---\ntitle: Hangs\nlayout: doc\n---\n# Hangs\n",
@@ -89,7 +97,7 @@ function hangSite(): string {
   });
 }
 
-/** A theme whose layout hangs a worker on one page; the main thread always answers. */
+/** A theme whose layout hangs on one page, in a worker or on the main thread alike. */
 function hangingPageTheme(): string {
   return tree({
     "package.json": JSON.stringify({ type: "module", name: "deadline-hanging-page" }),
@@ -180,7 +188,11 @@ async function modelOver(
   const hang = docs.filter((page) => page.url === HANG_URL);
   // The hang page goes first, so it is the first batch the pool dispatches.
   const pages = hang.length === 0 ? docs : [...hang, ...docs.filter((page) => page.url !== HANG_URL)];
-  const html = new Map(pages.map((page) => [page.url, renderOnePage(registry, site, page, undefined).html]));
+  // The hang page's layout never returns, so its main-thread HTML cannot be computed here. Every other
+  // page is the byte-for-byte fallback the pool is compared against.
+  const html = new Map(
+    pages.filter((page) => page.url !== HANG_URL).map((page) => [page.url, renderOnePage(registry, site, page, undefined).html]),
+  );
   return { registry, site, pages, html };
 }
 
@@ -222,6 +234,30 @@ async function runPool(
       ),
     );
     return { rendered, elapsedMs: performance.now() - started, trace: stopTrace(dir) };
+  } finally {
+    delete process.env.MIZZEN_DEADLINE_TRACE;
+    if (pool !== undefined) await pool.close();
+  }
+}
+
+/**
+ * Runs one pool over the fixture and keeps every outcome, because a page whose layout hung is rejected
+ * instead of rendered here. The whole operation is still bounded by a hang guard.
+ */
+async function runPoolSettled(
+  themeRoot: string,
+  model: Awaited<ReturnType<typeof modelOver>>,
+  pages: readonly Page[],
+  options: { readonly workers: number; readonly concurrency?: number; readonly renderDeadlineMs: number },
+): Promise<{ readonly results: PromiseSettledResult<RenderedPage_>[]; readonly elapsedMs: number; readonly trace: TraceLine[] }> {
+  const dir = startTrace();
+  let pool: RenderPool | undefined;
+  try {
+    const started = performance.now();
+    pool = createRenderPool({ themeRoot, site: model.site, registry: model.registry, ...options });
+    pool.prefetch(pages);
+    const results = await within("render", 60000, Promise.allSettled(pages.map((page) => pool!.render(page))));
+    return { results, elapsedMs: performance.now() - started, trace: stopTrace(dir) };
   } finally {
     delete process.env.MIZZEN_DEADLINE_TRACE;
     if (pool !== undefined) await pool.close();
@@ -293,7 +329,7 @@ test("a page that never answers costs only its own worker; the rest of the pool 
   const root = hangSite();
   try {
     const model = await modelOver(theme, root);
-    const { rendered, elapsedMs, trace } = await runPool(theme, model, model.pages, {
+    const { results, elapsedMs, trace } = await runPoolSettled(theme, model, model.pages, {
       workers: 2,
       concurrency: 1,
       renderDeadlineMs: BATCH_DEADLINE_MS,
@@ -302,46 +338,43 @@ test("a page that never answers costs only its own worker; the rest of the pool 
       elapsedMs >= BATCH_DEADLINE_MS - CLOCK_SLACK_MS,
       `the deadline fired after ${elapsedMs.toFixed(0)} ms of a ${BATCH_DEADLINE_MS} ms budget`,
     );
-    assert.equal(rendered.length, model.pages.length, "every requested page resolved");
-    for (const result of rendered) {
-      assert.equal(result.html, model.html.get(result.url), `${result.url} is the main-thread HTML`);
-    }
+    assert.equal(results.length, model.pages.length, "every requested page settled");
 
-    const hang = rendered.find((result) => result.url === HANG_URL)!;
-    const fellBack = warnings(hang.diagnostics);
-    assert.equal(fellBack.length, 1, "the hung page reports one fallback");
-    assert.equal(fellBack[0]?.severity, "warning");
-    assert.match(
-      fellBack[0]?.message ?? "",
-      new RegExp(`did not answer its batch within ${BATCH_DEADLINE_MS} ms`),
-      "the warning names the missed deadline",
-    );
-    assert.deepEqual(errors(hang.diagnostics), [], "the fallback page still rendered");
+    const byURL = new Map(model.pages.map((page, index) => [page.url, results[index]!]));
+    const hang = byURL.get(HANG_URL)!;
+    if (hang.status !== "rejected") assert.fail("the hung page is rejected, not retried on the main thread");
+    assert.ok(isRenderTimeout(hang.reason), "the rejection is the explicit render-timeout error");
+    assert.match(hang.reason.message, new RegExp(`timed out after ${BATCH_DEADLINE_MS} ms`));
+    assert.equal(hang.reason.diagnostic.id, RENDER_TIMEOUT_DIAGNOSTIC);
+    assert.equal(hang.reason.diagnostic.severity, "error");
+    assert.ok(hang.reason.diagnostic.pos?.file.endsWith(".md"), "the diagnostic points at the page");
+    assert.match(hang.reason.diagnostic.message, /did not answer its batch within/);
 
-    const healthy = rendered.filter((result) => result.url !== HANG_URL);
+    const healthy = model.pages.filter((page) => page.url !== HANG_URL);
     assert.equal(healthy.length, model.pages.length - 1);
-    for (const result of healthy) {
-      assert.deepEqual(warnings(result.diagnostics), [], `${result.url} was not blamed for its neighbour`);
-      assert.deepEqual(errors(result.diagnostics), []);
+    for (const page of healthy) {
+      const result = byURL.get(page.url)!;
+      if (result.status !== "fulfilled") assert.fail(`${page.url} still rendered`);
+      assert.equal(result.value.html, model.html.get(page.url), `${page.url} is the main-thread HTML`);
+      assert.deepEqual(warnings(result.value.diagnostics), [], `${page.url} was not blamed for its neighbour`);
+      assert.deepEqual(errors(result.value.diagnostics), []);
     }
 
-    // The hung batch really was dispatched, and really did park.
+    // The hung batch really was dispatched, and really did park. The main thread never started it.
     assert.deepEqual(
       trace.filter((line) => line.kind === "started").map((line) => [line.thread, line.url]),
       [["worker", HANG_URL]],
-      "one worker parked on the hung page",
+      "one worker parked on the hung page and no thread retried it",
     );
     const done = trace.filter((line) => line.kind === "done");
     assert.deepEqual(
       done.map((line) => line.url).sort(),
-      model.pages.map((page) => page.url).sort(),
-      "each page produced exactly one render: the hung page on the main thread, no page twice",
+      healthy.map((page) => page.url).sort(),
+      "only the healthy pages rendered, each exactly once",
     );
-    const threadOf = new Map(done.map((line) => [line.url, line.thread]));
-    assert.equal(threadOf.get(HANG_URL), "main", "the hung page fell back to this process");
     assert.deepEqual(
-      healthy.map((result) => threadOf.get(result.url)),
-      healthy.map(() => "worker"),
+      [...new Set(done.map((line) => line.thread))],
+      ["worker"],
       "the surviving worker kept taking batches after the timeout",
     );
   } finally {
@@ -419,20 +452,21 @@ async function waitFor(what, ready) {
 }
 
 const timeouts = (resources) => resources.filter((each) => each === "Timeout").length;
-const report = { baseline: timeouts(process.getActiveResourcesInfo()), afterTimeout: -1, afterCancel: -1, settled: 0, warnings: 0, healthy: 0, rejected: 0 };
+const report = { baseline: timeouts(process.getActiveResourcesInfo()), afterTimeout: -1, afterCancel: -1, settled: 0, timedOutErrors: 0, healthy: 0, rejected: 0 };
 
 const { site } = await buildModel(root);
 const registry = await loadRegistry(themeRoot);
 const docs = site.pages.filter((page) => page.kind === "doc");
 const pages = [...docs.filter((page) => page.url === "/hang/"), ...docs.filter((page) => page.url !== "/hang/")];
 
-// A batch that never answers: the deadline falls back for it, and closing twice afterwards changes nothing.
+// A batch that never answers: the deadline rejects it without retrying it here, and closing twice afterwards
+// changes nothing.
 const timedOut = createRenderPool({ themeRoot, site, registry, workers: 2, concurrency: 1, renderDeadlineMs: deadlineMs });
 timedOut.prefetch(pages);
-const rendered = await Promise.all(pages.map((page) => timedOut.render(page)));
-report.settled = rendered.length;
-report.warnings = rendered.reduce((sum, each) => sum + each.diagnostics.filter((d) => d.id === "render.worker-failed").length, 0);
-report.healthy = rendered.filter((each) => each.url !== "/hang/").length;
+const results = await Promise.allSettled(pages.map((page) => timedOut.render(page)));
+report.settled = results.length;
+report.timedOutErrors = results.filter((each) => each.status === "rejected" && each.reason?.name === "RenderTimeoutError").length;
+report.healthy = results.filter((each, index) => pages[index].url !== "/hang/" && each.status === "fulfilled").length;
 await timedOut.close();
 await timedOut.close();
 report.afterTimeout = timeouts(process.getActiveResourcesInfo());
@@ -463,16 +497,16 @@ process.stdout.write(JSON.stringify(report));
       afterTimeout: number;
       afterCancel: number;
       settled: number;
-      warnings: number;
+      timedOutErrors: number;
       healthy: number;
       rejected: number;
     };
     // Reaching this line at all means the child exited by itself, so no worker and no timer outlived close().
     assert.equal(report.baseline, 0, "the child started with nothing pending");
     assert.equal(report.afterTimeout, 0, "closing after a timeout leaves no pending timer");
-    assert.equal(report.afterCancel, 0, "closing during a batch leaves no pending timer");
-    assert.equal(report.settled, 4, "every page of the timed-out pool resolved exactly once");
-    assert.equal(report.warnings, 1, "only the hung page fell back to the main thread");
+    assert.equal(report.afterCancel, 0, "closing during the batch leaves no pending timer");
+    assert.equal(report.settled, 4, "every page of the timed-out pool settled exactly once");
+    assert.equal(report.timedOutErrors, 1, "only the hung page is rejected with the timeout error");
     assert.equal(report.healthy, 3, "the healthy pages were not disturbed by the deadline");
     assert.equal(report.rejected, 4, "close settled every waiter of the cancelled pool");
   } finally {

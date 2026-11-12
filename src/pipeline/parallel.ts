@@ -14,8 +14,10 @@
  * A worker also owes the pool an answer within a deadline ({@link RenderPoolOptions.renderDeadlineMs}): one to finish
  * initializing and, for every batch, one to reply. A theme that parks a thread — a layout in a synchronous loop —
  * never replies, so the deadline is what keeps a hung theme from stalling a build forever. When it passes, the pool
- * retires that one worker and renders its pages here through the same fallback a failing worker uses; the other
- * workers and the queue carry on, and a reply that arrives after the deadline is ignored, since those pages are
+ * retires that one worker and rejects the pages of its batch with a `RenderTimeoutError` carrying a
+ * `render.worker-timeout` diagnostic; it does not retry them here, because the layout that hung the worker would hang
+ * this thread too. A worker that never initialized has no such layout, so the queued pages still fall back here. The
+ * other workers and the queue carry on, and a reply that arrives after the deadline is ignored, since those pages are
  * already settled.
  *
  * `parallel.ts` is both the pool and the worker entry point: Node starts the same file in a thread and the
@@ -233,6 +235,33 @@ function closedError(page: Page): Error {
   return new Error(`render: the pool closed before ${page.url} was rendered.`);
 }
 
+/** The diagnostic id a page that missed the render deadline is rejected with. */
+export const RENDER_TIMEOUT_DIAGNOSTIC = "render.worker-timeout";
+
+/**
+ * Why a `render` waiting on a worker that missed its deadline was rejected. The page is not rendered
+ * again in this process: a layout that hung a worker would hang the main thread too.
+ */
+export class RenderTimeoutError extends Error {
+  /** The stable reason, and the id of {@link diagnostic}. */
+  readonly code = RENDER_TIMEOUT_DIAGNOSTIC;
+  /** The page's diagnostic, with its source position, for a caller that reports findings. */
+  readonly diagnostic: Diagnostic;
+  readonly diagnostics: readonly Diagnostic[];
+
+  constructor(message: string, diagnostic: Diagnostic) {
+    super(message);
+    this.name = "RenderTimeoutError";
+    this.diagnostic = diagnostic;
+    this.diagnostics = [diagnostic];
+  }
+}
+
+/** True for the error a page whose worker missed its deadline is rejected with. */
+export function isRenderTimeout(error: unknown): error is RenderTimeoutError {
+  return error instanceof RenderTimeoutError;
+}
+
 /** Messages this module posts in a worker's thread. */
 type InitMessage = {
   readonly type: "init";
@@ -348,6 +377,8 @@ class WorkerPool implements RenderPool {
   #closed = false;
   /** Why the last worker was retired, so a page that arrives afterwards is still told what happened. */
   #lastFailure: string | undefined;
+  /** True once a batch missed its deadline: its layout may hang this process too, so no main-thread retry. */
+  #unrenderable = false;
 
   constructor(state: PoolState, workers: number) {
     this.#state = state;
@@ -414,14 +445,14 @@ class WorkerPool implements RenderPool {
 
   /**
    * Starts the countdown for what `slot` owes the pool, replacing any countdown already running for it. When it
-   * expires, the worker is retired through {@link WorkerPool.#fail} and its pages take the main-thread fallback.
+   * expires, the worker is retired through {@link WorkerPool.#expire}: an in-flight batch is rejected, never retried.
    */
   #arm(slot: Slot, reason: string): void {
     this.#clearDeadline(slot);
     if (this.#closed || slot.dead) return;
     slot.deadline = setTimeout(() => {
       slot.deadline = undefined;
-      this.#fail(slot, reason);
+      this.#expire(slot, reason);
     }, this.#state.deadlineMs);
   }
 
@@ -455,7 +486,8 @@ class WorkerPool implements RenderPool {
     if (this.#closed) return;
     if (this.#slots.every((slot) => slot.dead)) {
       const queued = this.#queue.splice(0);
-      this.#fallback(queued, this.#noWorkers());
+      if (this.#unrenderable) this.#timeout(queued, this.#noWorkers());
+      else this.#fallback(queued, this.#noWorkers());
       return;
     }
     const live = this.#slots.filter((slot) => !slot.dead);
@@ -527,6 +559,27 @@ class WorkerPool implements RenderPool {
     }
   }
 
+  /**
+   * Settles the pages a missed deadline affected. They are never rendered in this process: the layout
+   * that did not return in a worker would not return here either, so each waiter is rejected with one
+   * `render.worker-timeout` diagnostic instead of parking the main thread.
+   */
+  #timeout(entries: readonly Entry[], reason: string): void {
+    for (const entry of entries) {
+      const message = `render: ${entry.page.url} timed out after ${String(this.#state.deadlineMs)} ms; the worker thread was terminated and the page was not rendered again in the main thread.`;
+      this.#reject(
+        entry,
+        new RenderTimeoutError(message, {
+          id: RENDER_TIMEOUT_DIAGNOSTIC,
+          severity: "error",
+          message: `${message} (${reason})`,
+          pos: entry.page.source,
+          help: "Fix the layout that does not return, or raise renderDeadlineMs.",
+        }),
+      );
+    }
+  }
+
   /** Renders one page with this process's registry, with a diagnostic that names `reason` when a worker failed. */
   #inProcess(page: Page, reason: string | undefined): RenderedPage {
     const rendered = renderOnePage(this.#state.registry, this.#state.site, page, this.#state.defaultLayout);
@@ -556,6 +609,33 @@ class WorkerPool implements RenderPool {
     entry.waiters = [];
   }
 
+  /**
+   * Retires a worker that missed its deadline. An in-flight batch is rejected through {@link #timeout}
+   * rather than retried here; queued pages fall back to this process only when no batch ever expired,
+   * as in a pool whose workers never initialized.
+   */
+  #expire(slot: Slot, reason: string): void {
+    if (this.#closed || slot.dead) return;
+    this.#clearDeadline(slot);
+    slot.dead = true;
+    slot.ready = false;
+    this.#lastFailure = reason;
+    const batch = slot.current;
+    slot.current = undefined;
+    void slot.worker.terminate().catch(() => undefined);
+    if (batch !== undefined) {
+      this.#unrenderable = true;
+      this.#timeout(batch, reason);
+    }
+    if (this.#slots.every((each) => each.dead)) {
+      const queued = this.#queue.splice(0);
+      if (this.#unrenderable) this.#timeout(queued, this.#noWorkers());
+      else this.#fallback(queued, this.#noWorkers());
+      return;
+    }
+    this.#dispatch();
+  }
+
   /** Retires a worker and renders its batch, and every later page when it was the last one, in this process. */
   #fail(slot: Slot, reason: string): void {
     if (slot.dead) return;
@@ -569,7 +649,8 @@ class WorkerPool implements RenderPool {
     if (batch !== undefined) this.#fallback(batch, reason);
     if (this.#slots.every((each) => each.dead)) {
       const queued = this.#queue.splice(0);
-      this.#fallback(queued, this.#noWorkers());
+      if (this.#unrenderable) this.#timeout(queued, this.#noWorkers());
+      else this.#fallback(queued, this.#noWorkers());
       return;
     }
     this.#dispatch();
