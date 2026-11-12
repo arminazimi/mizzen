@@ -16,10 +16,15 @@
  * function here that touches the filesystem: it reads every file, validates the whole set, stages
  * every result, and only then renames the files in. A refused set therefore leaves the tree as it
  * was found.
+ *
+ * Writes are confined to the site root by real path, not by spelling (#98): a target whose parent
+ * resolves outside the root, and a target that is itself an existing symlink, are refused before any
+ * file is read, and the boundary is checked again when the staged files are committed, so a parent
+ * swapped for an escaping symlink in the meantime cannot redirect the rename.
  */
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { chmod, lstat, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** One span of one source file. `file` is informational: patching text never reads the file. */
 export interface PatchSpan {
@@ -448,9 +453,82 @@ function insideRoot(root: string, file: string): { readonly path: string; readon
   return { path, record: inside.split(sep).join("/") };
 }
 
+/** Whether `path` is `root` itself or sits below it. Both are real, resolved paths. */
+function withinReal(root: string, path: string): boolean {
+  const inside = relative(root, path);
+  return inside === "" || (inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside));
+}
+
+/**
+ * The real site root. A root that cannot be resolved is passed back as given, so the read of a
+ * missing source reports it as `source-missing` the way it always has.
+ */
+async function realRootOf(root: string): Promise<string> {
+  try {
+    return await realpath(root);
+  } catch {
+    return root;
+  }
+}
+
+/**
+ * The path a verified write may use: the target with every parent symlink resolved, refused when the
+ * resolved parent leaves the real site root or when the target is itself an existing symlink.
+ *
+ * A symlinked parent is the case a lexical check misses: `readFile` follows it, `mkdtemp` stages
+ * beside it, and `rename` writes through it, so an in-root spelling can still change a file outside
+ * the root. A target that is a link is refused rather than resolved, because the two operations the
+ * edit needs disagree about it: reading follows the link to another file, renaming replaces the link
+ * itself. A path that cannot be resolved at all is returned as given; reading it reports why.
+ */
+async function verifiedTarget(realRoot: string, file: string, path: string): Promise<string> {
+  const parent = dirname(path);
+  let realParent: string;
+  try {
+    realParent = await realpath(parent);
+  } catch {
+    return path;
+  }
+  if (!withinReal(realRoot, realParent)) {
+    throw new EditFileError(
+      "path-escape",
+      file,
+      `${file}: the path resolves outside the site root "${realRoot}"; refusing it.`,
+    );
+  }
+
+  const resolved = realParent === parent ? path : join(realParent, basename(path));
+  try {
+    if ((await lstat(resolved)).isSymbolicLink()) {
+      throw new EditFileError(
+        "path-escape",
+        file,
+        `${file}: the target is a symbolic link, so the edit would read one file and write another; refusing it.`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof EditFileError) throw error;
+    // An unreadable target is reported by the read that follows it.
+  }
+  return resolved;
+}
+
+/**
+ * Test seams, as the transaction writer's `TransactionHooks` are for it. Production callers pass
+ * nothing; the hook runs at the named point and a thrown error is handled exactly as the equivalent
+ * filesystem failure would be.
+ */
+export interface PatchWriteHooks {
+  /** After every file is staged, before the commit checks run. A test can swap a parent here. */
+  readonly beforeCommit?: () => void | Promise<void>;
+}
+
 /** One staged file: its new bytes are written beside the target, ready for one rename. */
 interface StagedFile {
-  readonly target: string;
+  /** The path the caller named, resolved against the site root; the boundary check re-runs on it. */
+  readonly lexical: string;
+  /** The verified real path the file is written to. Refreshed at commit time. */
+  target: string;
   readonly file: string;
   readonly original: string;
   readonly beforeHash: string;
@@ -459,8 +537,12 @@ interface StagedFile {
   readonly temp: string;
 }
 
-/** Stages `after` beside `target`, so the write is one rename. Cleans up when staging fails. */
+/**
+ * Stages `after` beside the verified `target`, so the write is one rename. Cleans up if staging
+ * fails. `lexical` is kept so the commit can repeat the boundary check on the path the caller named.
+ */
 async function stageFile(
+  lexical: string,
   target: string,
   file: string,
   after: string,
@@ -473,7 +555,7 @@ async function stageFile(
     const temp = join(staging, "source");
     await writeFile(temp, after, "utf8");
     await chmod(temp, mode);
-    return { target, file, original, beforeHash, mode, staging, temp };
+    return { lexical, target, file, original, beforeHash, mode, staging, temp };
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     throw error;
@@ -511,7 +593,8 @@ function reasonOf(error: unknown): string {
  * back from the bytes read at the start. The returned entries carry the before and after SHA-256
  * and the resulting spans, ready for {@link createProof}.
  *
- * A `file` that is absolute or leaves `siteRoot` is `path-escape`; a file that cannot be read is
+ * A `file` that is absolute or leaves `siteRoot` is `path-escape`, and so is one whose parents
+ * resolve outside it or whose target is an existing symlink (#98); a file that cannot be read is
  * `source-missing`. Both preconditions are required by default: pass `requireHash: false` or
  * `requireExpected: false` to disable that one; the other stays required.
  */
@@ -519,9 +602,16 @@ export async function writeFilePatches(
   siteRoot: string,
   files: readonly EditFile[],
   options: ApplyPatchOptions = {},
+  hooks: PatchWriteHooks = {},
 ): Promise<readonly PatchedFile[]> {
   const root = resolve(siteRoot);
-  const targets: { readonly path: string; readonly record: string; readonly patches: readonly Patch[] }[] = [];
+  const realRoot = await realRootOf(root);
+  const targets: {
+    readonly lexical: string;
+    readonly path: string;
+    readonly record: string;
+    readonly patches: readonly Patch[];
+  }[] = [];
   const records = new Set<string>();
   for (const entry of files) {
     const target = insideRoot(root, entry.file);
@@ -533,7 +623,10 @@ export async function writeFilePatches(
       );
     }
     records.add(target.record);
-    targets.push({ ...target, patches: entry.patches });
+    // The real path is settled before anything is read, so no step of the edit — reading, staging or
+    // renaming — follows a path that leaves the root.
+    const path = await verifiedTarget(realRoot, target.record, target.path);
+    targets.push({ lexical: target.path, path, record: target.record, patches: entry.patches });
   }
 
   const inputs: FilePatches[] = [];
@@ -559,23 +652,49 @@ export async function writeFilePatches(
   });
 
   const staged: StagedFile[] = [];
-  for (let index = 0; index < results.length; index += 1) {
-    const result = results[index]!;
-    const target = targets[index]!;
-    try {
-      staged.push(await stageFile(target.path, result.file, result.after, result.before, result.beforeHash));
-    } catch (error) {
-      await Promise.allSettled(staged.map((item) => rm(item.staging, { recursive: true, force: true })));
-      throw new EditFileError(
-        "write-failed",
-        result.file,
-        `${result.file}: staging the edit failed: ${reasonOf(error)}; nothing was written.`,
+  try {
+    for (let index = 0; index < results.length; index += 1) {
+      const result = results[index]!;
+      const target = targets[index]!;
+      // Stage only beside a target that is still in the root at the moment the folder is created, so
+      // a swap after the check above cannot put a staging folder, or the rename, outside it.
+      const verified = await verifiedTarget(realRoot, target.record, target.lexical);
+      staged.push(
+        await stageFile(
+          target.lexical,
+          verified,
+          result.file,
+          result.after,
+          result.before,
+          result.beforeHash,
+        ),
       );
     }
+  } catch (error) {
+    await Promise.allSettled(staged.map((item) => rm(item.staging, { recursive: true, force: true })));
+    if (error instanceof EditFileError) throw error;
+
+    const failed = results[staged.length];
+    throw new EditFileError(
+      "write-failed",
+      failed?.file ?? "",
+      `${failed?.file ?? "the edit"}: staging the edit failed: ${reasonOf(error)}; nothing was written.`,
+    );
   }
 
   const committed: StagedFile[] = [];
   try {
+    // The hook runs before the commit checks so a test can change a target between staging and
+    // commit, exactly as the transaction writer's hook does.
+    await hooks.beforeCommit?.();
+
+    // Repeat the boundary check now that the bytes are staged: a parent swapped for an escaping
+    // symlink while the edit was staged is refused here rather than redirecting the rename below.
+    // Each rename goes to the path that was just verified, not to the spelling the caller named.
+    for (const item of staged) {
+      item.target = await verifiedTarget(realRoot, item.file, item.lexical);
+    }
+
     // Re-read immediately before writing: a file that changed since it was validated refuses the
     // whole set, so an exact span is never written onto text the plan did not see.
     for (const item of staged) {
