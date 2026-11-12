@@ -128,15 +128,18 @@ test("the review threshold is overridable and defaults when the option is invali
   );
 });
 
-test("counts and ages are read as whole, non-negative numbers", () => {
+test("malformed counts are refused, never clamped, while ages are read as whole numbers", () => {
+  // Issue M3.10: fractional example and drift counts are malformed evidence, not truncated evidence.
   const score = trustScore({
     examples: { total: 4.9, passed: 4.9, failed: 0.4 },
     drift: 0.9,
     reviewAgeDays: 1.9,
   });
-  assert.equal(score.level, "verified");
-  assert.equal(score.reasons[0]!.message, "No example fails; 4 of 4 pass.");
-  assert.equal(score.reasons[1]!.message, "No drift findings.");
+  assert.equal(score.level, "at-risk");
+  assert.equal(score.reasons[0]!.code, "examples.conflict");
+  assert.equal(score.reasons[1]!.code, "drift.unknown");
+
+  // Ages keep their documented whole-day reading.
   assert.equal(score.reasons[2]!.message, "Last reviewed 1 day ago, within the 180-day limit.");
 
   // A negative age is a review dated after the measured instant: it cannot be confirmed, so it is a conflict.

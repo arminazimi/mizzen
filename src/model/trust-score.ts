@@ -29,9 +29,11 @@
  * the reasons. Reviewer coverage is reported separately as {@link TrustScore.reviewCoverage}, so a page with no
  * recorded review is not mistaken for one that was merely reviewed long ago.
  *
- * Conflicting evidence never resolves towards a healthy page. Example counts that cannot all hold, a supplied
- * review age that the coverage contradicts, and a review dated after the measured instant make the page
- * `at-risk` or `review-due`, never `verified`.
+ * Conflicting evidence never resolves towards a healthy page. Example or drift counts that are not whole,
+ * finite, non-negative safe integers, example counts that cannot all hold, a supplied review age that the
+ * coverage contradicts, and a review dated after the measured instant make the page `at-risk` or `review-due`,
+ * never `verified`. Malformed counts are reported as the conflict or missing signal they are; they are never
+ * repaired to a smaller non-negative count.
  *
  * Limits: the inputs are counts and an age, not page positions, so reasons carry no source position. The
  * drift and example checks report their own findings where they occur.
@@ -45,7 +47,11 @@ export const DEFAULT_REVIEW_DUE_DAYS = 180;
 /** How much a page can be trusted, worst last. */
 export type TrustLevel = "verified" | "review-due" | "at-risk";
 
-/** A page's example counts, as `examples.json` records them for one page. */
+/**
+ * A page's example counts, as `examples.json` records them for one page. Every count must be a whole,
+ * finite, non-negative safe integer; a count that is not is malformed evidence, reported as a conflict
+ * and never repaired to zero.
+ */
 export interface TrustExamples {
   /** Every `test` fence on the page, including ones that were not run. */
   readonly total: number;
@@ -59,13 +65,15 @@ export interface TrustExamples {
 export interface TrustScoreInput {
   /**
    * The page's example counts. Absent means the page declares no runnable examples, which is not held
-   * against it; present with a failing count makes the page `at-risk` whatever the other signals say.
+   * against it; present with a failing count makes the page `at-risk` whatever the other signals say, and
+   * present with a count that is not a whole, finite, non-negative safe integer is conflicting evidence.
    */
   readonly examples?: TrustExamples;
   /**
-   * The page's drift finding count. Zero is clean; above zero is `at-risk`. Absent, negative, or not a
-   * finite number means drift was not checked, which is also `at-risk`: an unchecked page cannot be
-   * verified.
+   * The page's drift finding count. Zero is clean; above zero is `at-risk`. Anything else the caller
+   * supplies — absent, negative, fractional, non-finite, or beyond a safe integer — means drift was not
+   * checked, which is also `at-risk`: an unchecked page cannot be verified. A fractional count is never
+   * truncated into either a clean zero or a finding.
    */
   readonly drift?: number;
   /**
@@ -167,11 +175,17 @@ interface SignalVerdict {
   readonly reason: TrustReason;
 }
 
-/** A count as a whole, non-negative number; a negative or non-finite one is treated as zero. */
-function countOf(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value)) return 0;
-  const count = Math.trunc(value);
-  return count < 0 ? 0 : count;
+/**
+ * True when a supplied count is evidence at all: a whole, finite, non-negative safe integer. A fractional,
+ * negative, NaN, infinite, or unsafe value is malformed and is never repaired by truncation or clamping.
+ */
+function isWholeCount(value: number | undefined): value is number {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** How a supplied count reads in a message, malformed values included. */
+function countText(value: number | undefined): string {
+  return value === undefined ? "none" : String(value);
 }
 
 /** An English plural suffix for a count. */
@@ -192,12 +206,36 @@ export function reviewDueDaysOf(options: TrustScoreOptions = {}): number {
 
 /** The example reason: a failure is at-risk, some examples passing is good, none declared is neutral. */
 function exampleVerdict(examples: TrustExamples | undefined): SignalVerdict {
-  const total = countOf(examples?.total);
-  const passed = countOf(examples?.passed);
-  const failed = countOf(examples?.failed);
+  // Declaring no examples at all is genuinely absent evidence, held against no page.
+  if (examples === undefined) {
+    return {
+      level: "verified",
+      state: "neutral",
+      value: "unknown",
+      reason: { code: "examples.none", message: "The page declares no runnable examples." },
+    };
+  }
+  const { total, passed, failed } = examples;
+
+  // A supplied count that is not a whole, finite, non-negative safe integer is malformed evidence. It is
+  // never truncated or clamped into a passing or failing count: the whole measurement is refused.
+  if (!isWholeCount(total) || !isWholeCount(passed) || !isWholeCount(failed)) {
+    return {
+      level: "at-risk",
+      state: "conflict",
+      value: "unknown",
+      reason: {
+        code: "examples.conflict",
+        message:
+          `The example counts are not whole non-negative counts ` +
+          `(${countText(passed)} pass and ${countText(failed)} fail of ${countText(total)}), ` +
+          `so the page cannot be verified.`,
+      },
+    };
+  }
 
   // Counts that cannot all hold cannot confirm anything: neither the passes nor the failures are trusted.
-  if (examples !== undefined && passed + failed > total) {
+  if (passed + failed > total) {
     return {
       level: "at-risk",
       state: "conflict",
@@ -232,9 +270,11 @@ function exampleVerdict(examples: TrustExamples | undefined): SignalVerdict {
   };
 }
 
-/** The drift reason: findings are at-risk, zero is clean, and an absent count is unverified. */
+/** The drift reason: findings are at-risk, zero is clean, and a count that is absent or malformed is unverified. */
 function driftVerdict(drift: number | undefined): SignalVerdict {
-  if (drift === undefined || !Number.isFinite(drift) || drift < 0) {
+  // Only a whole, finite, non-negative safe integer is a measurement. A fractional count is never
+  // truncated towards a clean zero or into a finding; it means drift was not checked.
+  if (!isWholeCount(drift)) {
     return {
       level: "at-risk",
       state: "missing",
@@ -245,7 +285,7 @@ function driftVerdict(drift: number | undefined): SignalVerdict {
       },
     };
   }
-  const findings = Math.trunc(drift);
+  const findings = drift;
   if (findings > 0) {
     return {
       level: "at-risk",
