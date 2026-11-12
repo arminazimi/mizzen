@@ -18,8 +18,9 @@ import { posix, resolve } from "node:path";
  * Nothing here falls back to the clock or to file mtimes: no commit, no date, `"unknown"`.
  *
  * Each call runs at most two `git rev-parse` commands per root to read that state; one `git log` per path is
- * kept until the state moves. `outputs/feed.ts` has the same repository check and date lookup for its feed;
- * the two are kept apart until a shared refactor can move both.
+ * kept until the state moves. Every git call is bounded to {@link GIT_TIMEOUT_MS} and {@link GIT_MAX_OUTPUT_BYTES},
+ * and a call that misses either limit answers `"unknown"`, never a partial date. `outputs/feed.ts` has the same
+ * repository check and date lookup for its feed; the two are kept apart until a shared refactor can move both.
  */
 
 /** One page's age relative to the code it references. */
@@ -40,6 +41,12 @@ export type GitAgeResult = GitAge | "unknown";
 
 /** Milliseconds in a whole day. */
 const DAY = 86_400_000;
+
+/** The deadline of one git call: a history read that misses it is unknown, not something a build waits on. */
+const GIT_TIMEOUT_MS = 10_000;
+
+/** The most stdout one git call may produce; a date needs a line, so a larger answer is discarded unread. */
+const GIT_MAX_OUTPUT_BYTES = 64 * 1024;
 
 /** The part of a root's state the cached dates belong to: whether git can answer at all, and for which commit. */
 interface State {
@@ -66,9 +73,12 @@ function git(cwd: string, args: readonly string[]): string | undefined {
     return execFileSync("git", [...args], {
       cwd,
       encoding: "utf8",
+      maxBuffer: GIT_MAX_OUTPUT_BYTES,
+      timeout: GIT_TIMEOUT_MS,
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
   } catch {
+    // A timeout, an output overflow, a spawn failure, and a non-zero exit all land here: no date beats a partial one.
     return undefined;
   }
 }
@@ -131,8 +141,10 @@ function inside(path: string): string | undefined {
  * answer `"unknown"` (a refused reference is ignored).
  *
  * Returns `"unknown"`, never an error, when git is not installed, `root` is not a work tree, the page
- * has no commit, or none of the references has one. The call reads `root`'s state with at most two
- * `git rev-parse` commands and shells out for a date only for a path the current state has not answered yet.
+ * has no commit, or none of the references has one. A git call that misses {@link GIT_TIMEOUT_MS} or
+ * {@link GIT_MAX_OUTPUT_BYTES} has no answer either, so a stalled repository cannot hold the caller. The call
+ * reads `root`'s state with at most two `git rev-parse` commands and shells out for a date only for a path the
+ * current state has not answered yet.
  */
 export function gitAge(root: string, pageFile: string, refFiles: readonly string[]): GitAgeResult {
   const pagePath = inside(pageFile);
