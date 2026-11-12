@@ -26,19 +26,57 @@ function isMapping(value: unknown): value is Mapping {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Data records stay ordinary mappings, so `Site.data` keeps the shape consumers already read; what makes them
+// safe is that every key of a path below is read and written as an OWN property. A bare `node[key] = value` with
+// a key of `__proto__` hits the legacy accessor on `Object.prototype` and swaps the record's prototype for the
+// data instead of storing it, so the entry vanishes from the tree and its keys leak in as inherited values; a
+// bare `node[key]` read of `__proto__` answers `Object.prototype` itself, which would then merge into the tree
+// as if a previous file had loaded it. `prototype` and `constructor` are read the same way: only owned keys
+// count as previously loaded data.
+
+/** Whether the record owns `key`, never consulting the prototype chain. */
+function owns(record: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+/** The previously loaded data at `key`, or `undefined` when the record does not own that key. */
+function ownValue(record: Mapping, key: string): unknown {
+  return owns(record, key) ? record[key] : undefined;
+}
+
+/** Stores `value` as an own enumerable data property, bypassing any inherited accessor such as `__proto__`. */
+function setOwn(record: Mapping, key: string, value: unknown): void {
+  Object.defineProperty(record, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/** A fresh record holding exactly the own enumerable keys of `source`, in the same order. */
+function ownCopy(source: Mapping): Mapping {
+  const copy: Mapping = {};
+  for (const key of Object.keys(source)) setOwn(copy, key, source[key]);
+  return copy;
+}
+
+/** The merged mapping of two loaded values: every own key of `later` wins, as the path sorting later always did. */
+function mergeMappings(earlier: Mapping, later: Mapping): Mapping {
+  const merged = ownCopy(earlier);
+  for (const key of Object.keys(later)) setOwn(merged, key, later[key]);
+  return merged;
+}
+
 /**
  * Sets `keys` to `value` in the tree. Two files that map to the same key merge when both values are mappings
- * (the path that sorts later wins each key); a folder's keys merge into a same-named file's mapping.
+ * (the path that sorts later wins each key); a folder's keys merge into a same-named file's mapping. Every key
+ * of the path, special ones like `__proto__` included, is stored as an own property of the record above it.
  */
 function insert(node: Mapping, keys: readonly string[], value: unknown): void {
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i]!;
-    const prev = node[key];
+    const prev = ownValue(node, key);
     if (i === keys.length - 1) {
-      node[key] = isMapping(prev) && isMapping(value) ? { ...prev, ...value } : value;
+      setOwn(node, key, isMapping(prev) && isMapping(value) ? mergeMappings(prev, value) : value);
     } else {
-      const next: Mapping = isMapping(prev) ? { ...prev } : {};
-      node[key] = next;
+      const next: Mapping = isMapping(prev) ? ownCopy(prev) : {};
+      setOwn(node, key, next);
       node = next;
     }
   }
