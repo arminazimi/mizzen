@@ -148,14 +148,44 @@ function atFile(file: string): SourcePos {
   return { file, line: 1, column: 1, endLine: 1, endColumn: 1 };
 }
 
+/**
+ * A path with every `%`-escape decoded against the `/`-separated segment it sits in, so an encoded separator can
+ * never become one. `undefined` when an escape is malformed or decodes to a separator or a NUL: such a reference
+ * names no file, and guessing one would put a misleading node in the graph. A segment with no `%` is left exactly
+ * as written, so a reference that was never encoded is unaffected.
+ *
+ * A caller must re-check confinement on the result, since a decoded segment can spell `..` that the written form
+ * spelled as `%2e%2e`.
+ */
+function decodeSegments(value: string): string | undefined {
+  if (!value.includes("%")) return value;
+  const segments = value.split("/");
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!;
+    if (!segment.includes("%")) continue;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return undefined;
+    }
+    if (decoded === "" || decoded.includes("/") || decoded.includes("\\") || decoded.includes("\0")) return undefined;
+    segments[index] = decoded;
+  }
+  return segments.join("/");
+}
+
 /** A source-relative path named by a site-local URL such as `/media/logo.svg`, with `base` removed. */
 function localPath(url: string, base: string): string | undefined {
   const clean = url.split(/[?#]/, 1)[0] ?? "";
   if (!clean.startsWith("/")) return undefined;
   if (base !== "" && clean !== base && !clean.startsWith(`${base}/`)) return undefined;
   const withoutBase = base !== "" ? clean.slice(base.length) : clean;
-  const path = withoutBase.replace(/^\/+/, "");
-  if (path === "" || path.split("/").some((segment) => segment === "..")) return undefined;
+  const encoded = withoutBase.replace(/^\/+/, "");
+  if (encoded === "") return undefined;
+  const path = decodeSegments(encoded);
+  if (path === undefined) return undefined;
+  if (path.split("/").some((segment) => segment === "..")) return undefined;
   return path;
 }
 
@@ -164,16 +194,20 @@ const EXTERNAL = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i;
 
 /**
  * The source-relative path an image URL names from `from`: a root URL goes through {@link localPath}, a relative
- * one resolves from the file that holds it. `undefined` for an external URL or one that leaves the source folder.
+ * one resolves from the file that holds it. `undefined` for an external URL, one with a malformed escape, or one
+ * that leaves the source folder. Escapes are decoded before the path is resolved, so the edge names the file the
+ * built URL reaches, and the parent-segment check runs on the decoded path.
  */
 function referencePath(url: string, base: string, from: string): string | undefined {
   if (url === "" || url.startsWith("#") || EXTERNAL.test(url)) return undefined;
   const clean = url.split(/[?#]/, 1)[0] ?? "";
   if (clean === "") return undefined;
   if (clean.startsWith("/")) return localPath(clean, base);
-  const path = posix.normalize(posix.join(posix.dirname(normalize(from)), clean));
-  if (path === "" || path === "." || path === ".." || path.startsWith("../")) return undefined;
-  return path;
+  const path = decodeSegments(clean);
+  if (path === undefined || EXTERNAL.test(path)) return undefined;
+  const resolved = posix.normalize(posix.join(posix.dirname(normalize(from)), path));
+  if (resolved === "" || resolved === "." || resolved === ".." || resolved.startsWith("../")) return undefined;
+  return resolved;
 }
 
 /** An image reference found in a Markdown body: its URL and where it starts. */
