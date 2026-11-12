@@ -6,6 +6,10 @@
  *
  * - **Task intent**: `task.goal` is the ranking query. `task.kind` is preserved by the parser for the
  *   rank profiles a later step adds; this compiler never invents one.
+ * - **Measured trust**: one snapshot of the pack's own build is taken before ranking. Each trust entry is
+ *   projected into the ranker's example, drift, review-age, and coverage inputs — a signal the entry does
+ *   not measure stays unmeasured there — and the same snapshot is what each selected item publishes as its
+ *   `trust`, so an item's evidence and its rank reasons always describe one build.
  * - **Candidate hints**: an `include` hint that names a page (URL, source path, or section id) pins that
  *   page ahead of the ranking; a hint that names a topic (plain words) joins the query. An `exclude`
  *   hint removes matching pages before ranking, and can never be overridden by required evidence.
@@ -44,9 +48,14 @@ import {
   type PackSection,
   type PackSelection,
 } from "../outputs/context-pack.ts";
-import { trustReport, type TrustEntry, type TrustPageEntry } from "../outputs/trust.ts";
+import { trustReport, type TrustEntry, type TrustEntryFactor, type TrustPageEntry } from "../outputs/trust.ts";
 import { blockIdOf, formatSpan } from "../source/spans.ts";
-import { rankPages, type RankedPage } from "./rank.ts";
+import {
+  rankPages,
+  type RankTrustEvidence,
+  type RankTrustPage,
+  type RankedPage,
+} from "./rank.ts";
 import { estimateTokens } from "./tokens.ts";
 import { trimPages, type RequiredEvidence, type TrimResult } from "./trim.ts";
 
@@ -79,6 +88,36 @@ export interface CompileOptions {
   readonly warnings?: readonly Diagnostic[];
   /** Trust entries to reuse, by URL; computed from the site's data when absent. */
   readonly trust?: ReadonlyMap<string, TrustEntry>;
+  /**
+   * The identity of the build {@link CompileOptions.trust} was measured in. Absent means the pack's own
+   * build, so the evidence ranks and publishes; any other value means another build's evidence, which
+   * raises no page and is published nowhere.
+   */
+  readonly trustBuild?: string;
+}
+
+/** One page's entry in a trust snapshot: the published entry and the rank projection measured from it. */
+interface SnapshotPage {
+  /** The entry the pack publishes as the item's `trust`. */
+  readonly trust: TrustEntry;
+  /** The same signals as the ranker's example, drift, review-age, and coverage inputs. */
+  readonly evidence: RankTrustPage;
+}
+
+/**
+ * The trust evidence of one build, in the two forms the compiler needs: {@link rankPages} reads the
+ * projection with the pack's own build identity, and the pack publishes the entries projected from it,
+ * so an item's evidence and its rank reasons can never name different measurements.
+ */
+interface TrustSnapshot {
+  /** The identity the entries were measured in, as the ranker's `trust.build`. */
+  readonly build: string;
+  /** Whether those entries belong to the build being packed; another build's entries are read by neither. */
+  readonly applies: boolean;
+  /** The projection the ranker reads, keyed by page URL, with {@link TrustSnapshot.build} as its build. */
+  readonly evidence: RankTrustEvidence;
+  /** One page's entry and projection, by page URL. */
+  readonly pages: ReadonlyMap<string, SnapshotPage>;
 }
 
 /** One compiled pack: the Markdown a person pastes, and the structured evidence a tool reads. */
@@ -223,8 +262,123 @@ function trustEntryOf(entry: TrustPageEntry): TrustEntry {
   return {
     evidence: entry.evidence,
     level: entry.level,
+    factors: entry.factors,
+    reviewCoverage: entry.reviewCoverage,
     reasons: entry.reasons,
     ...(entry.lastReviewer === undefined ? {} : { lastReviewer: entry.lastReviewer }),
+  };
+}
+
+/** A measured whole, non-negative count; a fractional, negative, or non-numeric value measured nothing. */
+function countOf(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** The entry's factor of one signal, in the fixed examples-drift-review order, or `undefined` when absent. */
+function factorOf(
+  entry: TrustEntry,
+  signal: TrustEntryFactor["signal"],
+): TrustEntryFactor | undefined {
+  return entry.factors?.find((factor) => factor.signal === signal);
+}
+
+/**
+ * The example evidence as the ranker reads it. A trust entry names the failing count, not the totals, so
+ * the projection gives the smallest count set the entry supports: `k` failures of `k`, or one passing
+ * example of one. A conflict, an unknown result, or a factor the entry does not carry projects to
+ * `"unknown"`, which the ranker reads as unmeasured rather than clean.
+ */
+function examplesEvidence(entry: TrustEntry): RankTrustPage["examples"] {
+  if (entry.evidence.examples === "none") return "none";
+  if (entry.evidence.examples !== "measured") return "unknown";
+  const factor = factorOf(entry, "examples");
+  switch (factor?.code) {
+    case "examples.none":
+      return "none";
+    case "examples.passed":
+      return { total: 1, passed: 1, failed: 0 };
+    case "examples.failed": {
+      const failed = countOf(factor.value);
+      return failed === undefined || failed === 0 ? "unknown" : { total: failed, passed: 0, failed };
+    }
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * The drift evidence as the ranker reads it: a clean count, the measured finding count, `"unknown"` for
+ * an unreadable or contradicted count, and nothing for a page whose drift was never checked.
+ */
+function driftEvidence(entry: TrustEntry): RankTrustPage["drift"] {
+  if (entry.evidence.drift !== "measured") return entry.evidence.drift === "missing" ? undefined : "unknown";
+  const factor = factorOf(entry, "drift");
+  if (factor?.code === "drift.clean") return 0;
+  if (factor?.code === "drift.findings") {
+    const findings = countOf(factor.value);
+    return findings === undefined || findings === 0 ? "unknown" : findings;
+  }
+  return "unknown";
+}
+
+/** The whole days since the page was last reviewed, as the ranker reads them. */
+function reviewEvidence(entry: TrustEntry): RankTrustPage["reviewAgeDays"] {
+  if (entry.evidence.review !== "measured") return entry.evidence.review === "missing" ? undefined : "unknown";
+  const factor = factorOf(entry, "review");
+  if (factor?.code !== "review.recent" && factor?.code !== "review.overdue") return "unknown";
+  return countOf(factor.value);
+}
+
+/** What the review source knows, or `undefined` when the entry names no coverage at all. */
+function coverageEvidence(entry: TrustEntry): RankTrustPage["reviewCoverage"] {
+  const coverage = entry.reviewCoverage;
+  return coverage === undefined ||
+    coverage === "recorded" ||
+    coverage === "untracked" ||
+    coverage === "unavailable" ||
+    coverage === "unknown"
+    ? coverage
+    : "unknown";
+}
+
+/** One entry's measured signals, as the ranker's evidence for one page. */
+function evidenceOfEntry(entry: TrustEntry): RankTrustPage {
+  const examples = examplesEvidence(entry);
+  const drift = driftEvidence(entry);
+  const reviewAgeDays = reviewEvidence(entry);
+  const reviewCoverage = coverageEvidence(entry);
+  return {
+    ...(examples === undefined ? {} : { examples }),
+    ...(drift === undefined ? {} : { drift }),
+    ...(reviewAgeDays === undefined ? {} : { reviewAgeDays }),
+    ...(reviewCoverage === undefined ? {} : { reviewCoverage }),
+  };
+}
+
+/**
+ * The snapshot of {@link CompileOptions.trust} for the build being packed, keyed by page URL and stamped
+ * with the build the entries name (`measuredIn`, or this pack's own build when the caller does not know
+ * better). The evidence record is written in URL order, so entry order never reaches the ranking.
+ */
+function trustSnapshotOf(
+  build: string,
+  trust: ReadonlyMap<string, TrustEntry>,
+  measuredIn: string | undefined,
+): TrustSnapshot {
+  const stamp = (measuredIn ?? build).trim();
+  const pages = new Map<string, SnapshotPage>();
+  for (const url of [...trust.keys()].sort(byCodePoint)) {
+    const entry = trust.get(url);
+    if (entry === undefined) continue;
+    pages.set(url, { trust: entry, evidence: evidenceOfEntry(entry) });
+  }
+  const record: Record<string, RankTrustPage> = {};
+  for (const [url, measured] of pages) record[url] = measured.evidence;
+  return {
+    build: stamp,
+    applies: stamp !== "" && stamp === build.trim(),
+    evidence: { build: stamp, pages: record },
+    pages,
   };
 }
 
@@ -255,11 +409,11 @@ function itemOf(
   index: number,
   build: PackBuild,
   versions: ReadonlyMap<string, string>,
-  trust: ReadonlyMap<string, TrustEntry>,
+  snapshot: TrustSnapshot,
   ranked: RankedPage,
 ): PackItem {
   const source = sourceOf(page);
-  const entry = trust.get(page.url);
+  const entry = snapshot.applies ? snapshot.pages.get(page.url)?.trust : undefined;
   const kept = trimmed?.pages[index];
   return {
     id: page.url,
@@ -532,11 +686,21 @@ export async function compilePack(
   }
 
   const query = [request.task.goal, ...queryHints].join(" ").trim();
+
+  // One build identity and one trust snapshot, decided before ranking, so the rank reasons and the
+  // published items read the same measurements. Entries measured in another build name a build the
+  // ranker does not, which is how they raise no page and publish no trust.
+  const build = buildIdentityOf(site);
+  const trust = options.trust ?? (await trustIndexOf(site));
+  const snapshot = trustSnapshotOf(build.id, trust, options.trustBuild);
+
   const ranked = rankPages(candidates, query, {
     base,
     ...(request.task.kind === undefined ? {} : { task: request.task.kind }),
     ...(request.constraints.locale === undefined ? {} : { lang: request.constraints.locale }),
     ...(request.constraints.version?.exact === undefined ? {} : { version: request.constraints.version.exact }),
+    build: build.id,
+    trust: snapshot.evidence,
   });
   const order = uniquePages([
     ...[...forced].sort((a, b) => byCodePoint(a.url, b.url)),
@@ -655,16 +819,14 @@ export async function compilePack(
   }
   for (const diagnostic of packWarnings) ctx.report(diagnostic);
 
-  const build = buildIdentityOf(site);
   const versionFolders = new Map<string, string>();
   for (const page of site.pages) {
     const folder = versions.get(page);
     if (folder !== null && folder !== undefined) versionFolders.set(page.url, folder);
   }
-  const trust = options.trust ?? (await trustIndexOf(site));
   const rankedByPage = new Map(ranked.map((entry) => [entry.page, entry]));
   const items = chosen.map((page, index) =>
-    itemOf(page, contents[index] ?? "", trimmed, index, build, versionFolders, trust, rankedByPage.get(page)!),
+    itemOf(page, contents[index] ?? "", trimmed, index, build, versionFolders, snapshot, rankedByPage.get(page)!),
   );
 
   // The Markdown and JSON are two renderings of this one item list, so they cannot name different evidence.
