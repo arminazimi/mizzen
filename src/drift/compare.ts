@@ -65,11 +65,14 @@ import {
  * - `drift.signature-unchecked` when the documentation states a signature but the declaration or the
  *   documented form cannot be compared, such as an inferred const type, a re-export, an enum, a spread
  *   argument, or a destructured argument. It is never silent: the citation is not clean either.
+ * - `drift.symbols-syntax` when the cited TypeScript file cannot be scanned at all. The scanner's own
+ *   finding is carried into the comparison with its real position inside the target and the target path
+ *   it names, and it replaces every symbol judgment for that citation: an unreadable API is never
+ *   reported as a clean one, as a missing symbol, or as a file that exports nothing. A citation that
+ *   earned it is associated with the citing reference, so the target the page names is never lost.
  *
  * Paths resolve inside `root` and never outside it: a target that resolves outside the root, including
- * one that uses a symbolic link to leave it, is refused with `drift.outside-root` and never read. A
- * TypeScript file that N08 cannot scan is treated as exporting nothing; the scan's own diagnostic is
- * N08's to report.
+ * one that uses a symbolic link to leave it, is refused with `drift.outside-root` and never read.
  *
  * ## Evidence identity
  *
@@ -81,7 +84,9 @@ import {
  *
  * `compareClaims` and `comparePages` read files under `root` and write nothing; they keep no state
  * between calls. Diagnostics come in the order of `pages`, then source line and column, then check ID
- * and message, so two runs over the same arguments agree.
+ * and message, then the citation they were judged for, so two runs over the same arguments agree. A
+ * diagnostic whose position is in a cited source, such as a scanner failure, is ordered where the page
+ * makes the citation, so several citations of one target never reorder or lose the finding.
  */
 
 /** The default number of lines a cited line may miss a declaration by. */
@@ -102,7 +107,17 @@ export interface CompareOptions {
 type Target =
   | { readonly kind: "outside" }
   | { readonly kind: "missing"; readonly detail: string }
-  | { readonly kind: "text"; readonly text: string; readonly symbols: readonly ExportedSymbol[] | null };
+  | {
+      readonly kind: "text";
+      readonly text: string;
+      readonly symbols: readonly ExportedSymbol[] | null;
+      /**
+       * The scanner's own findings for these bytes, in source order; empty when the source scanned
+       * successfully (and always empty for a file that is not TypeScript). A non-empty list means the
+       * exports were never read, so the symbols below say nothing about the file's real API.
+       */
+      readonly scan: readonly Diagnostic[];
+    };
 
 /** A box in a page's source: lines and columns are 1-based and the end is inclusive, as in `SourcePos`. */
 interface Box {
@@ -219,10 +234,11 @@ export async function comparePages(
       const paragraphs = paragraphsOf(await parseMarkdown(page.markdown, page.source.line), page.source.file);
       for (const ref of references) {
         const target = await targetOf(ref.path, root, rootReal, targets);
-        const found = judge(ref, target, paragraphFor(ref.pos, paragraphs), tolerance);
-        if (found !== null) findings.push({ diagnostic: found, reference: ref });
+        for (const diagnostic of judge(ref, target, paragraphFor(ref.pos, paragraphs), tolerance)) {
+          findings.push({ diagnostic, reference: ref });
+        }
       }
-      findings.sort((a, b) => compareDiagnostics(a.diagnostic, b.diagnostic));
+      findings.sort((a, b) => compareFindings(a, b));
     }
 
     comparisons.push({
@@ -288,7 +304,9 @@ async function readTarget(path: string, root: string, rootReal: string): Promise
     return { kind: "missing", detail: missingDetail(err) };
   }
 
-  return { kind: "text", text, symbols: TYPESCRIPT.test(path) ? exportedSymbols(text, { file: path }).symbols : null };
+  if (!TYPESCRIPT.test(path)) return { kind: "text", text, symbols: null, scan: [] };
+  const scanned = exportedSymbols(text, { file: path });
+  return { kind: "text", text, symbols: scanned.symbols, scan: scanned.diagnostics };
 }
 
 /** True when `target` is `base` or inside it, comparing the paths as given. */
@@ -399,12 +417,25 @@ function atOrBefore(point: { readonly line: number; readonly column: number }, b
   return point.line < box.endLine || (point.line === box.endLine && point.column <= box.endColumn);
 }
 
-/** The one diagnostic a reference earns, or null when the page and the code agree. */
-function judge(ref: CodeRef, target: Target, paragraph: Paragraph | undefined, tolerance: number): Diagnostic | null {
-  if (target.kind === "outside") return outsideRoot(ref);
-  if (target.kind === "missing") return missingFile(ref, target.detail);
-  if (target.symbols === null) return checkLines(ref, target.text);
-  return checkSymbols(ref, target.symbols, paragraph?.claims ?? [], tolerance);
+/** The diagnostics one reference earns; empty when the page and the code agree. */
+function judge(
+  ref: CodeRef,
+  target: Target,
+  paragraph: Paragraph | undefined,
+  tolerance: number,
+): readonly Diagnostic[] {
+  if (target.kind === "outside") return [outsideRoot(ref)];
+  if (target.kind === "missing") return [missingFile(ref, target.detail)];
+  // A scanner failure is the only explanation this citation has: the exports were never read, so the
+  // finding is neither clean nor merely exportless. Its position stays the real one in the target.
+  if (target.scan.length > 0) return target.scan.map((diagnostic) => ({ ...diagnostic }));
+  if (target.symbols === null) return listOf(checkLines(ref, target.text));
+  return listOf(checkSymbols(ref, target.symbols, paragraph?.claims ?? [], tolerance));
+}
+
+/** One diagnostic, or nothing. */
+function listOf(diagnostic: Diagnostic | null): readonly Diagnostic[] {
+  return diagnostic === null ? [] : [diagnostic];
 }
 
 /** A reference to a path outside the root is refused without being read. */
@@ -631,6 +662,40 @@ function noSymbols(ref: CodeRef): Diagnostic {
     pos: ref.pos,
     help: "Cite a file that exports the symbol, or remove the reference.",
   };
+}
+
+/** Orders findings by the page's source order, then the diagnostic, then the citation. */
+function compareFindings(a: ClaimFinding, b: ClaimFinding): number {
+  const left = orderOf(a);
+  const right = orderOf(b);
+  const line = left.line - right.line;
+  if (line !== 0) return line;
+  const column = left.column - right.column;
+  if (column !== 0) return column;
+  const byDiagnostic = compareDiagnostics(a.diagnostic, b.diagnostic);
+  if (byDiagnostic !== 0) return byDiagnostic;
+  return compareRefs(a.reference, b.reference);
+}
+
+/**
+ * Where a finding sits in the page's source. A finding that points into another file, such as a scanner
+ * failure in the cited target, is ordered at the citation that earned it, so several citations of one
+ * target come out in document order instead of mixing two files' line numbers.
+ */
+function orderOf(finding: ClaimFinding): { readonly line: number; readonly column: number } {
+  const pos = finding.diagnostic.pos;
+  return pos === undefined || pos.file !== finding.reference.pos.file ? finding.reference.pos : pos;
+}
+
+/** Orders citations by path, then the lines and column they name. */
+function compareRefs(a: CodeRef, b: CodeRef): number {
+  const path = byCodePoint(a.path, b.path);
+  if (path !== 0) return path;
+  const line = a.line - b.line;
+  if (line !== 0) return line;
+  const end = (a.endLine ?? a.line) - (b.endLine ?? b.line);
+  if (end !== 0) return end;
+  return (a.column ?? 0) - (b.column ?? 0);
 }
 
 /** Orders diagnostics by line, then column, then ID, then message. */
