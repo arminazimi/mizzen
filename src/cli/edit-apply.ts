@@ -5,9 +5,11 @@
  * The patch is the plain-data shape of N27 (`src/edits/patch.ts`): one span with 1-based lines and
  * columns, the optional text it expected to find there, its replacement, and the optional SHA-256
  * of the source it was computed from. A patch that carries either precondition must carry both, so
- * a patch written by the planner cannot silently lose its staleness check. The source is
- * `span.file`, resolved against the site root; a lexical escape and a symlink whose real target
- * leaves the root are both refused. The patch is applied in memory first.
+ * a patch written by the planner cannot silently lose its staleness check. A patch that carries
+ * neither is refused as a usage error unless the caller passes `--allow-unchecked`, so a malformed
+ * or minimized agent patch cannot lose both checks by accident. The source is `span.file`, resolved
+ * against the site root; a lexical escape and a symlink whose real target leaves the root are both
+ * refused. The patch is applied in memory first.
  *
  * The source, its N29 proof (`src/edits/proof.ts`) at `--proof` or `<patch>.proof.json`, and the
  * provenance line appended to `<patch>.audit.jsonl` (`src/edits/audit.ts`) are then committed as
@@ -18,7 +20,8 @@
  *
  * Exit codes follow the rest of the CLI: `0` applied (or a dry run that would apply), `1` a refused
  * patch or a refused path (the file is unchanged), `2` a usage problem, such as a patch that is
- * missing or is not a patch. `--format json` prints the same outcome as one {@link EditApplyReport}.
+ * missing, is not a patch, or carries no precondition without `--allow-unchecked`. `--format json`
+ * prints the same outcome as one {@link EditApplyReport}.
  *
  */
 import { readFile, realpath } from "node:fs/promises";
@@ -50,6 +53,8 @@ export interface EditApplyOptions {
   readonly proof?: string;
   /** Print the diff and write neither the source nor the proof. */
   readonly dryRun?: boolean;
+  /** Apply a patch that carries neither `expected` nor `beforeHash`; the caller accepts the risk. */
+  readonly allowUnchecked?: boolean;
   /** Test seam for the commit transaction; the CLI never sets it. */
   readonly transactionHooks?: TransactionHooks;
 }
@@ -76,6 +81,7 @@ export interface EditApplyResult {
 export type EditApplyErrorCode =
   | "edit.patch-missing"
   | "edit.patch-invalid"
+  | "edit.patch-unchecked"
   | "edit.path-escape"
   | "edit.source-missing"
   | "edit.patch-refused"
@@ -327,12 +333,29 @@ async function sourceTarget(
 
 /**
  * The preconditions a patch asks for. A planner patch carries both `expected` and `beforeHash`; a
- * patch that carries one must carry the other, so a staleness check cannot be silently dropped. A
- * patch that carries neither is the explicit unchecked form the CLI has always accepted.
+ * patch that carries one must carry the other, so a staleness check cannot be silently dropped.
+ * Both are required whenever either is present, including under `--allow-unchecked`, so the
+ * override can never turn such a patch into a half-checked edit.
  */
 function applyOptions(patch: Patch): ApplyPatchOptions {
   const carries = patch.expected !== undefined || patch.beforeHash !== undefined;
   return { requireHash: carries, requireExpected: carries };
+}
+
+/**
+ * Refuses a patch carrying neither precondition unless the caller explicitly accepts the risk.
+ * The diagnostic names `--allow-unchecked`, the only way to apply such a patch.
+ */
+function refuseUnchecked(patch: Patch, allowUnchecked: boolean): void {
+  if (allowUnchecked || patch.expected !== undefined || patch.beforeHash !== undefined) return;
+  const file = patch.span.file;
+  if (file === undefined) return; // readPatch refuses a span without a file before this check.
+  throw new EditApplyError(
+    "edit.patch-unchecked",
+    `${file}: the patch carries neither "expected" nor "beforeHash", so a stale source cannot be ruled out; pass --allow-unchecked to apply it anyway.`,
+    true,
+    { path: file, span: patch.span },
+  );
 }
 
 /** One ledger line to append, and the existing ledger it was computed from. */
@@ -418,6 +441,8 @@ async function appendLedger(
 export async function editApply(options: EditApplyOptions): Promise<EditApplyResult> {
   const siteRoot = resolve(options.siteRoot);
   const patch = await readPatch(options.patch);
+  // Checked before the source is read or any byte is staged, so a refusal changes nothing.
+  refuseUnchecked(patch, options.allowUnchecked === true);
   const spanFile = patch.span.file;
   if (spanFile === undefined) {
     throw new EditApplyError("edit.patch-invalid", `${options.patch}: the patch names no file.`, true, {
@@ -443,7 +468,9 @@ export async function editApply(options: EditApplyOptions): Promise<EditApplyRes
   let after: string;
   try {
     // A dry run writes nothing, so it can still show the diff of a patch that the real apply would
-    // refuse for a missing precondition. Every precondition the patch carries is still checked.
+    // refuse for a missing or stale precondition; a patch carrying neither precondition was already
+    // refused above unless --allow-unchecked was given. Every precondition the patch carries is
+    // still checked.
     after = applyPatches(source, [patch], options.dryRun === true ? {} : applyOptions(patch)).text;
   } catch (error) {
     if (!(error instanceof PatchError)) throw error;

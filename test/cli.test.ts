@@ -69,6 +69,10 @@ test("parseArgs: help, build defaults, check format, and usage errors", () => {
   assert.equal("error" in parseArgs(["check", "--format", "yaml"]), true);
 });
 
+test("usage documents the unchecked edit override", () => {
+  assert.match(usage, /--allow-unchecked/);
+});
+
 test("build writes the site and exits 0 when there are no errors", async () => {
   const root = tree({
     "mizzen.yml":
