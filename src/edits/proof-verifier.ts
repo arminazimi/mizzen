@@ -8,6 +8,9 @@
  * file but at another position is `moved`; one whose text is nowhere is a wrong hash; one that runs
  * outside the file is a range failure.
  *
+ * Locating a move is a bounded search, not a hash per offset: see {@link MovedTextIndex} for the rolling
+ * fingerprint, the caps it works under, and the counters that report what one search cost.
+ *
  * A path that leaves the root through a symlink is never read: `realpath` is checked against the root
  * first, so a proof cannot be used to hash or leak a file outside the site.
  *
@@ -297,49 +300,353 @@ function fileAt(siteRoot: string, path: string): string {
   return join(siteRoot, ...path.split("/"));
 }
 
-// A moved span is located by scanning for text of the same code-point length. The caps keep a wrong
-// hash in a huge file from stalling verification; raise them if spans this large must be located.
-// shortcut: moved spans beyond 2,000,000 code points (or 100,000 code points long) report a hash
-// mismatch instead of a move.
-const MOVED_SCAN_CODE_POINTS = 2_000_000;
-const MOVED_SPAN_CODE_POINTS = 100_000;
+// A moved span is located by a bounded rolling search over the file's code points: every window of
+// the recorded length gets one cheap 52-bit fingerprint, and a full SHA-256 is computed only for a
+// window whose text has not been seen before under that fingerprint. Repeated text therefore costs
+// one confirmation instead of one hash per offset, so a long span in a large changed file no longer
+// means quadratic hashing. The fingerprint is only a candidate key: a window is skipped as a
+// duplicate only after its code points are compared with the windows already seen under that key, so
+// two different texts sharing a fingerprint cost the second one a confirmation, never its match. The
+// map stores offsets, not text, so its size stays bounded by the scan.
+// shortcut: a search that reaches one of these caps reports a hash mismatch instead of a move, the
+// same honest fallback a span outside the caps has always had. Raise them if larger spans must be
+// located.
+export const MOVED_SCAN_CODE_POINTS = 2_000_000;
+export const MOVED_SPAN_CODE_POINTS = 100_000;
+export const MOVED_CANDIDATE_CONFIRMATIONS = 262_144;
+export const MOVED_CANDIDATE_CODE_POINTS = 16_777_216;
 
-/** The line and column of a code-point index, 1-based, counting CR as a column like the span units. */
-function positionAt(points: readonly string[], index: number): { readonly line: number; readonly column: number } {
-  let line = 1;
-  let column = 1;
-  for (let at = 0; at < index; at += 1) {
-    if (points[at] === "\n") {
-      line += 1;
-      column = 1;
-    } else {
-      column += 1;
-    }
-  }
-  return { line, column };
+/** The caps one moved-span search works under; every field defaults to the documented constant. */
+export interface MovedSearchLimits {
+  /** Largest file, in code points, whose text is searched at all. */
+  readonly maxScanCodePoints?: number;
+  /** Largest span, in code points, that is searched. */
+  readonly maxSpanCodePoints?: number;
+  /** Largest number of full SHA-256 confirmations one search makes. */
+  readonly maxCandidateConfirmations?: number;
+  /** Largest number of code points one search hands to SHA-256 in total. */
+  readonly maxCandidateCodePoints?: number;
 }
 
-/** Where else in `text` the span's text sits, when its hash still matches somewhere else. */
-function findMoved(
-  text: string,
-  length: number,
-  hash: string,
-): { line: number; column: number; endLine: number; endColumn: number } | undefined {
-  if (length < 1 || length > MOVED_SPAN_CODE_POINTS) return undefined;
-  const points = Array.from(text);
-  if (points.length > MOVED_SCAN_CODE_POINTS || length > points.length) return undefined;
-  for (let start = 0; start + length <= points.length; start += 1) {
-    if (hashText(points.slice(start, start + length).join("")) !== hash) continue;
-    const first = positionAt(points, start);
-    const last = positionAt(points, start + length - 1);
-    return { line: first.line, column: first.column, endLine: last.line, endColumn: last.column };
+/** The cap that stopped a search, so a caller can tell an honest fallback from a real absence. */
+export type MovedSearchCap = "span-length" | "scan-size" | "confirmations" | "candidate-code-points";
+
+/** How one moved-span search ended. */
+export type MovedSearchOutcome = "found" | "absent" | "capped";
+
+/** Where the searched text sits, in the same inclusive line and column units as a recorded span. */
+export interface MovedPosition {
+  readonly line: number;
+  readonly column: number;
+  readonly endLine: number;
+  readonly endColumn: number;
+}
+
+/** One moved-span search and the work it cost, so a caller can see that the search stayed bounded. */
+export interface MovedSearchResult {
+  readonly outcome: MovedSearchOutcome;
+  /** Where the text was found, when `outcome` is `found`. */
+  readonly position?: MovedPosition;
+  /** The cap that stopped the search, when `outcome` is `capped`. */
+  readonly cap?: MovedSearchCap;
+  /** Window offsets fingerprinted by the rolling search: never more than one per code point. */
+  readonly scannedOffsets: number;
+  /** Full SHA-256 computations: one per distinct candidate, never one per offset. */
+  readonly confirmations: number;
+  /** Code points handed to SHA-256 in total. */
+  readonly candidateCodePoints: number;
+}
+
+/** One search a file check ran, with the span that asked for it, for {@link MovedSearchOptions.onSearch}. */
+export interface MovedSearchObservation {
+  /** The recorded span whose text was searched for. */
+  readonly span: ProofSpan;
+  /** The file's size in code points, which is what the scan cap measures. */
+  readonly codePoints: number;
+  /** How many line-start tables the file's index has built: one, however many spans move. */
+  readonly lineIndexBuilds: number;
+  /** How the search ended and what it cost. */
+  readonly result: MovedSearchResult;
+}
+
+/** How one file check is allowed to look for moved text: the caps it works under and a work observer. */
+export interface MovedSearchOptions extends MovedSearchLimits {
+  /**
+   * Called once for every moved-span search the file check runs, with the work it did.
+   *
+   * A caller that must bound its own effort passes lower caps, and any caller can count the
+   * confirmations the check actually made; the reported numbers are the search's own counters.
+   */
+  readonly onSearch?: (observation: MovedSearchObservation) => void;
+}
+
+/** The two moduli and bases of the rolling fingerprint, kept under 2^26 so its products stay exact. */
+const FINGERPRINT_MODULUS_A = 67_108_859;
+const FINGERPRINT_MODULUS_B = 67_108_823;
+const FINGERPRINT_BASE_A = 1_000_003;
+const FINGERPRINT_BASE_B = 999_983;
+/** Above both moduli, so `(fingerprintA * KEY_STRIDE) + fingerprintB` is one exact integer key. */
+const FINGERPRINT_KEY_STRIDE = 67_108_864;
+
+/** Code-point values, one per entry, and the UTF-16 offset of each, exactly as `Array.from` splits. */
+function codePointArrays(text: string, count: number): { points: Uint32Array; units: Uint32Array; written: number } {
+  const points = new Uint32Array(count);
+  const units = new Uint32Array(count + 1);
+  let at = 0;
+  for (let unit = 0; unit < text.length; ) {
+    const lead = text.charCodeAt(unit);
+    let value = lead;
+    let width = 1;
+    if (lead >= 0xd800 && lead <= 0xdbff && unit + 1 < text.length) {
+      const trail = text.charCodeAt(unit + 1);
+      if (trail >= 0xdc00 && trail <= 0xdfff) {
+        value = 0x10000 + ((lead - 0xd800) << 10) + (trail - 0xdc00);
+        width = 2;
+      }
+    }
+    points[at] = value;
+    units[at] = unit;
+    at += 1;
+    unit += width;
   }
-  return undefined;
+  units[at] = text.length;
+  return { points, units, written: at };
+}
+
+/** How many code points `text` holds, counting a surrogate pair as one and a lone surrogate as one. */
+function countCodePoints(text: string): number {
+  let pairs = 0;
+  for (let unit = 0; unit + 1 < text.length; unit += 1) {
+    const lead = text.charCodeAt(unit);
+    const trail = text.charCodeAt(unit + 1);
+    if (lead >= 0xd800 && lead <= 0xdbff && trail >= 0xdc00 && trail <= 0xdfff) {
+      pairs += 1;
+      unit += 1;
+    }
+  }
+  return text.length - pairs;
+}
+
+/**
+ * The code-point offset each line starts at: `starts[k]` is the first code point of line `k + 1`.
+ *
+ * A line ends at a line feed, which counts as a column of the line it closes, exactly as the recorded
+ * spans measure a CRLF file.
+ */
+function lineStartsOf(points: Uint32Array): Uint32Array {
+  let lines = 1;
+  for (let at = 0; at < points.length; at += 1) {
+    if (points[at] === 10) lines += 1;
+  }
+  const starts = new Uint32Array(lines);
+  starts[0] = 0;
+  let line = 1;
+  for (let at = 0; at < points.length; at += 1) {
+    if (points[at] === 10) {
+      starts[line] = at + 1;
+      line += 1;
+    }
+  }
+  return starts;
+}
+
+/** The 1-based line and column of a code-point offset, read off the precomputed line starts. */
+function positionOf(starts: Uint32Array, index: number): { line: number; column: number } {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >>> 1;
+    if ((starts[middle] ?? 0) <= index) low = middle;
+    else high = middle - 1;
+  }
+  return { line: low + 1, column: index - (starts[low] ?? 0) + 1 };
+}
+
+/**
+ * The code points of one file's text, indexed once so every moved-span search reads that index.
+ *
+ * The search a {@link MovedTextIndex.search} runs is linear in the file: one rolling fingerprint per
+ * window and one full SHA-256 per distinct candidate, with the position of a match read from the
+ * precomputed line starts instead of a rescan of the prefix.
+ */
+export class MovedTextIndex {
+  private readonly text: string;
+  private readonly count: number;
+  private points: Uint32Array | undefined;
+  private units: Uint32Array | undefined;
+  private starts: Uint32Array | undefined;
+  private builds = 0;
+  private lookups = 0;
+
+  constructor(text: string) {
+    this.text = text;
+    this.count = countCodePoints(text);
+  }
+
+  /** The text's length in code points, which is all the caps need before a search is run. */
+  get codePoints(): number {
+    return this.count;
+  }
+
+  /** How many times the line-start table was built: one index builds it once, however many spans move. */
+  get lineIndexBuilds(): number {
+    return this.builds;
+  }
+
+  /** How many match positions were read off that table instead of rescanning the prefix. */
+  get positionsResolved(): number {
+    return this.lookups;
+  }
+
+  /** Where else in the text `length` code points hashing to `hash` sit, and what locating them cost. */
+  search(length: number, hash: string, limits: MovedSearchLimits = {}): MovedSearchResult {
+    const maxScan = limits.maxScanCodePoints ?? MOVED_SCAN_CODE_POINTS;
+    const maxSpan = limits.maxSpanCodePoints ?? MOVED_SPAN_CODE_POINTS;
+    const maxConfirmations = limits.maxCandidateConfirmations ?? MOVED_CANDIDATE_CONFIRMATIONS;
+    const maxCandidatePoints = limits.maxCandidateCodePoints ?? MOVED_CANDIDATE_CODE_POINTS;
+
+    if (length < 1 || length > maxSpan) return noWork("capped", "span-length");
+    if (this.count > maxScan) return noWork("capped", "scan-size");
+
+    const points = this.indexPoints();
+    if (length > points.length) return noWork("absent");
+    const units = this.indexUnits();
+
+    let fingerprintA = 0;
+    let fingerprintB = 0;
+    let leadA = 1;
+    let leadB = 1;
+    for (let at = 0; at < length; at += 1) {
+      const value = points[at] ?? 0;
+      fingerprintA = (fingerprintA * FINGERPRINT_BASE_A + value) % FINGERPRINT_MODULUS_A;
+      fingerprintB = (fingerprintB * FINGERPRINT_BASE_B + value) % FINGERPRINT_MODULUS_B;
+      if (at > 0) {
+        leadA = (leadA * FINGERPRINT_BASE_A) % FINGERPRINT_MODULUS_A;
+        leadB = (leadB * FINGERPRINT_BASE_B) % FINGERPRINT_MODULUS_B;
+      }
+    }
+
+    // Fingerprint key to the offsets already confirmed under it. One offset for the common case, a
+    // list only when two different windows collide on the same fingerprint.
+    const seen = new Map<number, number | number[]>();
+    let confirmations = 0;
+    let candidateCodePoints = 0;
+    const windows = points.length - length + 1;
+    let scannedOffsets = 0;
+
+    for (let start = 0; start < windows; start += 1) {
+      if (start > 0) {
+        const outgoing = points[start - 1] ?? 0;
+        const incoming = points[start + length - 1] ?? 0;
+        fingerprintA = fingerprintA - ((outgoing * leadA) % FINGERPRINT_MODULUS_A);
+        if (fingerprintA < 0) fingerprintA += FINGERPRINT_MODULUS_A;
+        fingerprintA = (fingerprintA * FINGERPRINT_BASE_A + incoming) % FINGERPRINT_MODULUS_A;
+        fingerprintB = fingerprintB - ((outgoing * leadB) % FINGERPRINT_MODULUS_B);
+        if (fingerprintB < 0) fingerprintB += FINGERPRINT_MODULUS_B;
+        fingerprintB = (fingerprintB * FINGERPRINT_BASE_B + incoming) % FINGERPRINT_MODULUS_B;
+      }
+      scannedOffsets = start + 1;
+
+      const key = fingerprintA * FINGERPRINT_KEY_STRIDE + fingerprintB;
+      const known = seen.get(key);
+      if (known !== undefined) {
+        const duplicate =
+          typeof known === "number"
+            ? this.sameWindow(start, known, length)
+            : known.some((other) => this.sameWindow(start, other, length));
+        if (duplicate) continue;
+      }
+      if (confirmations >= maxConfirmations) {
+        return { outcome: "capped", cap: "confirmations", scannedOffsets, confirmations, candidateCodePoints };
+      }
+      if (candidateCodePoints + length > maxCandidatePoints) {
+        return {
+          outcome: "capped",
+          cap: "candidate-code-points",
+          scannedOffsets,
+          confirmations,
+          candidateCodePoints,
+        };
+      }
+      if (known === undefined) seen.set(key, start);
+      else if (typeof known === "number") seen.set(key, [known, start]);
+      else known.push(start);
+      confirmations += 1;
+      candidateCodePoints += length;
+
+      if (hashText(this.text.slice(units[start] ?? 0, units[start + length] ?? 0)) !== hash) continue;
+      const starts = this.indexStarts();
+      const first = positionOf(starts, start);
+      const last = positionOf(starts, start + length - 1);
+      this.lookups += 1;
+      return {
+        outcome: "found",
+        position: { line: first.line, column: first.column, endLine: last.line, endColumn: last.column },
+        scannedOffsets,
+        confirmations,
+        candidateCodePoints,
+      };
+    }
+    return { outcome: "absent", scannedOffsets, confirmations, candidateCodePoints };
+  }
+
+  /** True when the windows starting at `a` and `b` hold the same `length` code points. */
+  private sameWindow(a: number, b: number, length: number): boolean {
+    const points = this.indexPoints();
+    const units = this.indexUnits();
+    const left = units[a] ?? 0;
+    const right = units[b] ?? 0;
+    for (let at = 0; at < length; at += 1) {
+      if (points[left + at] !== points[right + at]) return false;
+    }
+    return true;
+  }
+
+  /** The code-point values of the text, built once and reused by every search over this file. */
+  private indexPoints(): Uint32Array {
+    if (this.points === undefined) this.build();
+    return this.points as Uint32Array;
+  }
+
+  private indexUnits(): Uint32Array {
+    if (this.units === undefined) this.build();
+    return this.units as Uint32Array;
+  }
+
+  private indexStarts(): Uint32Array {
+    if (this.starts === undefined) {
+      this.starts = lineStartsOf(this.indexPoints());
+      this.builds += 1;
+    }
+    return this.starts;
+  }
+
+  private build(): void {
+    const arrays = codePointArrays(this.text, this.count);
+    // The counted length is the truth the caps compare against; a shorter array means the count was
+    // wrong, so the search keeps the entries that actually exist rather than reading padded zeroes.
+    this.points = arrays.points.subarray(0, arrays.written);
+    this.units = arrays.units.subarray(0, arrays.written + 1);
+  }
+}
+
+/** A search that never ran, or never could: it costs no scanning and no confirmation. */
+function noWork(outcome: MovedSearchOutcome, cap?: MovedSearchCap): MovedSearchResult {
+  return cap === undefined
+    ? { outcome, scannedOffsets: 0, confirmations: 0, candidateCodePoints: 0 }
+    : { outcome, cap, scannedOffsets: 0, confirmations: 0, candidateCodePoints: 0 };
 }
 
 /** Every span issue for one file whose after hash still matches. */
-function spanIssues(path: string, text: string, spans: readonly ProofSpan[]): ProofVerifyIssue[] {
+function spanIssues(
+  path: string,
+  text: string,
+  spans: readonly ProofSpan[],
+  movedSearch: MovedSearchOptions,
+): ProofVerifyIssue[] {
   const issues: ProofVerifyIssue[] = [];
+  // One index per file: its code points and line starts are read by every span's search, never rebuilt.
+  let index: MovedTextIndex | undefined;
   for (const span of [...spans].sort(bySpan)) {
     let slice: string;
     try {
@@ -354,8 +661,11 @@ function spanIssues(path: string, text: string, spans: readonly ProofSpan[]): Pr
     }
     if (hashText(slice) === span.hash) continue;
 
-    const moved = findMoved(text, Array.from(slice).length, span.hash);
-    if (moved !== undefined) {
+    index ??= new MovedTextIndex(text);
+    const moved = index.search(Array.from(slice).length, span.hash, movedSearch);
+    movedSearch.onSearch?.({ span, codePoints: index.codePoints, lineIndexBuilds: index.lineIndexBuilds, result: moved });
+    const position = moved.position;
+    if (position !== undefined) {
       issues.push({
         code: "verify.span.moved",
         path,
@@ -364,10 +674,10 @@ function spanIssues(path: string, text: string, spans: readonly ProofSpan[]): Pr
         endLine: span.endLine,
         endColumn: span.endColumn,
         hash: span.hash,
-        foundLine: moved.line,
-        foundColumn: moved.column,
-        foundEndLine: moved.endLine,
-        foundEndColumn: moved.endColumn,
+        foundLine: position.line,
+        foundColumn: position.column,
+        foundEndLine: position.endLine,
+        foundEndColumn: position.endColumn,
       });
       continue;
     }
@@ -382,10 +692,14 @@ function spanIssues(path: string, text: string, spans: readonly ProofSpan[]): Pr
  * A file is never read through a path whose real target leaves the site root: that is `escape`. A file
  * that is readable but hashes differently is `changed`; its spans are not checked, because they were
  * positions in text that is no longer there. Every other file is checked down to each recorded span.
+ *
+ * `movedSearch` bounds and observes the search for moved text; omitted, it works under the documented
+ * caps, and a span beyond one of them reports `verify.span.hash` rather than a move.
  */
 export async function verifyProofFiles(
   siteRoot: string,
   files: readonly ProofFileEvidence[],
+  movedSearch: MovedSearchOptions = {},
 ): Promise<readonly ProofFileVerification[]> {
   const root = await realRootOf(siteRoot);
   const results: ProofFileVerification[] = [];
@@ -456,7 +770,7 @@ export async function verifyProofFiles(
       continue;
     }
 
-    const issues = spanIssues(entry.path, bytes.toString("utf8"), entry.spans ?? []);
+    const issues = spanIssues(entry.path, bytes.toString("utf8"), entry.spans ?? [], movedSearch);
     results.push({ path: entry.path, outcome: "ok", spans: spanCount, issues });
   }
 
