@@ -1,6 +1,6 @@
 import type { Page, Site } from "../contracts/content.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
-import { compareClaims } from "../drift/compare.ts";
+import { comparePages } from "../drift/compare.ts";
 import { examplesOf } from "../markdown/plugins/example-fence.ts";
 import {
   reviewCoverage,
@@ -134,8 +134,9 @@ import { hashOf } from "./build-hash.ts";
  * - **Drift.** First the caller's `drift` option, then `site.data.drift`. A value is either a bare
  *   finding count (`{ "/guide/": 0 }`) or an entry with `findings`. An entry that is not a count is
  *   still a source: it reads as `unknown`, not `missing`, and never falls back to a computed pass.
- *   Only without the key, and when a root is known, {@link compareClaims} counts the diagnostics for
- *   each page's source file. Without either, N12's `drift.unknown` makes the page `at-risk`.
+ *   Only without the key, and when a root is known, {@link comparePages} counts the findings each page
+ *   earned through its own citations, so a finding inside the cited target still counts against the page
+ *   that cited it. Without either, N12's `drift.unknown` makes the page `at-risk`.
  * - **Review.** First the caller's `reviewers` option, then `site.data.reviewers`, with `{ date,
  *   author }` per URL or an `{ pages: [...] }` list. An entry whose date is missing or unreadable is
  *   still a source: it reads as `unknown`, not `missing`, and never falls back to git. Only without
@@ -158,7 +159,7 @@ import { hashOf } from "./build-hash.ts";
  * ## Determinism
  *
  * The file is sorted by URL, has a fixed key order, and carries no wall-clock timestamp, duration, or run
- * order: `asOf` is only the explicit instant the caller named. `compareClaims` and `reviewers` are
+ * order: `asOf` is only the explicit instant the caller named. `comparePages` and `reviewers` are
  * deterministic for a fixed root and history, and the reviewers answer is cached per path for the life of
  * the process. Two builds with the same model, data, root, and `SOURCE_DATE_EPOCH` write the same bytes.
  *
@@ -592,18 +593,17 @@ async function declaresExamples(page: Page): Promise<boolean> {
   }
 }
 
-/** The drift finding count per page URL, from {@link compareClaims}; `undefined` when the check cannot run. */
+/**
+ * The drift finding count per page URL, from {@link comparePages}; `undefined` when the check cannot run.
+ * The count comes from each page's own findings, never from a diagnostic's position: a scanner failure
+ * points inside the cited target, and would otherwise be attributed to the target instead of the page
+ * whose citation earned it. `comparePages` keeps the comparisons in input order.
+ */
 async function driftCountsOf(pages: readonly Page[], root: string): Promise<Map<string, number> | undefined> {
   try {
-    const diagnostics = await compareClaims(pages, { root });
-    const byFile = new Map<string, number>();
-    for (const diagnostic of diagnostics) {
-      const file = diagnostic.pos?.file;
-      if (file === undefined) continue;
-      byFile.set(file, (byFile.get(file) ?? 0) + 1);
-    }
+    const comparisons = await comparePages(pages, { root });
     const byUrl = new Map<string, number>();
-    for (const page of pages) byUrl.set(page.url, byFile.get(page.source.file) ?? 0);
+    for (const [index, page] of pages.entries()) byUrl.set(page.url, comparisons[index]?.findings.length ?? 0);
     return byUrl;
   } catch {
     return undefined;
