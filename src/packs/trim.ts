@@ -27,10 +27,15 @@
  * sections are allocated in equal turns: each round visits the pages in the caller's ranking order
  * and lets each page add its next section when the whole serialization still fits, so one page
  * cannot take another's share; a page that cannot add its next section cannot add a later, larger
- * one. Ties fall to the input order, then to document order. Required evidence, mandatory content,
- * and pinned sections are fixed; when they alone exceed the limit the result is
- * `status: "over-budget"`, with {@link TrimOverBudget.minimumUpper} reporting the smallest feasible
- * upper bound and every optional section reported as a `budget` omission.
+ * one. Ties fall to the input order, then to document order. Once near-duplicates have been removed
+ * (§Diversification) the same equal-turn pass runs a second time over the optional sections still
+ * omitted for budget, so the room a duplicate freed goes to unique content instead of leaving the
+ * pack smaller than its budget: each round lets each page add its next omitted section, and a
+ * section that repeats a kept one is never offered again. Every offer, in both passes, is priced
+ * against the whole serialization's upper bound, the required evidence and the separators included.
+ * Required evidence, mandatory content, and pinned sections are fixed; when they alone exceed the
+ * limit the result is `status: "over-budget"`, with {@link TrimOverBudget.minimumUpper} reporting
+ * the smallest feasible upper bound and every optional section reported as a `budget` omission.
  *
  * **The contract is measured on the serialization.** The budget applies to
  * {@link TrimResult.markdown}, the required evidence and the kept pages joined with one blank
@@ -42,9 +47,14 @@
  * section's is dropped as a near-duplicate: a short section must match exactly, while a longer one
  * must share {@link DUPLICATE_OVERLAP} of its distinct words. Deduplication runs after the budget,
  * so it only removes content that already survived, and it never costs a unique section its place.
- * Every section left out is reported in {@link TrimResult.omissions} with its reason, and the
+ * In `hard` mode the budget a duplicate freed is then offered back to the unique sections the first
+ * pass omitted for budget, in the same ranking order and document order; the default `estimate` mode
+ * leaves that space unused, so its output bytes do not change. Every section left out is reported in
+ * {@link TrimResult.omissions} with its reason, and the
  * required evidence is reported separately, so a caller can explain every omission and every
- * token.
+ * token. A section the budget left out is reported as a `duplicate`, with the link to its canonical
+ * kept section, whenever a kept section carries its words: in `hard` mode the reason is read from
+ * the final pack, so raising the budget would not bring such a section back.
  *
  * When the input already fits, each page's Markdown is returned byte for byte. Otherwise the kept
  * lead and sections are joined with one blank line between them, so the output is a deterministic
@@ -129,7 +139,11 @@ export interface TrimOmission {
   readonly tokens: number;
   /** The heading's span in the page's source file. */
   readonly pos: SourcePos;
-  /** `budget` when the budget could not keep it, `duplicate` when an earlier section repeated it. */
+  /**
+   * `budget` when the budget could not keep it, `duplicate` when a kept section repeats it. Hard mode reads the
+   * reason from the final pack, so a section the budget left out first still counts as a duplicate once its
+   * content survives elsewhere; estimate mode reports the duplicates its own pass removed.
+   */
   readonly reason: TrimOmissionReason;
   /** The kept section this one repeated, when the reason is `duplicate`; `undefined` otherwise. */
   readonly duplicateOf: { readonly url: string; readonly id: string } | undefined;
@@ -524,6 +538,35 @@ function signatureOf(markdown: string): Signature {
   return { text: words.join(" "), words: new Set(words) };
 }
 
+/** A kept section, with the page it came from and the words a later section is compared against. */
+interface Canonical {
+  readonly url: string;
+  readonly section: BuiltSection;
+  readonly signature: Signature;
+}
+
+/** The link from an omitted section to the kept section whose content it repeats. */
+type DuplicateLinks = ReadonlyMap<BuiltSection, { readonly url: string; readonly id: string }>;
+
+/** The kept sections, in page and document order, as the near-duplicate comparison sees them. */
+function canonicalOf(built: readonly BuiltPage[]): Canonical[] {
+  const canonical: Canonical[] = [];
+  for (const page of built) {
+    for (let index = 0; index < page.sections.length; index += 1) {
+      if (!page.kept[index]) continue;
+      const section = page.sections[index]!;
+      canonical.push({ url: page.page.url, section, signature: signatureOf(section.markdown) });
+    }
+  }
+  return canonical;
+}
+
+/** Whether any of `canonical` already carries the section's words. */
+function repeatsAny(canonical: readonly Canonical[], section: BuiltSection): boolean {
+  const signature = signatureOf(section.markdown);
+  return canonical.some((entry) => isDuplicate(entry.signature, signature));
+}
+
 /**
  * Whether two sections repeat each other. A section with fewer than {@link DUPLICATE_MIN_WORDS}
  * distinct words has to match exactly; a longer one is a near-duplicate when it shares
@@ -541,7 +584,7 @@ function isDuplicate(a: Signature, b: Signature): boolean {
  * Drops each kept section that repeats an earlier kept section, in page and document order. Mandatory and
  * pinned sections are never dropped; they can still be the earlier section that later ones repeat.
  */
-function removeDuplicates(built: readonly BuiltPage[]): ReadonlyMap<BuiltSection, { url: string; id: string }> {
+function removeDuplicates(built: readonly BuiltPage[]): DuplicateLinks {
   const canonical: { readonly url: string; readonly section: BuiltSection; readonly signature: Signature }[] = [];
   const duplicates = new Map<BuiltSection, { url: string; id: string }>();
   for (const page of built) {
@@ -559,6 +602,93 @@ function removeDuplicates(built: readonly BuiltPage[]): ReadonlyMap<BuiltSection
     }
   }
   return duplicates;
+}
+
+/**
+ * The next section a page may be offered the freed budget for, from `from`. Mandatory and pinned sections are
+ * fixed, kept sections are already in the pack, and a section a kept section repeats is never offered, because
+ * readmitting it would only put the duplicate back.
+ */
+function nextReclaimable(page: BuiltPage, from: number, canonical: readonly Canonical[]): number {
+  for (let index = from; index < page.sections.length; index += 1) {
+    const section = page.sections[index]!;
+    if (page.kept[index] || section.mandatory || section.pinned) continue;
+    if (repeatsAny(canonical, section)) continue;
+    return index;
+  }
+  return -1;
+}
+
+/**
+ * Offers the budget that removing a duplicate freed back to the unique sections the budget omitted (#111).
+ *
+ * The second hard-mode allocation pass follows the same rules as {@link allocateFair}: each round visits the
+ * pages in the caller's ranking order and lets each page add its next omitted section, so one page cannot take
+ * another's share, and a page that cannot add its next section cannot add a later, larger one. A candidate is
+ * priced against the whole serialization's upper bound, the required evidence and the separators included, and
+ * only unique sections are offered, so deduplication's saving goes to useful content without admitting a repeat.
+ * Before each turn the page is re-scanned from its cursor against the canonical sections kept so far, so a section
+ * a higher-ranked page admitted in the same round is skipped rather than readmitted as a fresh duplicate. Every
+ * cursor moves only forward and each round either admits a section or retires a cursor, so the pass terminates.
+ */
+function reclaimFreed(
+  built: readonly BuiltPage[],
+  evidence: readonly RequiredEvidence[],
+  estimate: (text: string) => number,
+  limit: number,
+  margin: number,
+  canonical: Canonical[],
+): void {
+  const cursors: number[] = built.map((page) => nextReclaimable(page, 0, canonical));
+
+  while (cursors.some((cursor) => cursor !== -1)) {
+    let progress = false;
+    for (let index = 0; index < built.length; index += 1) {
+      if (cursors[index] === -1) continue;
+      const page = built[index]!;
+      // Re-scan from the cursor against the sections kept so far, including any a higher-ranked page admitted this
+      // round: one that now repeats a kept section is skipped, so the pass never re-admits a duplicate (#111).
+      const cursor = nextReclaimable(page, cursors[index]!, canonical);
+      cursors[index] = cursor;
+      if (cursor === -1) continue;
+      page.kept[cursor] = true;
+      if (upperOf(totalOf(built, evidence, estimate), margin) <= limit) {
+        const section = page.sections[cursor]!;
+        canonical.push({ url: page.page.url, section, signature: signatureOf(section.markdown) });
+        progress = true;
+        cursors[index] = cursor + 1;
+      } else {
+        page.kept[cursor] = false;
+        cursors[index] = -1;
+      }
+    }
+    if (!progress) break;
+  }
+}
+
+/**
+ * The kept section each omitted section repeats, in page and document order.
+ *
+ * {@link removeDuplicates} links the sections it drops itself; after the reallocation an omitted section can
+ * repeat a kept one without ever having been dropped, because the budget left it out first. Raising the budget
+ * would not bring such a section back, so its reason is the duplicate link rather than `budget` (#111).
+ */
+function linksOf(built: readonly BuiltPage[]): DuplicateLinks {
+  const links = new Map<BuiltSection, { readonly url: string; readonly id: string }>();
+  const canonical: Canonical[] = [];
+  for (const page of built) {
+    for (let index = 0; index < page.sections.length; index += 1) {
+      const section = page.sections[index]!;
+      if (page.kept[index]) {
+        canonical.push({ url: page.page.url, section, signature: signatureOf(section.markdown) });
+        continue;
+      }
+      const signature = signatureOf(section.markdown);
+      const first = canonical.find((entry) => isDuplicate(entry.signature, signature));
+      if (first !== undefined) links.set(section, { url: first.url, id: first.section.id });
+    }
+  }
+  return links;
 }
 
 /** Every section left out, in page and document order, with its reason. */
@@ -675,7 +805,17 @@ export async function trimPages(
     }
   }
 
-  const duplicates = removeDuplicates(built);
+  const removed = removeDuplicates(built);
+  // #111: a duplicate that gave way leaves room the unique sections the first pass omitted can still use, and the
+  // reasons are read from the final pack, so an omission a kept section already covers is reported as a duplicate
+  // whether deduplication removed it or the budget left it out first. Only hard mode spends the freed budget, so
+  // the default estimate mode's output bytes do not change.
+  let duplicates: DuplicateLinks = removed;
+  if (hard) {
+    if (removed.size > 0) reclaimFreed(built, evidence, estimate, limit, margin, canonicalOf(built));
+    duplicates = linksOf(built);
+  }
+
   const markdown = serializeParts([...evidence.map((item) => item.text), ...built.map(pageMarkdown)]);
   const tokens = tokensOf(estimate, markdown);
   const upper = upperOf(tokens, margin);
