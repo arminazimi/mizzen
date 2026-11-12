@@ -160,9 +160,14 @@ test(
       if (first === "unknown") return;
       assert.equal(first.days, 1);
 
-      // The cache is per root and per path, so a later commit is not seen by this root.
+      // The cache is per root and per state: the two calls above share it, and a new commit moves that state.
       commit(root, "src/foo.ts", "2026-10-01T10:00:00Z", "// changed\n");
-      assert.deepEqual(gitAge(root, "guide/setup.md", ["src/foo.ts"]), first);
+      const third = gitAge(root, "guide/setup.md", ["src/foo.ts"]);
+      assert.notEqual(third, "unknown");
+      if (third === "unknown") return;
+      assert.equal(third.days, 30);
+      assert.equal(third.pageDate.toISOString(), first.pageDate.toISOString());
+      assert.notDeepEqual(third, first);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

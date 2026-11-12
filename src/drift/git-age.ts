@@ -4,17 +4,22 @@ import { posix, resolve } from "node:path";
 /**
  * Page age against code (N10): how long a page has been older than the newest file it references.
  *
- * Git history is an input, not something this module observes on its own. For a fixed repository, the
+ * Git history is an input, not something this module observes on its own. For a fixed repository state, the
  * same `root`, page, and references give the same result, because every date comes from a commit and
  * nothing reads the clock. The answer is `"unknown"` rather than an error when git,
  * a work tree, or a commit for the page is missing, which is what a shallow clone or an unpacked
  * tarball looks like.
  *
- * One `git rev-parse` per root and one `git log` per path are kept in a process-wide cache, so a check
- * that asks about the same page and references again pays for neither. The cache is keyed by the
- * resolved root; a caller that changes the repository at that root after a call still sees the dates
- * from before, so pass a fresh root for a fresh history. `outputs/feed.ts` has the same repository check
- * and date lookup for its feed; the two are kept apart until a shared refactor can move both.
+ * A long-lived build keeps its answers for as long as they describe the repository: the dates of each path
+ * are cached per root, and the cache is thrown away when that root's state changes. The state is HEAD's
+ * commit together with whether the root is a work tree, so a watcher that commits at the same root sees the
+ * new page and code dates on the next call, while an unchanged HEAD costs no `git log` at all. A root that
+ * could not be read is probed again for the same reason — an early failure is a snapshot, not a verdict.
+ * Nothing here falls back to the clock or to file mtimes: no commit, no date, `"unknown"`.
+ *
+ * Each call runs at most two `git rev-parse` commands per root to read that state; one `git log` per path is
+ * kept until the state moves. `outputs/feed.ts` has the same repository check and date lookup for its feed;
+ * the two are kept apart until a shared refactor can move both.
  */
 
 /** One page's age relative to the code it references. */
@@ -36,37 +41,57 @@ export type GitAgeResult = GitAge | "unknown";
 /** Milliseconds in a whole day. */
 const DAY = 86_400_000;
 
-/** One root's git state: whether it is a work tree, and the dates already asked about. */
-interface History {
+/** The part of a root's state the cached dates belong to: whether git can answer at all, and for which commit. */
+interface State {
   /** True when `root` is inside a git work tree; the dates are trusted only then. */
   readonly available: boolean;
+  /** HEAD's commit, or `undefined` when the repository has none yet, or cannot be read. */
+  readonly head: string | undefined;
+}
+
+/** One root's git state: the state its dates were read at, and the dates already asked about. */
+interface History extends State {
   /** The resolved root git runs in. */
   readonly root: string;
-  /** `%cI` dates by repository-relative path, so each path is asked about once. */
+  /** `%cI` dates by repository-relative path, so each path is asked about once per state. */
   readonly dates: Map<string, Date | undefined>;
 }
 
 /** Every root already checked in this process. */
 const histories = new Map<string, History>();
 
-/** Checks once whether `root` is inside a work tree, then remembers the answer for later calls. */
+/** Runs git in `root` and returns trimmed stdout, or `undefined` when git cannot answer or is not installed. */
+function git(cwd: string, args: readonly string[]): string | undefined {
+  try {
+    return execFileSync("git", [...args], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Reads `root`'s state now, so a repository that changed since the last call is not read as unchanged. */
+function stateOf(root: string): State {
+  if (git(root, ["rev-parse", "--is-inside-work-tree"]) !== "true") return { available: false, head: undefined };
+  const head = git(root, ["rev-parse", "HEAD"]);
+  return { available: true, head: head === undefined || head === "" ? undefined : head };
+}
+
+/**
+ * `root`'s dates, read at `root`'s current state: the cached ones while HEAD and availability are unchanged,
+ * and an empty set the moment either moves, which is what makes a new commit visible without losing the
+ * caching for the history that did not change.
+ */
 function historyAt(root: string): History {
   const key = resolve(root);
+  const state = stateOf(key);
   const cached = histories.get(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined && cached.available === state.available && cached.head === state.head) return cached;
 
-  let available = false;
-  try {
-    available =
-      execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-        cwd: key,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim() === "true";
-  } catch {
-    available = false;
-  }
-  const history: History = { available, root: key, dates: new Map() };
+  const history: History = { available: state.available, head: state.head, root: key, dates: new Map() };
   histories.set(key, history);
   return history;
 }
@@ -75,18 +100,10 @@ function historyAt(root: string): History {
 function dateOf(history: History, path: string): Date | undefined {
   if (history.dates.has(path)) return history.dates.get(path);
   let date: Date | undefined;
-  try {
-    const text = execFileSync("git", ["log", "-1", "--format=%cI", "--", path], {
-      cwd: history.root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (text !== "") {
-      const parsed = new Date(text);
-      if (!Number.isNaN(parsed.getTime())) date = parsed;
-    }
-  } catch {
-    date = undefined;
+  const text = git(history.root, ["log", "-1", "--format=%cI", "--", path]);
+  if (text !== undefined && text !== "") {
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) date = parsed;
   }
   history.dates.set(path, date);
   return date;
@@ -114,8 +131,8 @@ function inside(path: string): string | undefined {
  * answer `"unknown"` (a refused reference is ignored).
  *
  * Returns `"unknown"`, never an error, when git is not installed, `root` is not a work tree, the page
- * has no commit, or none of the references has one. The call shell outs to git at most once per root
- * and once per path across calls with the same root.
+ * has no commit, or none of the references has one. The call reads `root`'s state with at most two
+ * `git rev-parse` commands and shells out for a date only for a path the current state has not answered yet.
  */
 export function gitAge(root: string, pageFile: string, refFiles: readonly string[]): GitAgeResult {
   const pagePath = inside(pageFile);
