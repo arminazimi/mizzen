@@ -19,8 +19,9 @@
  *
  * Writes are confined to the site root by real path, not by spelling (#98): a target whose parent
  * resolves outside the root, and a target that is itself an existing symlink, are refused before any
- * file is read, and the boundary is checked again when the staged files are committed, so a parent
- * swapped for an escaping symlink in the meantime cannot redirect the rename.
+ * file is read; the check runs again before each staging folder is created and again before the
+ * staged files are committed, so a parent swapped for an escaping symlink at any point of the edit
+ * cannot carry a read, a staging folder or the rename out of the root.
  */
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -519,6 +520,8 @@ async function verifiedTarget(realRoot: string, file: string, path: string): Pro
  * filesystem failure would be.
  */
 export interface PatchWriteHooks {
+  /** After every file is validated, before the first staging folder exists. A test can swap a parent here. */
+  readonly beforeStage?: () => void | Promise<void>;
   /** After every file is staged, before the commit checks run. A test can swap a parent here. */
   readonly beforeCommit?: () => void | Promise<void>;
 }
@@ -653,6 +656,9 @@ export async function writeFilePatches(
 
   const staged: StagedFile[] = [];
   try {
+    // The hook runs while no staging folder exists yet, so a test can move a parent into the window
+    // between the check above and the staging below.
+    await hooks.beforeStage?.();
     for (let index = 0; index < results.length; index += 1) {
       const result = results[index]!;
       const target = targets[index]!;
