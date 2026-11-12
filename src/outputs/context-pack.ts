@@ -28,10 +28,14 @@ import { trustReport, type TrustEntry, type TrustPageEntry } from "./trust.ts";
  *
  * For each topic the output ranks doc pages with {@link rankPages}, using `query` or the topic name. Pages
  * that match no query term are left out, unless `pages` names them explicitly. The candidates are then
- * trimmed with {@link trimPages} to the budget, dropping whole sections from the least relevant page first,
- * so the pack always fits the budget unless a page's mandatory lead (its heading and first paragraph) does
- * not. When that happens the lead is kept, the pack is larger than the budget, and the warning
- * `pack.trim.over-budget` reports the page and its source position.
+ * trimmed with {@link trimPages} in its `hard` mode, which spends the budget like an ad-hoc context
+ * request does: pages join only while the exact pack of their mandatory content stays within the
+ * estimator's upper bound, and optional sections are kept in equal turns while the whole final
+ * serialization — title, section headers, and separators included — still fits. So a pack that is not
+ * diagnosed as over budget satisfies `accounting.upper <= budget` for its exact bytes, unless a page's
+ * mandatory lead (its heading and first paragraph) leaves no feasible result. When that happens the
+ * lead is kept, the pack is larger than the budget, the warning `pack.trim.over-budget` reports the
+ * page and its source position, and `accounting.minimum` publishes the smallest feasible cost.
  *
  * Every page section is:
  *
@@ -733,56 +737,75 @@ export async function buildPack(
   const headerOf = (page: Page): string => headerOfPage(page, site, pageVersion(page));
   const pairs = candidates.map((entry) => entry.page);
   const mandatory = await mandatoryOf(pairs);
+  const mandatoryBody = (page: Page): string => withoutLeadHeading(mandatory.get(page.url)?.markdown ?? page.markdown);
 
-  // Select pages in ranking order while their headers and mandatory content fit. The first page is always
-  // kept, so a topic whose best page alone exceeds the budget still produces a pack and a warning.
+  // Select pages in ranking order while the exact pack of their mandatory content stays inside the
+  // budget's planning upper bound, so an optional page never joins by a point estimate alone. The
+  // first page is always kept, so a topic whose best page alone exceeds the budget still produces a
+  // pack and a warning.
   const selected: Page[] = [];
-  let mandatorySum = 0;
   for (const page of pairs) {
     const next = [...selected, page];
-    const overhead = estimateTokens(
-      assemble(topic.topic, next.map((candidate) => ({ header: headerOf(candidate), body: "" }))),
-    ).tokens;
-    const cost = mandatory.get(page.url)?.tokens ?? 0;
-    if (selected.length === 0 || overhead + mandatorySum + cost <= topic.budget) {
-      selected.push(page);
-      mandatorySum += cost;
-    }
+    const cost = estimateTokens(
+      assemble(
+        topic.topic,
+        next.map((candidate) => ({ header: headerOf(candidate), body: mandatoryBody(candidate) })),
+      ),
+    ).upper;
+    if (selected.length === 0 || cost <= topic.budget) selected.push(page);
   }
 
+  // Trim in the hard mode, which prices the whole serialization by the estimator's upper bound, and
+  // then re-check the exact final bytes: the title, the section headers, and the separators spend
+  // the same bound the pack promises. `slack` absorbs any difference between the overhead measured
+  // on empty bodies and the overhead the final serialization really adds. While the final upper
+  // bound is over budget the lowest-ranked page gives way; when only one page is left and even its
+  // mandatory content cannot fit, the pack keeps that content whole and publishes the trim
+  // diagnostics that say so.
   let chosen = selected;
   let diagnostics: readonly Diagnostic[] = [];
   let trim: TrimResult | undefined;
   let bodies: readonly string[] = [];
+  let slack = 0;
   for (;;) {
-    const overhead = estimateTokens(
+    const overheadUpper = estimateTokens(
       assemble(topic.topic, chosen.map((page) => ({ header: headerOf(page), body: "" }))),
-    ).tokens;
-    const trimmed = await trimPages(chosen, Math.max(0, topic.budget - overhead));
+    ).upper;
+    const trimmed = await trimPages(chosen, Math.max(0, topic.budget - overheadUpper - slack), { mode: "hard" });
     bodies = chosen.map((page, index) => withoutLeadHeading(trimmed.pages[index]?.markdown ?? page.markdown));
     const contents = assemble(
       topic.topic,
       chosen.map((page, index) => ({ header: headerOf(page), body: bodies[index]! })),
     );
-    const total = estimateTokens(contents).tokens;
-    if (total <= topic.budget || chosen.length <= 1) {
-      diagnostics = trimmed.diagnostics;
+    const used = estimateTokens(contents);
+    if (used.upper <= topic.budget) {
+      diagnostics = [];
       trim = trimmed;
-      if (total > topic.budget && diagnostics.length === 0) {
-        diagnostics = [
-          ...diagnostics,
-          {
-            id: "context-pack.over-budget",
-            severity: "warning",
-            message: `Context pack "${topic.topic}" is ${total} tokens, above its budget of ${topic.budget}; its mandatory lead is kept.`,
-            pos: chosen[0]!.source,
-            help: "Raise `budget`, shorten the page's lead, or rank a different page.",
-          },
-        ];
-      }
       break;
     }
-    chosen = chosen.slice(0, -1);
+    if (chosen.length > 1) {
+      chosen = chosen.slice(0, -1);
+      slack = 0;
+      continue;
+    }
+    if (trimmed.status === "over-budget") {
+      // No feasible result exists: the mandatory lead is kept whole, and the warning says so.
+      trim = trimmed;
+      diagnostics =
+        trimmed.diagnostics.length > 0
+          ? trimmed.diagnostics
+          : [
+              {
+                id: "context-pack.over-budget",
+                severity: "warning",
+                message: `Context pack "${topic.topic}" is ${used.tokens} tokens, above its budget of ${topic.budget}; its mandatory lead is kept.`,
+                pos: chosen[0]!.source,
+                help: "Raise `budget`, shorten the page's lead, or rank a different page.",
+              },
+            ];
+      break;
+    }
+    slack += used.upper - topic.budget;
   }
 
   for (const diagnostic of diagnostics) ctx.report(diagnostic);
@@ -847,7 +870,7 @@ export async function buildPack(
     method: estimate.method,
     margin: estimate.margin,
     upper: estimate.upper,
-    minimum: estimate.tokens > topic.budget ? { tokens: floor, upper: floorUpper } : null,
+    minimum: diagnostics.length > 0 ? { tokens: floor, upper: floorUpper } : null,
   };
 
   const evidence: PackEvidence = {
