@@ -222,18 +222,32 @@ function evidenceOf(
   };
 }
 
-/** The `vN`, `vN.M`, or `vN.M.P` parts as numbers; the schema has already checked the shape. */
-function versionNumbers(name: string): readonly [number, number, number] {
-  const match = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(name);
-  return [Number(match?.[1] ?? 0), Number(match?.[2] ?? 0), Number(match?.[3] ?? 0)];
+/** A digit string without leading zeros, so equal values have equal digits; absent and zero both become "". */
+function digitsOf(part: string | undefined): string {
+  return (part ?? "0").replace(/^0+/, "");
 }
 
-/** Compares two version folders by their numeric parts. */
+/** The `vN`, `vN.M`, or `vN.M.P` parts as normalized digits; the schema has already checked the shape. */
+function versionParts(name: string): readonly [string, string, string] {
+  const match = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(name);
+  return [digitsOf(match?.[1]), digitsOf(match?.[2]), digitsOf(match?.[3])];
+}
+
+/** Compares two non-negative decimal digit strings exactly: no leading zeros, then shorter is smaller. */
+function compareDigits(a: string, b: string): number {
+  if (a.length !== b.length) return a.length - b.length;
+  return a === b ? 0 : a < b ? -1 : 1;
+}
+
+/**
+ * Compares two version folders by their numeric parts: a missing or zero part counts as zero, so
+ * `v2`, `v2.0`, and `v2.0.0` are equal, and the comparison never converts a part to a Number.
+ */
 function compareVersions(a: string, b: string): number {
-  const left = versionNumbers(a);
-  const right = versionNumbers(b);
+  const left = versionParts(a);
+  const right = versionParts(b);
   for (let index = 0; index < left.length; index += 1) {
-    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    const difference = compareDigits(left[index] ?? "", right[index] ?? "");
     if (difference !== 0) return difference;
   }
   return 0;
