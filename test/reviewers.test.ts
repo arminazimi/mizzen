@@ -135,7 +135,7 @@ test("a file in a nested folder is found by its root-relative path", { skip: has
   });
 });
 
-test("each root is read once, so a later commit is not seen", { skip: hasGit ? false : "git is not installed" }, async () => {
+test("one root log covers every page, and a later commit refreshes it", { skip: hasGit ? false : "git is not installed" }, async () => {
   const root = repository([
     { path: "a.md", date: "2026-09-01T10:00:00Z", author: "First Writer" },
     { path: "b.md", date: "2026-09-01T10:00:00Z", author: "First Writer" },
@@ -148,13 +148,13 @@ test("each root is read once, so a later commit is not seen", { skip: hasGit ? f
 
     assert.deepEqual(
       reviewers(root, "a.md"),
-      { date: "2026-09-01T10:00:00.000Z", author: "First Writer" },
-      "the root was already read, so the first answers are cached",
+      { date: "2026-10-02T10:00:00.000Z", author: "Second Writer" },
+      "HEAD moved, so the history read under the old HEAD is not trusted",
     );
     assert.deepEqual(
       reviewers(root, "b.md"),
-      { date: "2026-09-01T10:00:00.000Z", author: "First Writer" },
-      "the whole root is read with one git log, so b.md does not see the new commit either",
+      { date: "2026-10-02T10:00:00.000Z", author: "Second Writer" },
+      "the whole root is read with one git log, so b.md is refreshed by the same read",
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
