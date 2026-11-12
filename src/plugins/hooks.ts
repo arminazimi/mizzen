@@ -194,12 +194,31 @@ export async function loadCodeConfig(siteRoot: string, options: LoadCodeOptions 
 }
 
 /**
+ * A deep copy of `value` for one hook call, so a hook that mutates what it was given cannot reach the value the stage
+ * keeps or the copy the next plugin gets. Pages, site models, and output files are plain objects, arrays, strings, and
+ * `Uint8Array`s, all of which `structuredClone` copies, bytes included.
+ *
+ * A value it cannot copy (a function in a site's `data`, say) is handed over as is: the hooks' contract already forbids
+ * mutating an input, and refusing to run a hook over a value a build carried before would be worse than that gap.
+ */
+function copyOf<T>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    // shortcut: a value holding a function, a symbol, or a host object is not isolated; keep those leaves by
+    // reference in a hand-written clone if such site data ever becomes supported.
+    return value;
+  }
+}
+
+/**
  * Runs one hook of every plugin in the order the plugins are listed, so each hook gets what the hook before it returned.
  *
  * A plugin that does not implement the hook is skipped, and a promise is awaited before the next plugin runs. A hook
  * that misses the policy's deadline, throws, or returns a value the stage cannot use is an error naming the plugin; the
  * value the stage carried before that plugin is kept and the plugins after it still run, so one bad plugin costs its
- * own work and nothing more. Nothing here changes the value handed in: a plugin that wants a change returns a new value.
+ * own work and nothing more. Each hook is called with a {@link copyOf copy} of the stage's value, so a mutation made
+ * before a throw, a deadline, or an unusable return stays in that copy; a usable return value is kept as it is.
  */
 async function runStage<T>(
   plugins: readonly Plugin[],
@@ -215,7 +234,7 @@ async function runStage<T>(
   for (const plugin of plugins) {
     if (typeof plugin[hook] !== "function") continue;
     try {
-      const next = await runWithinDeadline(Promise.resolve(call(plugin, value)), timeoutMs);
+      const next = await runWithinDeadline(Promise.resolve(call(plugin, copyOf(value))), timeoutMs);
       const expected = check(next);
       if (expected !== undefined) {
         diagnostics.push(
@@ -262,7 +281,8 @@ export function runModelHooks(
 
 /**
  * Runs the `outputs` hooks of the files the outputs produced, with the site model they came from: once, before the
- * files are written.
+ * files are written. Each hook gets its own copy of the site as well, so one that mutates it cannot change the model
+ * the next plugin reads.
  */
 export function runOutputsHooks(
   plugins: readonly Plugin[],
@@ -274,7 +294,7 @@ export function runOutputsHooks(
     plugins,
     "outputs",
     files,
-    (plugin, value) => plugin.outputs!(value, site),
+    (plugin, value) => plugin.outputs!(value, copyOf(site)),
     outputFilesProblem,
     policy,
   );
