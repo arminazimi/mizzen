@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, join, relative } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import type { ErrorObject } from "ajv";
 import type { Ajv2020 as Ajv2020Class } from "ajv/dist/2020.js";
 import {
@@ -65,7 +65,7 @@ export function directionFromLang(lang: string): Direction {
  * A missing file yields the defaults and the folder name as `title`, with no diagnostic.
  */
 export function loadConfig(siteRoot: string, options: LoadConfigOptions = {}): LoadConfigResult {
-  const absPath = options.path === undefined ? join(siteRoot, CONFIG_FILE) : options.path;
+  const absPath = options.path === undefined ? join(siteRoot, CONFIG_FILE) : resolve(siteRoot, options.path);
   const file = posixRelative(siteRoot, absPath);
   const folderTitle = basename(siteRoot);
 
