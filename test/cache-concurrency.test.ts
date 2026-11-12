@@ -244,8 +244,14 @@ test("two breakers that both saw an abandoned lock cannot remove the replacement
   mkdirSync(cacheDir, { recursive: true });
   try {
     const lock = join(cacheDir, ".lock");
+    // A writer that is gone, so this lock is abandoned state on its owner and not on its age (#109).
+    const corpse = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+    const deadPid = corpse.pid;
+    assert.ok(deadPid !== undefined, "the crashed writer has a PID");
+    await new Promise<void>((done) => corpse.once("close", () => done()));
+    await new Promise<void>((done) => setTimeout(done, 50));
     mkdirSync(lock);
-    writeFileSync(join(lock, "owner"), `${process.pid}\nold\n`);
+    writeFileSync(join(lock, "owner"), `${deadPid}\nold\n`);
     const past = new Date(Date.now() - 3_600_000);
     utimesSync(lock, past, past);
 

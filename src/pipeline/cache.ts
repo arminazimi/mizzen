@@ -15,9 +15,12 @@
  * {@link restoreCache} and {@link writeCache}: a cache that cannot be read or written leaves the build to run cold.
  *
  * Every cache operation takes the folder {@link LOCK_NAME} in the cache root, so readers never see an entry while a
- * writer replaces it and pruning never removes an entry being read or written. A lock left by a process that died is
- * broken immediately; one that has been idle for {@link STALE_MS} is treated as abandoned, so a stale lock costs at
- * most one cold build, never a hung one. After a write, at most {@link CACHE_RETENTION} entries are kept: the newest,
+ * writer replaces it and pruning never removes an entry being read or written. A lock is abandoned when the process it
+ * recorded died, or when it never recorded an owner and is older than {@link OWNER_GRACE_MS}; age alone never breaks a
+ * lock whose owner is alive, so a restore or write that legitimately takes minutes keeps its exclusivity instead of
+ * being overlapped by a competitor. A waiter gives up after {@link LOCK_WAIT_MS} and builds cold, which costs one cold
+ * build rather than a hung one, and an operation that lost ownership publishes and prunes nothing. After a write, at
+ * most {@link CACHE_RETENTION} entries are kept: the newest,
  * including the entry just written. An entry is copied into a temporary folder, checked file by file, published with
  * one rename, and only then does pruning run; an interrupted staging or backup folder is removed by the next operation.
  *
@@ -40,7 +43,7 @@ export const CACHE_RETENTION = 4;
 /** The folder in the cache root that every read, write, and prune takes, so they never overlap. */
 const LOCK_NAME = ".lock";
 
-/** A lock untouched for this long belongs to a dead process; it is broken and the operation retries. */
+/** A recovery guard untouched for this long belongs to a breaker that died; only guards age out, never locks. */
 const STALE_MS = 120_000;
 
 /** A lock folder with no owner is still being created, or was abandoned; after this long it is abandoned. */
@@ -213,7 +216,23 @@ function ownerPid(owner: string): number | undefined {
   return Number.isInteger(pid) && pid > 0 ? pid : undefined;
 }
 
-/** True when the process that wrote `owner` (a PID and a token, one per line) is gone. Unknown means alive. */
+/** The PID a creator recorded together with its ownership token, or `undefined` for an unfinished owner file. */
+function ownerRecorded(owner: string): number | undefined {
+  const pid = ownerPid(owner);
+  const lines = owner.split("\n");
+  return pid !== undefined && (lines[1] ?? "").trim() !== "" ? pid : undefined;
+}
+
+/**
+ * True when the process that wrote `owner` (a PID and a token, one per line) is gone. Unknown means alive.
+ *
+ * A signal of `0` proves presence, not identity, and #109 forbids weighing a live PID against age, so nothing here can
+ * notice the OS handing a dead owner's PID to an unrelated process: such a lock reads as owned and is not broken. The
+ * cache stays correct anyway, because a competitor only ever waits {@link LOCK_WAIT_MS} and builds cold, publishes and
+ * prunes nothing, and recovery resumes once that recycled PID is freed: the cost is the speedup, never the output.
+ * `EPERM` (a PID we may not signal, so a process of another user) counts as alive for the same reason: calling it dead
+ * would let a competitor break a lock whose owner is running.
+ */
 function ownerIsDead(owner: string): boolean {
   const pid = ownerPid(owner);
   if (pid === undefined) return false;
@@ -238,9 +257,14 @@ async function probeAbandonedLock(lock: string): Promise<CacheLockProbe | undefi
   // A lock that vanished was released; the caller retries instead of removing a fresh lock that replaced it.
   if (info === undefined) return undefined;
   const owner = await readFile(join(lock, "owner"), "utf8").catch(() => undefined);
-  const age = Date.now() - info.mtimeMs;
-  if (age > STALE_MS) return { ino: info.ino, owner, abandoned: true };
-  if (owner === undefined || ownerPid(owner) === undefined) return { ino: info.ino, owner, abandoned: age > OWNER_GRACE_MS };
+  if (owner === undefined || ownerRecorded(owner) === undefined) {
+    // No owner was recorded, so nothing is working under this lock: it is either still being created by a process
+    // that has not written its owner yet, or the crash of one that never will. Only the grace period separates them.
+    return { ino: info.ino, owner, abandoned: Date.now() - info.mtimeMs > OWNER_GRACE_MS };
+  }
+  // Age alone never abandons a lock. A whole-build restore or write of a large site is expected to take minutes, and
+  // breaking it then would let a second operation publish or prune over it. Recovery waits for the owner to die, and
+  // the one thing it cannot tell apart (a dead owner whose PID was reused) is written on `ownerIsDead`.
   return { ino: info.ino, owner, abandoned: ownerIsDead(owner) };
 }
 
