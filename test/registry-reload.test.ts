@@ -207,3 +207,82 @@ test("a unit that only ever gets the same bytes back is never re-imported", asyn
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// The packaged-theme smoke gate installs a theme into `node_modules` and imports its `.ts` entries from there.
+// Node refuses type-stripping once the specifier carries a query, so an installed entry must load on a plain URL.
+// A standalone `<tmp>/project` (never the real `node_modules` symlink) reproduces that layout under `mkdtemp`.
+function installedTheme(files: Record<string, string>): string {
+  const project = mkdtempSync(join(tmpdir(), "registry-installed-"));
+  const root = join(project, "node_modules", "@scope", "temp-theme");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module", name: "@scope/temp-theme" }));
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  }
+  return root;
+}
+
+test("a node_modules theme loads its .ts entries (the CI smoke case)", async () => {
+  const root = installedTheme({
+    "src/index.ts": FULL_MANIFEST,
+    ...units("one"),
+  });
+  try {
+    const first = await loadRegistry(root);
+    // No registry.load-failed: the plain node_modules URL is type-stripped by the runtime hook.
+    assert.equal(
+      first.diagnostics.filter((d) => d.id === "registry.load-failed").length,
+      0,
+      `unexpected load failure: ${first.diagnostics.map((d) => d.message).join("; ")}`,
+    );
+    assert.equal(first.layouts.doc?.layout({} as never), "doc one");
+    assert.equal(first.chrome.footer?.chrome({} as never), "footer one");
+    assert.equal(first.components.callout?.component({} as never), "callout one");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a node_modules theme entry keeps its first module across loads (documented limitation)", async () => {
+  const root = installedTheme({
+    "src/index.ts": FULL_MANIFEST,
+    ...units("one"),
+  });
+  try {
+    const first = await loadRegistry(root);
+    assert.equal(first.layouts.doc?.layout({} as never), "doc one");
+
+    // An installed theme is on a plain, query-free URL, so Node's module cache hands back the first version.
+    // Reloading an installed theme is the boundary documented on entryUrl: it loads, but does not reload.
+    write(root, "layouts/doc.ts", 'export default function doc() { return "doc two"; }\n');
+    const second = await loadRegistry(root);
+    assert.equal(second.layouts.doc?.layout, first.layouts.doc?.layout);
+    assert.equal(second.layouts.doc?.layout({} as never), "doc one");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a source-checkout (non-node_modules) theme still reloads while the installed one cannot", async () => {
+  const checkout = theme({ "src/index.ts": FULL_MANIFEST, ...units("one") });
+  const installed = installedTheme({ "src/index.ts": FULL_MANIFEST, ...units("one") });
+  try {
+    const firstCheckout = await loadRegistry(checkout);
+    const firstInstalled = await loadRegistry(installed);
+
+    write(checkout, "layouts/doc.ts", 'export default function doc() { return "doc two"; }\n');
+    write(installed, "layouts/doc.ts", 'export default function doc() { return "doc two"; }\n');
+
+    const secondCheckout = await loadRegistry(checkout);
+    const secondInstalled = await loadRegistry(installed);
+
+    // The case issue #97 targets: a rebuild in a checkout is seen.
+    assert.equal(secondCheckout.layouts.doc?.layout({} as never), "doc two");
+    // The documented boundary: an installed theme is not seen by a rebuild.
+    assert.equal(secondInstalled.layouts.doc?.layout({} as never), "doc one");
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+    rmSync(installed, { recursive: true, force: true });
+  }
+});
