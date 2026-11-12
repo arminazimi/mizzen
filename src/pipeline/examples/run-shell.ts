@@ -8,7 +8,10 @@
  *
  * ## Isolation
  *
- * - The working folder is a fresh `mkdtemp` folder, removed when the run ends. `HOME` and `TMPDIR` point inside it.
+ * - The working folder is a fresh `mkdtemp` folder when the caller gives no {@link RunShellOptions.cwd}; with one,
+ *   the caller's folder is the working folder and is kept. Either way the run creates its own private
+ *   `.mizzen-run-*` folder inside the working folder and points `HOME` and `TMPDIR` at folders inside it, so they
+ *   are always run-owned and never a folder the caller already had.
  *   The environment is an allow-list: `PATH`, `HOME`, `TMPDIR`, `LANG`, and `NO_COLOR`. Everything else from the
  *   host, including secrets, is dropped. {@link RunShellOptions.env} adds variables explicitly, which is the only way
  *   to pass anything else in; the fixed variables win, so an extra cannot move `HOME` out of the folder.
@@ -16,6 +19,9 @@
  *   everything except writes outside the folder) and `bwrap` on Linux (`/` read-only, the working folder writable).
  *   {@link ShellExampleResult.sandboxed} says whether that happened.
  * - A snippet that invokes a command in {@link DENIED_COMMANDS} is refused before anything is created or spawned.
+ * - Cleanup is non-destructive to the caller (#100): only folders this run created are removed — the private
+ *   `.mizzen-run-*` folder, and the whole throwaway workspace when the run made it. A folder that already existed in
+ *   a caller-supplied `cwd`, including a `.mizzen-home` or `.mizzen-tmp` of the caller's own, is never removed.
  * - Only {@link MAX_SHELL_OUTPUT_BYTES} of each stream is kept; past that the process group is killed, so a runaway
  *   example cannot fill memory or a terminal.
  *
@@ -125,7 +131,8 @@ export interface RunShellOptions {
   readonly env?: Readonly<Record<string, string>>;
   /**
    * Folder to run in. Default: a new temporary folder that is removed afterwards. A folder the caller names is kept;
-   * only the `.mizzen-home` and `.mizzen-tmp` folders created inside it are removed.
+   * the run cleans up only the private `.mizzen-run-*` folder it creates inside it, never a folder that already
+   * existed there — a pre-existing `.mizzen-home` or `.mizzen-tmp` of the caller's is left untouched (#100).
    */
   readonly cwd?: string;
 }
@@ -401,15 +408,15 @@ export async function planSandbox(
 }
 
 /**
- * The scrubbed environment: the allow-list, `HOME`/`TMPDIR` inside the working folder, then the caller's extras, then
- * the fixed values again so an extra cannot move the confinement variables.
+ * The scrubbed environment: the allow-list, `HOME`/`TMPDIR` inside the run's private folder, then the caller's
+ * extras, then the fixed values again so an extra cannot move the confinement variables.
  */
-function scrubbedEnv(workdir: string, extra?: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
+function scrubbedEnv(runRoot: string, extra?: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
   return {
     ...extra,
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-    HOME: join(workdir, ".mizzen-home"),
-    TMPDIR: join(workdir, ".mizzen-tmp"),
+    HOME: join(runRoot, "home"),
+    TMPDIR: join(runRoot, "tmp"),
     LANG: process.env.LANG ?? "C.UTF-8",
     NO_COLOR: "1",
   };
@@ -566,7 +573,7 @@ export async function runShellExample(options: RunShellOptions): Promise<ShellEx
   if (denied !== undefined) return refused(started, denied, options.cwd);
 
   let workspace: string | undefined;
-  const internalDirs: string[] = [];
+  let runRoot: string | undefined;
   let plan: SandboxPlan = { command: "", args: [], sandboxed: false, cleanup: async () => {} };
   let workdir = options.cwd === undefined ? "" : resolve(options.cwd);
 
@@ -577,18 +584,16 @@ export async function runShellExample(options: RunShellOptions): Promise<ShellEx
     }
     await mkdir(workdir, { recursive: true });
 
-    // The home and temp folders live inside the run's folder, so a snippet cannot write to the real ones even
-    // without an OS sandbox.
-    const home = join(workdir, ".mizzen-home");
-    const temp = join(workdir, ".mizzen-tmp");
-    internalDirs.push(home, temp);
-    await mkdir(home, { recursive: true });
-    await mkdir(temp, { recursive: true });
+    // The home and temp folders live inside a private folder this run created, so a snippet cannot write to the real
+    // ones even without an OS sandbox, and cleanup can never remove a folder the caller already owned (#100).
+    runRoot = await mkdtemp(join(workdir, ".mizzen-run-"));
+    await mkdir(join(runRoot, "home"), { recursive: true });
+    await mkdir(join(runRoot, "tmp"), { recursive: true });
 
     plan = await planSandbox(shellPath(options.shell), ["-c", options.code], workdir);
 
     const runStarted = performance.now();
-    const result = await runProcess(plan, workdir, scrubbedEnv(workdir, options.env), timeoutMs);
+    const result = await runProcess(plan, workdir, scrubbedEnv(runRoot, options.env), timeoutMs);
     return {
       ...result,
       durationMs: performance.now() - runStarted,
@@ -599,10 +604,11 @@ export async function runShellExample(options: RunShellOptions): Promise<ShellEx
   } catch (error) {
     return failed(started, messageOf(error), plan.sandboxed, workdir);
   } finally {
-    // Clean up whatever ran, and whatever failed before it could. Nothing here may throw over a result.
+    // Clean up whatever ran, and whatever failed before it could. Nothing here may throw over a result. Only
+    // run-owned folders are removed: the private folder, then the throwaway workspace when this run made it.
     await plan.cleanup();
-    for (const dir of internalDirs) {
-      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    if (runRoot !== undefined) {
+      await rm(runRoot, { recursive: true, force: true }).catch(() => {});
     }
     if (workspace !== undefined) {
       await rm(workspace, { recursive: true, force: true }).catch(() => {});
