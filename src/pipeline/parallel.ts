@@ -11,6 +11,10 @@
  * and unanswered, so a prefetch of every page queues a window rather than every page at once. Closing the pool
  * cancels what is queued and in flight and settles every waiting `render`, so nothing is left running or waiting.
  *
+ * A `done` reply is checked before any of its pages is released: it must hold exactly one well-formed result per
+ * requested page, in the order sent, with that page's URL. A reply that fails goes through the worker-failure policy
+ * — the worker is retired, and its batch is rendered here — so a misidentified page never becomes another page's HTML.
+ *
  * A worker also owes the pool an answer within a deadline ({@link RenderPoolOptions.renderDeadlineMs}): one to finish
  * initializing and, for every batch, one to reply. A theme that parks a thread — a layout in a synchronous loop —
  * never replies, so the deadline is what keeps a hung theme from stalling a build forever. When it passes, the pool
@@ -285,6 +289,56 @@ type Reply =
   | { readonly type: "done"; readonly id: number; readonly pages: readonly RenderedPage[] }
   | { readonly type: "failed"; readonly id: number; readonly message: string };
 
+/**
+ * Why a worker's `done` reply cannot be trusted for `pages`, or undefined when it can. The worker renders a batch in
+ * the order it was sent, so the reply must hold one well-formed result per page, position for position, with that
+ * page's URL. Anything else — a short or long batch, a duplicate, a page for another URL, a malformed result — is
+ * refused as a whole rather than picked over, so no result is published for a page it does not belong to.
+ */
+export function renderReplyProblem(pages: readonly Page[], reply: unknown): string | undefined {
+  if (!Array.isArray(reply)) return "the reply is not a list of pages";
+  if (reply.length !== pages.length) {
+    const results = reply.length === 1 ? "result" : "results";
+    return `the reply holds ${String(reply.length)} ${results} for ${String(pages.length)} requested pages`;
+  }
+  for (const [index, page] of pages.entries()) {
+    const rendered = reply[index] as Partial<RenderedPage> | null | undefined;
+    if (rendered === null || typeof rendered !== "object") return `result ${String(index)} is not a rendered page`;
+    if (rendered.url !== page.url) {
+      return `result ${String(index)} is for ${JSON.stringify(rendered.url)} instead of ${JSON.stringify(page.url)}`;
+    }
+    if (typeof rendered.html !== "string") return `the HTML for ${page.url} is not a string`;
+    if (!Array.isArray(rendered.css) || rendered.css.some((css) => typeof css !== "string")) {
+      return `the CSS for ${page.url} is not a list of strings`;
+    }
+    if (!Array.isArray(rendered.diagnostics) || !rendered.diagnostics.every(isDiagnostic)) {
+      return `the diagnostics for ${page.url} are not a list of findings`;
+    }
+    if (rendered.islands !== undefined && (!Array.isArray(rendered.islands) || !rendered.islands.every(isIsland))) {
+      return `the islands for ${page.url} are not a list of islands`;
+    }
+  }
+  return undefined;
+}
+
+/** True for a finding a worker may report: a string id and message, and a known severity. */
+function isDiagnostic(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const { id, severity, message } = value as Partial<Diagnostic>;
+  return (
+    typeof id === "string" &&
+    (severity === "error" || severity === "warning" || severity === "info") &&
+    typeof message === "string"
+  );
+}
+
+/** True for an island a worker may report: its name and the URL its script is served at. */
+function isIsland(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const { name, src } = value as Partial<Island>;
+  return typeof name === "string" && typeof src === "string";
+}
+
 /** What a worker keeps between messages. */
 interface WorkerState {
   readonly registry: ThemeRegistry;
@@ -534,17 +588,21 @@ class WorkerPool implements RenderPool {
     const batch = slot.current;
     if (batch === undefined || slot.batchID !== reply.id) return;
     this.#clearDeadline(slot);
-    slot.current = undefined;
     if (reply.type === "failed") {
+      slot.current = undefined;
       this.#fallback(batch, reply.message);
-    } else {
-      const byURL = new Map(reply.pages.map((page) => [page.url, page]));
-      for (const entry of batch) {
-        const rendered = byURL.get(entry.page.url);
-        if (rendered === undefined) this.#reject(entry, new Error(`render: the worker returned no HTML for ${entry.page.url}.`));
-        else this.#resolve(entry, rendered);
-      }
+      this.#dispatch();
+      return;
     }
+    // A reply is all of the batch's results or none of them: an invalid one retires the worker and renders the batch
+    // here, through the same policy as a worker that threw, so no page is settled with another page's content.
+    const problem = reply.type === "done" ? renderReplyProblem(batch.map((entry) => entry.page), reply.pages) : "the reply has an unknown kind";
+    if (problem !== undefined) {
+      this.#fail(slot, `the worker returned an invalid reply (${problem})`);
+      return;
+    }
+    slot.current = undefined;
+    for (const [index, entry] of batch.entries()) this.#resolve(entry, reply.pages[index]!);
     this.#dispatch();
   }
 
