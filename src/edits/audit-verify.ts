@@ -20,6 +20,10 @@
  * Duplicates are the same record twice: the whole canonical line, not just the `id`. The same plan
  * verified with different evidence is two legitimate records and is not conflated.
  *
+ * Each record is held up to {@link EDIT_AUDIT_MAX_RECORD_BYTES}, so one unterminated or oversized
+ * line cannot grow memory without bound. A longer line is reported as `oversized-record`, discarded,
+ * and scanning continues at the next complete line.
+ *
  * The file is read in chunks, so a damaged ledger does not have to fit in memory before it can be
  * judged. Verification writes nothing.
  */
@@ -43,9 +47,16 @@ import {
   redactAuditText,
 } from "./audit.ts";
 
+/**
+ * The largest record, in bytes, the verifier buffers before parsing. One record is expected to be far
+ * smaller; a longer line is refused as `oversized-record` instead of being held in memory.
+ */
+export const EDIT_AUDIT_MAX_RECORD_BYTES = 1024 * 1024;
+
 /** Why one ledger line was rejected. Each code names one check, so a caller can tell them apart. */
 export type EditAuditIssueCode =
   | "truncated-line"
+  | "oversized-record"
   | "empty-line"
   | "malformed-json"
   | "invalid-record"
@@ -343,10 +354,10 @@ export async function verifyEditAuditLedger(ledger: string): Promise<EditAuditLe
   let records = 0;
   let lineNumber = 0;
   let pending = "";
+  let pendingBytes = 0;
+  let oversized = false;
 
-  const examine = (text: string): void => {
-    lineNumber += 1;
-    const line = lineNumber;
+  const examine = (text: string, line: number): void => {
     if (text.trim() === "") {
       issues.push({ code: "empty-line", line, message: "the line is empty; every line is one record." });
       return;
@@ -379,23 +390,74 @@ export async function verifyEditAuditLedger(ledger: string): Promise<EditAuditLe
     }
   };
 
+  const discardOversized = (): void => {
+    oversized = true;
+    pending = "";
+    pendingBytes = 0;
+  };
+
+  /** Appends part of the current line, or discards the line once it passes the limit. */
+  const append = (piece: string): void => {
+    if (oversized || piece === "") return;
+    const size = Buffer.byteLength(piece, "utf8");
+    if (pendingBytes + size > EDIT_AUDIT_MAX_RECORD_BYTES) {
+      discardOversized();
+      return;
+    }
+    pending += piece;
+    pendingBytes += size;
+  };
+
+  /** Ends the current line: parses it, or reports the oversized record it was discarded as. */
+  const endLine = (): void => {
+    lineNumber += 1;
+    if (oversized) {
+      issues.push({
+        code: "oversized-record",
+        line: lineNumber,
+        message: `the line is longer than ${EDIT_AUDIT_MAX_RECORD_BYTES} bytes; it was not parsed.`,
+      });
+      oversized = false;
+      return;
+    }
+    const text = pending;
+    pending = "";
+    pendingBytes = 0;
+    examine(text, lineNumber);
+  };
+
   try {
     const stream = createReadStream(ledger, { encoding: "utf8" });
     for await (const chunk of stream) {
-      pending += chunk;
-      let end = pending.indexOf("\n");
+      const text = chunk as string;
+      let start = 0;
+      let end = text.indexOf("\n");
       while (end !== -1) {
-        examine(pending.slice(0, end));
-        pending = pending.slice(end + 1);
-        end = pending.indexOf("\n");
+        append(text.slice(start, end));
+        endLine();
+        start = end + 1;
+        end = text.indexOf("\n", start);
       }
+      append(text.slice(start));
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new EditAuditError("invalid-ledger", `audit: cannot read the ledger at "${ledger}": ${reason}`);
   }
 
-  if (pending !== "") {
+  if (oversized) {
+    lineNumber += 1;
+    issues.push({
+      code: "oversized-record",
+      line: lineNumber,
+      message: `the line is longer than ${EDIT_AUDIT_MAX_RECORD_BYTES} bytes; it was not parsed.`,
+    });
+    issues.push({
+      code: "truncated-line",
+      line: lineNumber,
+      message: "the line has no terminating line feed; the ledger was truncated or is still being written.",
+    });
+  } else if (pending !== "") {
     lineNumber += 1;
     issues.push({
       code: "truncated-line",
