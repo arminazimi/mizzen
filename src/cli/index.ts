@@ -2,7 +2,7 @@
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../config/load.ts";
 import { version } from "../index.ts";
@@ -41,8 +41,19 @@ function editFormat(raw: string): EditFormat | undefined {
 /** Layout used when a page names none and the site's defaults name none. */
 const DEFAULT_LAYOUT = "doc";
 
-/** Folder of a `lateen` checkout beside this package, used when no theme is configured. */
-const SIBLING_THEME = fileURLToPath(new URL("../../../lateen", import.meta.url));
+/**
+ * The `lateen` checkout beside a source tree, used when a site configures no theme while developing this repository.
+ * A packed CLI must not inherit it: from `dist/` the same relative path lands in `node_modules/@velella/lateen`, which
+ * would make the engine depend on a theme it does not ship. So a fallback that resolves inside any `node_modules` tree
+ * is refused, while the checkout beside a developer's source tree still works.
+ */
+export function siblingThemeRoot(moduleUrl: string): string | undefined {
+  const path = fileURLToPath(new URL("../../../lateen", moduleUrl));
+  return path.split(sep).includes("node_modules") ? undefined : path;
+}
+
+/** Folder of a `lateen` checkout beside this package, or `undefined` in a packed install. */
+const SIBLING_THEME = siblingThemeRoot(import.meta.url);
 
 export const usage = `Usage: ${NAME} <command> [dir] [options]
 
@@ -221,7 +232,7 @@ export async function resolveThemeRoot(siteRoot: string, themeFlag: string | und
     return undefined;
   }
 
-  if (await exists(SIBLING_THEME)) return SIBLING_THEME;
+  if (SIBLING_THEME !== undefined && (await exists(SIBLING_THEME))) return SIBLING_THEME;
   return undefined;
 }
 

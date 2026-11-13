@@ -102,6 +102,15 @@ function stateOf(root: string): RepoState {
 }
 
 /**
+ * The identity of `root`'s repository state, for a build cache: a commit changes review dates without changing a source
+ * file, so a cache key that ignored it could restore pages whose review evidence is stale. A root that is not a work
+ * tree has one stable value.
+ */
+export function repositoryStateKey(root: string): string {
+  return stateKeyOf(stateOf(root));
+}
+
+/**
  * The cache for `root`'s current state. An unchanged state reuses the same cache, so a whole-root log and each window
  * log happen once for it; a state change — a commit, a repository appearing, or one disappearing — replaces the cache
  * whole. One state therefore answers last-review, coverage, and window lookups together, so they cannot disagree.

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { NAME, main, parseArgs, usage } from "../src/cli/index.ts";
+import { NAME, main, parseArgs, siblingThemeRoot, usage } from "../src/cli/index.ts";
 
 const THEME = fileURLToPath(new URL("../../lateen", import.meta.url));
 const BIN = fileURLToPath(new URL("../bin/mizzen.ts", import.meta.url));
@@ -148,6 +148,33 @@ test("usage errors exit 2 and print the help", async () => {
   assert.equal(logs.length, 0);
   assert.ok(errors[0]?.includes("unknown command"));
   assert.ok(errors[0]?.includes(usage.split("\n")[0]!));
+});
+
+test("a packed CLI has no Lateen fallback", () => {
+  // From `src/` the sibling checkout is a development convenience...
+  assert.equal(
+    siblingThemeRoot("file:///repo/src/cli/index.ts"),
+    fileURLToPath(new URL("../../../lateen", "file:///repo/src/cli/index.ts")),
+  );
+  // ...but a packed `dist/cli/` resolves that path into `node_modules/@velella/lateen`, so it gets nothing.
+  assert.equal(siblingThemeRoot("file:///app/node_modules/@velella/mizzen/dist/cli/index.js"), undefined);
+});
+
+test("every command usage names is dispatched", async () => {
+  const commands = [
+    ...new Set(
+      usage
+        .split("\n")
+        .filter((line) => /^ {2}[a-z]/.test(line))
+        .map((line) => line.trim().split(/\s+/)[0]!),
+    ),
+  ];
+  assert.deepEqual(commands, ["build", "check", "dev", "doctor", "edit", "pack", "verify", "watch"]);
+  for (const command of commands) {
+    const { errors, io } = capture();
+    const status = await main([command, "--help"], io);
+    assert.equal(status, 0, `${command} --help: ${errors.join("")}`);
+  }
 });
 
 test("the bin builds fixtures/docs-site with the sibling theme", () => {

@@ -3,7 +3,7 @@ title: Mizzen documentation
 description: Mizzen is a deterministic docs engine. It turns Markdown into a static site with exact source positions.
 layout: home
 hero:
-  eyebrow: v0.1.0 · docs engine
+  eyebrow: v0.2.0 · docs engine
   title: Same input. Same site.
   lead: Mizzen turns a folder of Markdown into a fast, RTL-ready static site. The same input gives the same bytes, and every page keeps its exact source positions.
 actions:

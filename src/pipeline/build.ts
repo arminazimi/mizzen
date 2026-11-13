@@ -1,4 +1,5 @@
-import { access, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadConfig } from "../config/load.ts";
@@ -11,8 +12,11 @@ import { createCssBundler, type CssBundle } from "../render/css.ts";
 import { loadRegistry } from "../render/registry.ts";
 import { copyAssets } from "./assets.ts";
 import { buildIslandModules, islandUrl } from "../render/islands.ts";
-import { cacheKey, cacheRootOf, restoreCache, writeCache } from "./cache.ts";
+import { cacheKey, cacheRootOf, includedSnippets, renderSettingsKey, restoreCache, writeCache } from "./cache.ts";
 import { createDiagnostics, sortDiagnostics, type Diagnostics } from "./diagnostics.ts";
+import { buildDependencyGraph } from "./dependency-graph.ts";
+import { planInvalidation, type InvalidationPlan } from "./invalidation.ts";
+import { pruneRenderCache, readRenderInputs, renderCache, renderPageKey, writeRenderInputs, type RenderCache, type RenderCacheEntry } from "./render-cache.ts";
 import { moduleName } from "../runtime/modules.ts";
 import { createRenderPool, renderOnePage, type RenderPool } from "./parallel.ts";
 import { placeholderDiagnostics } from "./placeholder-diagnostic.ts";
@@ -52,6 +56,15 @@ export interface BuildResult {
   readonly files: readonly string[];
   /** Every finding of the build, sorted. The site is written even when there are errors; the caller decides whether to fail. */
   readonly diagnostics: readonly Diagnostic[];
+  /** Doc pages the build rendered, rather than read from the per-page render cache. */
+  readonly renderedPages: number;
+  /** Doc pages served from the per-page render cache in this build. */
+  readonly cachedPages: number;
+  /**
+   * What a warm build had to rebuild, from the dependency graph and the pages whose render key changed. Absent on a
+   * cold build or when the settings changed, where every output is rebuilt and there is nothing to narrow.
+   */
+  readonly invalidation?: InvalidationPlan | undefined;
 }
 
 /** The default folder of outputs: `src/outputs/` beside this file's folder. */
@@ -228,7 +241,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       if (hit !== undefined) {
         try {
           await commit(hit.staging, out);
-          return { out, files: hit.files, diagnostics: [...hit.diagnostics] };
+          return { out, files: hit.files, diagnostics: [...hit.diagnostics], renderedPages: 0, cachedPages: 0 };
         } catch {
           // A cache entry that cannot be put in place is no better than no entry: build cold below.
         } finally {
@@ -237,6 +250,31 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       }
     }
   }
+
+  // The per-page render cache answers a narrower question than the whole-build cache: with the settings unchanged,
+  // which pages still render to the bytes they had? Its key covers the config, navigation, data, theme, outputs, and
+  // every page's front matter but not a page's body, so a body-only edit retires that one page and nothing else.
+  const renderRoot = cacheRoot === undefined ? undefined : join(cacheRoot, "render");
+  const settingsKey =
+    renderRoot === undefined
+      ? undefined
+      : await renderSettingsKey({
+          root,
+          sourceDir,
+          config: loaded.config,
+          themeRoot,
+          outputsDir,
+          ...(options.defaultLayout === undefined ? {} : { defaultLayout: options.defaultLayout }),
+          ...(options.themeFiles === undefined ? {} : { themeFiles: options.themeFiles }),
+        }).catch(() => undefined);
+  const settingsDir =
+    renderRoot === undefined || settingsKey === undefined ? undefined : join(renderRoot, settingsKey);
+  const renderStore: RenderCache | undefined = settingsDir === undefined ? undefined : renderCache(settingsDir);
+  const previousInputs = settingsDir === undefined ? {} : await readRenderInputs(settingsDir);
+  const retiredSettings =
+    renderRoot === undefined || settingsKey === undefined
+      ? []
+      : (await readdir(renderRoot).catch((): string[] => [])).filter((name) => name !== settingsKey);
 
   // The site's code file is read after the cache, which it never shares a key with. Its problems are diagnostics, not a
   // failed build: the pages still build and the plugin that could not load costs only its own work.
@@ -288,6 +326,52 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     (file) => file.path !== CODE_CONFIG_FILE,
   );
 
+  // Read every reusable render once, before the pool starts: a page served from the cache must not be prefetched.
+  const cachedRenders = new Map<string, RenderCacheEntry>();
+  if (renderStore !== undefined && settingsKey !== undefined) {
+    await Promise.all(
+      site.pages
+        .filter((page) => page.kind === "doc")
+        .map(async (page) => {
+          const entry = await renderStore.get(renderPageKey(settingsKey, page, options.defaultLayout));
+          if (entry !== undefined) cachedRenders.set(page.url, entry);
+        }),
+    );
+  }
+
+  // A snippet is not discovered, so a page whose render key missed does not say which include changed. The previous
+  // build's hashes name it, so the plan carries the include's own causal chain instead of blaming the page file.
+  const includeInputs: Record<string, string> = {};
+  if (renderStore !== undefined) {
+    for (const path of await includedSnippets(files, sourceDir)) {
+      try {
+        includeInputs[path] = createHash("sha256").update(await readFile(join(sourceDir, path))).digest("hex");
+      } catch {
+        includeInputs[path] = "";
+      }
+    }
+  }
+
+  // With the settings unchanged, the pages whose render key missed and the snippets whose bytes changed are the
+  // changed inputs; the graph turns them into the outputs that must rebuild and the causal chain for each.
+  let invalidation: InvalidationPlan | undefined;
+  if (renderStore !== undefined && cachedRenders.size > 0 && retiredSettings.length === 0) {
+    const changedPages = site.pages.filter((page) => page.kind === "doc" && !cachedRenders.has(page.url));
+    const changedSnippets = Object.keys(includeInputs).filter((path) => previousInputs[path] !== includeInputs[path]);
+    if (changedPages.length + changedSnippets.length > 0) {
+      const graph = await buildDependencyGraph({ root, site, files }).catch(() => undefined);
+      if (graph !== undefined) {
+        invalidation = planInvalidation({
+          graph: graph.graph,
+          changes: [
+            ...changedPages.map((page) => ({ kind: "changed" as const, path: page.source.file })),
+            ...changedSnippets.map((path) => ({ kind: "changed" as const, path })),
+          ],
+        });
+      }
+    }
+  }
+
   // With one worker, pages render in this process exactly as before. With more, the pool starts rendering the doc
   // pages the html output will ask for while the outputs are still being loaded, then serves them from its results.
   // A pool that renders a page nobody asks for reports nothing: reporting happens when an output asks for the page.
@@ -302,18 +386,39 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         })
       : undefined;
   if (pool !== undefined && site.config.outputs.html !== false) {
-    pool.prefetch(site.pages.filter((page) => page.kind === "doc"));
+    pool.prefetch(site.pages.filter((page) => page.kind === "doc" && !cachedRenders.has(page.url)));
   }
 
   // Outputs may ask for the same page: render it once and report its diagnostics once.
   const renderedHtml = new Map<string, Promise<string>>();
+  let renderedPages = 0;
+  let cachedPages = 0;
   const renderPaged = async (page: Page): Promise<string> => {
     const known = renderedHtml.get(page.url);
     if (known !== undefined) return known;
     const pending = (async () => {
+      const cached = cachedRenders.get(page.url);
+      if (cached !== undefined) {
+        cachedPages += 1;
+        for (const d of cached.diagnostics) diagnostics.report(d);
+        return withCss({
+          html: cached.html,
+          css: cached.css,
+          ...(cached.islands === undefined ? {} : { islands: cached.islands }),
+        });
+      }
       const rendered =
         pool === undefined ? renderOnePage(registry, site, page, options.defaultLayout) : await pool.render(page);
+      renderedPages += 1;
       for (const d of rendered.diagnostics) diagnostics.report(d);
+      if (renderStore !== undefined && settingsKey !== undefined) {
+        await renderStore.set(renderPageKey(settingsKey, page, options.defaultLayout), {
+          html: rendered.html,
+          css: rendered.css,
+          ...(rendered.islands === undefined ? {} : { islands: rendered.islands }),
+          diagnostics: rendered.diagnostics,
+        });
+      }
       return withCss(rendered);
     })();
     renderedHtml.set(page.url, pending);
@@ -419,7 +524,16 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     if (cacheRoot !== undefined && key !== undefined) await writeCache(cacheRoot, key, staging, fileList, findings);
 
     await commit(staging, out);
-    return { out, files: fileList, diagnostics: findings };
+    if (settingsDir !== undefined) await writeRenderInputs(settingsDir, includeInputs);
+    if (renderRoot !== undefined && settingsKey !== undefined) await pruneRenderCache(renderRoot, settingsKey);
+    return {
+      out,
+      files: fileList,
+      diagnostics: findings,
+      renderedPages,
+      cachedPages,
+      ...(invalidation === undefined ? {} : { invalidation }),
+    };
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
