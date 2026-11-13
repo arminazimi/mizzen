@@ -54,6 +54,8 @@ export interface VerifyProofOptions {
   readonly doctorCommand?: DoctorCommand;
   /** Environment for the doctor process. Default: this process's. */
   readonly env?: NodeJS.ProcessEnv;
+  /** How long the doctor may run, in milliseconds. Default: {@link DOCTOR_TIMEOUT_MS}; tests pass a smaller value. */
+  readonly doctorTimeoutMs?: number;
 }
 
 /** What a recorded file looks like now, compared with the proof's `after` hash. */
@@ -113,6 +115,12 @@ export interface VerifyProofResult {
 /** A local doctor checkout beside this package, when there is one. */
 const SIBLING_DOCTOR = fileURLToPath(new URL("../../../doctor/bin/mizzen.ts", import.meta.url));
 
+/**
+ * The default deadline for one doctor run, in milliseconds: a doctor that hangs would otherwise block verification
+ * forever. A run that reaches it is killed and reported as unavailable, never as a match.
+ */
+export const DOCTOR_TIMEOUT_MS = 30_000;
+
 /** Why the proof could not be read, as one phrase. */
 function readReason(err: unknown): string {
   if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return "it does not exist";
@@ -131,13 +139,20 @@ function runDoctor(
   siteRoot: string,
   command: DoctorCommand,
   env: NodeJS.ProcessEnv,
+  timeoutMs: number,
 ): { readonly findings: ReturnType<typeof parseDoctorReport> } | { readonly error: string } {
   const result = spawnSync(command.command, [...(command.prefix ?? []), "doctor", siteRoot, "--format", "json"], {
     cwd: siteRoot,
     encoding: "utf8",
     env,
     maxBuffer: 16 * 1024 * 1024,
+    timeout: timeoutMs,
+    // A doctor that ignores SIGTERM must still die at the deadline.
+    killSignal: "SIGKILL",
   });
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
+    return { error: `it did not finish within ${timeoutMs}ms` };
+  }
   if (result.error !== undefined) return { error: result.error.message };
   if (result.status !== 0 && result.status !== 1) {
     return { error: `it exited ${result.status === null ? "on a signal" : result.status}` };
@@ -231,7 +246,12 @@ export async function verifyProof(options: VerifyProofOptions): Promise<VerifyPr
     return { ...base, ok: false, files: checked.length, doctor: "unsupported", failures: [failure], failure };
   }
 
-  const ran = runDoctor(siteRoot, options.doctorCommand ?? defaultDoctorCommand(), options.env ?? process.env);
+  const ran = runDoctor(
+    siteRoot,
+    options.doctorCommand ?? defaultDoctorCommand(),
+    options.env ?? process.env,
+    options.doctorTimeoutMs ?? DOCTOR_TIMEOUT_MS,
+  );
   if ("error" in ran) {
     const failure: VerifyProofFailure = { kind: "doctor-unavailable", reason: "unavailable", message: ran.error };
     return { ...base, ok: false, files: checked.length, doctor: "unavailable", failures: [failure], failure };
