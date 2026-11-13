@@ -244,7 +244,7 @@ test("a node_modules theme loads its .ts entries (the CI smoke case)", async () 
   }
 });
 
-test("a node_modules theme entry keeps its first module across loads (documented limitation)", async () => {
+test("an installed theme's edited entry is seen by the next load in the same process", async () => {
   const root = installedTheme({
     "src/index.ts": FULL_MANIFEST,
     ...units("one"),
@@ -252,19 +252,41 @@ test("a node_modules theme entry keeps its first module across loads (documented
   try {
     const first = await loadRegistry(root);
     assert.equal(first.layouts.doc?.layout({} as never), "doc one");
+    assert.equal(first.diagnostics.length, 0);
 
-    // An installed theme is on a plain, query-free URL, so Node's module cache hands back the first version.
-    // Reloading an installed theme is the boundary documented on entryUrl: it loads, but does not reload.
+    // The installed entry is keyed by its bytes, so the next load imports the new module.
     write(root, "layouts/doc.ts", 'export default function doc() { return "doc two"; }\n');
     const second = await loadRegistry(root);
-    assert.equal(second.layouts.doc?.layout, first.layouts.doc?.layout);
-    assert.equal(second.layouts.doc?.layout({} as never), "doc one");
+    assert.equal(second.layouts.doc?.layout({} as never), "doc two");
+    assert.notEqual(second.layouts.doc?.layout, first.layouts.doc?.layout);
+    assert.equal(first.layouts.doc?.layout({} as never), "doc one");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("a source-checkout (non-node_modules) theme still reloads while the installed one cannot", async () => {
+test("an installed theme reuses unchanged entries while the edited one reloads", async () => {
+  const root = installedTheme({ "src/index.ts": FULL_MANIFEST, ...units("one") });
+  try {
+    const first = await loadRegistry(root);
+    const second = await loadRegistry(root);
+
+    // Same bytes, same resolved URL: Node hands back the module it already imported.
+    assert.equal(second.layouts.doc?.layout, first.layouts.doc?.layout);
+    assert.equal(second.chrome.footer?.chrome, first.chrome.footer?.chrome);
+    assert.equal(second.components.callout?.component, first.components.callout?.component);
+
+    write(root, "layouts/doc.ts", 'export default function doc() { return "doc two"; }\n');
+    const third = await loadRegistry(root);
+    assert.notEqual(third.layouts.doc?.layout, first.layouts.doc?.layout);
+    assert.equal(third.chrome.footer?.chrome, first.chrome.footer?.chrome);
+    assert.equal(third.components.callout?.component, first.components.callout?.component);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installed and checked-out themes reload the same way", async () => {
   const checkout = theme({ "src/index.ts": FULL_MANIFEST, ...units("one") });
   const installed = installedTheme({ "src/index.ts": FULL_MANIFEST, ...units("one") });
   try {
@@ -277,12 +299,31 @@ test("a source-checkout (non-node_modules) theme still reloads while the install
     const secondCheckout = await loadRegistry(checkout);
     const secondInstalled = await loadRegistry(installed);
 
-    // The case issue #97 targets: a rebuild in a checkout is seen.
     assert.equal(secondCheckout.layouts.doc?.layout({} as never), "doc two");
-    // The documented boundary: an installed theme is not seen by a rebuild.
-    assert.equal(secondInstalled.layouts.doc?.layout({} as never), "doc one");
+    assert.equal(secondInstalled.layouts.doc?.layout({} as never), "doc two");
+    assert.notEqual(secondInstalled.layouts.doc?.layout, firstInstalled.layouts.doc?.layout);
+    assert.notEqual(secondCheckout.layouts.doc?.layout, firstCheckout.layouts.doc?.layout);
   } finally {
     rmSync(checkout, { recursive: true, force: true });
     rmSync(installed, { recursive: true, force: true });
+  }
+});
+
+test("an installed entry's own import is still not reloaded (entry-only boundary)", async () => {
+  const root = installedTheme({
+    "src/index.ts": `export const theme = { name: "temp", folders: ["layouts"] } as const;\n`,
+    "layouts/doc.ts": 'import { label } from "../lib.ts";\nexport default function doc() { return `doc ${label}`; }\n',
+    "lib.ts": 'export const label = "one";\n',
+  });
+  try {
+    const first = await loadRegistry(root);
+    assert.equal(first.layouts.doc?.layout({} as never), "doc one");
+
+    // The entry reloads, but its plain-specifier import stays cached: no transitive reload is promised.
+    write(root, "lib.ts", 'export const label = "two";\n');
+    const second = await loadRegistry(root);
+    assert.equal(second.layouts.doc?.layout({} as never), "doc one");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

@@ -79,29 +79,19 @@ function fileUrl(path: string): string {
   return pathToFileURL(path).href;
 }
 
-/** True when `abs` sits beneath a `node_modules` directory segment. */
-function inNodeModules(abs: string): boolean {
-  return abs.split(/[\\/]/).includes("node_modules");
-}
-
 /**
  * The entry module's URL, keyed by its current bytes.
  *
  * Node keeps a module for the life of the process, so a plain file URL would hand a watch rebuild the layout it
  * imported first. The `?v=<sha256>` the site plugin loader (`src/plugins/hooks.ts`) already uses makes changed bytes
- * a new module, while unchanged bytes resolve to the same URL and so reuse the module already imported.
+ * a new module, while unchanged bytes resolve to the same URL and so reuse the module already imported. An installed
+ * theme gets the same query: `allowTypeScriptInPackages` classifies the URL pathname, so a `.ts` entry under
+ * `node_modules` still has its types stripped with the query attached.
  *
- * Two boundaries, both honest:
- *  - The entry file only. A re-imported entry still resolves its own imports by their plain specifiers, so an edit to
- *    a transitive module is not reloaded here; a general transitive resolver is outside issue #97.
- *  - An installed theme lives under `node_modules`. Node refuses to type-strip a `.ts` file there once its specifier
- *    carries a query, and the `allowTypeScriptInPackages` hook only strips those files for a URL that ends in `.ts`.
- *    So a `node_modules` entry keeps its plain, query-free URL: it loads correctly, but Node's module cache then holds
- *    the first version for the life of the process, and a watch rebuild of an installed theme is NOT reloaded. Themes
- *    run from a source checkout (not `node_modules`) do reload, which is the case issue #97 targets.
+ * The boundary is the entry file only. A re-imported entry still resolves its own imports by their plain specifiers,
+ * so an edit to a transitive module is not reloaded here; a general transitive resolver is outside the registry.
  */
 async function entryUrl(abs: string): Promise<string> {
-  if (inNodeModules(abs)) return fileUrl(abs);
   const digest = createHash("sha256").update(await readFile(abs)).digest("hex");
   return `${fileUrl(abs)}?v=${digest}`;
 }
