@@ -1,6 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { relative, resolve, sep } from "node:path";
 
+/**
+ * The limits every git call in this module is held to. Review evidence is an input, not something a build may wait
+ * on forever: a command that misses the deadline is killed, and a log that outgrows the cap is discarded rather
+ * than buffered. Either way the lookup reads as unavailable, never as stale or successful evidence.
+ */
+/** The deadline of one git call, in milliseconds. */
+const GIT_TIMEOUT_MS = 10_000;
+
+/** The most stdout one git call may produce. A whole-root log of 600 pages fits far below it. */
+const GIT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+
 /** What git says about a page's last review: the last commit that touched its source file. */
 export interface Review {
   /** The committer instant of that commit, in UTC ISO 8601 (`Date#toISOString`), the same string on every machine. */
@@ -35,8 +46,11 @@ interface Cache {
   readonly key: string;
   /** True when this cache's state is a work tree, so the history below may be read at all. */
   readonly available: boolean;
-  /** Reviews by root-relative path (forward slashes) for this state, read by one `git log` on the first lookup; `undefined` until then. */
-  reviews: Map<string, Review> | undefined;
+  /**
+   * Reviews by root-relative path (forward slashes) for this state, read by one `git log` on the first lookup:
+   * `undefined` until read, `null` when that read failed, so a failure costs one call per state rather than one per page.
+   */
+  reviews: Map<string, Review> | null | undefined;
   /** Bounded window logs for this state, one per window; none of them survives a state change. */
   readonly windows: Map<string, WindowHistory>;
 }
@@ -51,14 +65,18 @@ function stateKeyOf(state: RepoState): string {
 
 /** The stdout a failing git still wrote, which is what separates a repository with no commit from a folder git ignores. */
 function stdoutOf(error: unknown): string {
+  // Only a git that exited on its own wrote a complete answer; a timeout, an overflow, or a spawn failure left a
+  // partial buffer, and a partial "true" must not become a repository state.
+  if (typeof (error as { readonly status?: unknown }).status !== "number") return "";
   const stdout = (error as { readonly stdout?: unknown }).stdout;
   return typeof stdout === "string" ? stdout : "";
 }
 
 /**
  * Asks git once whether `root` is inside a work tree and which commit HEAD names. A missing git, a folder outside a
- * work tree, and a repository with no commit yet all give a state no history may be trusted for. The state is read on
- * every lookup, so a `git init`, a first commit, or a later commit is seen in the same process as in a new one.
+ * work tree, a repository with no commit yet, and a call that misses the git deadline all give a state no history may
+ * be trusted for. The state is read on every lookup, so a `git init`, a first commit, or a later commit is seen in the
+ * same process as in a new one.
  */
 function stateOf(root: string): RepoState {
   let text: string;
@@ -67,6 +85,8 @@ function stateOf(root: string): RepoState {
     text = execFileSync("git", ["rev-parse", "--is-inside-work-tree", "HEAD"], {
       cwd: root,
       encoding: "utf8",
+      maxBuffer: GIT_MAX_OUTPUT_BYTES,
+      timeout: GIT_TIMEOUT_MS,
       stdio: ["ignore", "pipe", "ignore"],
     });
   } catch (error) {
@@ -127,8 +147,9 @@ function canonicalInstant(date: string): string | undefined {
 /**
  * Reads every file's last commit under `root` with one `git log`, newest first, so a site of 600 pages costs one
  * process instead of 600. The newest commit that names a path is the one `git log -1 -- <path>` would give.
- * A failure, including a missing git, is `undefined` rather than an empty map: git did not answer, so a page must
- * read {@link UNKNOWN} and coverage must be `unavailable`, not the `untracked` an empty map would imply.
+ * A failure, including a missing git, a missed deadline, or more output than the cap, is `undefined` rather than an
+ * empty map: git did not answer, so a page must read {@link UNKNOWN} and coverage must be `unavailable`, not the
+ * `untracked` an empty map would imply.
  */
 function readReviews(root: string): Map<string, Review> | undefined {
   let text: string;
@@ -137,7 +158,8 @@ function readReviews(root: string): Map<string, Review> | undefined {
     text = execFileSync("git", ["log", "--relative", "--format=%x01%cI%x02%aN", "--name-only", "-z", "--", "."], {
       cwd: root,
       encoding: "utf8",
-      maxBuffer: 1024 * 1024 * 1024,
+      maxBuffer: GIT_MAX_OUTPUT_BYTES,
+      timeout: GIT_TIMEOUT_MS,
       stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {
@@ -181,9 +203,10 @@ function historyOf(
   return cache.available ? { cache, path } : undefined;
 }
 
-/** The whole-root reviews of a cache, read by one `git log` the first time this state is asked about. */
-function reviewsOf(cache: Cache): Map<string, Review> | undefined {
-  return (cache.reviews ??= readReviews(cache.base));
+/** The whole-root reviews of a cache, read by one `git log` the first time this state is asked about; a failed read is cached as `null`. */
+function reviewsOf(cache: Cache): Map<string, Review> | null {
+  if (cache.reviews === undefined) cache.reviews = readReviews(cache.base) ?? null;
+  return cache.reviews;
 }
 
 /**
@@ -193,9 +216,10 @@ function reviewsOf(cache: Cache): Map<string, Review> | undefined {
  *
  * The answer comes from `git log --format=%cI%x02%aN --name-only` (the newest commit naming the path), so `%aN` applies the repository's `.mailmap`.
  * The date is the commit instant in UTC, so git's choice of `Z` or `+00:00` is not visible. A root outside a git work
- * tree, a file git has never seen, and a missing git all read {@link UNKNOWN}; this function never throws and never
- * reads the clock. Each root is read once per repository state, so a fixed repository gives the
- * same answer every time while a commit made later in the same process is seen by the next call.
+ * tree, a file git has never seen, a missing git, and a call that misses its deadline or output cap all read
+ * {@link UNKNOWN}; this function never throws and never reads the clock. Each root is read once per repository state,
+ * so a fixed repository gives the same answer every time while a commit made later in the same process is seen by the
+ * next call.
  *
  * This is a machine input: the answer depends on the repository's history and `.mailmap`, which are not part of the
  * site's source. A copy of the site without its history reports {@link UNKNOWN}; a build on a machine without git
@@ -219,7 +243,7 @@ export function reviewCoverage(root: string, pageFile: string): ReviewCoverage {
   if (found === undefined) return "unavailable";
 
   const reviews = reviewsOf(found.cache);
-  if (reviews === undefined) return "unavailable";
+  if (reviews === null) return "unavailable";
   return reviews.has(found.path) ? "recorded" : "untracked";
 }
 
@@ -266,8 +290,8 @@ function newestFirst(a: ReviewCommit, b: ReviewCommit): number {
 /**
  * Reads every commit in `[since, until]` under `root` with one bounded `git log`, newest first. The lower
  * boundary is widened by one second for git's date parsing and the result is filtered exactly, so a commit
- * on either boundary is included. A failure, including a missing git, is `undefined`: the window was not
- * read, which is not the same as a window with no commits.
+ * on either boundary is included. A failure, including a missing git, a missed deadline, or more output than
+ * the cap, is `undefined`: the window was not read, which is not the same as a window with no commits.
  */
 function readWindow(root: string, since: number, until: number): Map<string, ReviewCommit[]> | undefined {
   let text: string;
@@ -291,7 +315,8 @@ function readWindow(root: string, since: number, until: number): Map<string, Rev
       {
         cwd: root,
         encoding: "utf8",
-        maxBuffer: 1024 * 1024 * 1024,
+        maxBuffer: GIT_MAX_OUTPUT_BYTES,
+        timeout: GIT_TIMEOUT_MS,
         stdio: ["ignore", "pipe", "ignore"],
       },
     );
@@ -382,7 +407,7 @@ export function reviewHistory(root: string, pageFile: string, window: ReviewWind
   // Nothing in the window: the same state's whole-root history still says whether any commit ever names the page,
   // so a last review, a coverage answer, and a window never come from two different HEADs.
   const reviews = reviewsOf(found.cache);
-  if (reviews === undefined) return { coverage: "unavailable", commits: [], reviewers: [] };
+  if (reviews === null) return { coverage: "unavailable", commits: [], reviewers: [] };
   const last = reviews.get(found.path);
   if (last !== undefined) {
     return { coverage: "recorded", commits: [], reviewers: [], lastReview: last };
