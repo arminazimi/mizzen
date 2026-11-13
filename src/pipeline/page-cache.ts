@@ -8,13 +8,16 @@
  * misses only that page; changing a plugin or its order misses every page; an implementation input that cannot be read
  * misses every page rather than trusting a tree this run cannot account for; a corrupt, missing, stale, or
  * half-written entry is a miss, never bad content, and an entry carries a checksum of its tree so a tampered tree is
- * never read. Writes land in a temporary folder first and are renamed into place, so a reader never sees half an entry.
+ * never read. An entry larger than {@link MAX_ENTRY_BYTES} is a miss too, and its read stops at that limit, so a
+ * corrupt or hostile entry cannot exhaust memory on the way to being rejected. Writes land in a temporary folder
+ * first and are renamed into place, so a reader never sees half an entry.
  *
  * The implementation fingerprint (#106) is what keeps development honest: the parser module and the built-in plugin
  * modules are read in stable path order and folded into every key and every entry, so a cached tree cannot outlive a
  * behavior change while the package version stays fixed.
  *
  */
+import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -26,6 +29,15 @@ import { moduleName, OWN_EXTENSION } from "../runtime/modules.ts";
 
 /** Bumped when the meaning or shape of an entry changes, so an entry written by an older engine is never trusted. */
 export const PAGE_CACHE_FORMAT = 3;
+
+/**
+ * The largest encoded entry this module reads, in UTF-8 bytes: 16 MiB.
+ *
+ * An entry holds one page's mdast tree, so even a very large page is well under a megabyte; 16 MiB leaves room for
+ * that many times over and still keeps a corrupt or hostile entry from exhausting memory before it is rejected. The
+ * read stops at the first piece that crosses this limit, and an entry of exactly this size is read normally.
+ */
+export const MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 
 /** A key has 64 lowercase hexadecimal characters, and so does a file named after one. */
 const KEY = /^[0-9a-f]{64}$/;
@@ -205,6 +217,37 @@ function treeChecksum(tree: Root): string {
   return createHash("sha256").update(JSON.stringify(tree)).digest("hex");
 }
 
+/**
+ * Reads the entry at `file` as UTF-8 text, or `undefined` and a miss reason when it is missing, unreadable, or larger
+ * than {@link MAX_ENTRY_BYTES}.
+ *
+ * The file is streamed in pieces and reading stops at the first piece that crosses the limit, so the bytes kept here
+ * stay at or below the limit: an oversized entry is never fully buffered, decoded, or handed to `JSON.parse`.
+ */
+async function readEntry(
+  file: string,
+  onMiss: ((reason: PageCacheMissReason) => void) | undefined,
+): Promise<string | undefined> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    for await (const chunk of createReadStream(file, { highWaterMark: 64 * 1024 })) {
+      const piece = chunk as Buffer;
+      bytes += piece.byteLength;
+      if (bytes > MAX_ENTRY_BYTES) {
+        onMiss?.("corrupt");
+        return undefined;
+      }
+      chunks.push(piece);
+    }
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    onMiss?.(code === "ENOENT" || code === "ENOTDIR" ? "missing" : "corrupt");
+    return undefined;
+  }
+  return Buffer.concat(chunks, bytes).toString("utf8");
+}
+
 /** A cache of parsed pages rooted at `dir`. Reads and writes never throw; a cache that fails only costs a parse. */
 export function pageCache(dir: string, options: PageCacheOptions = {}): PageCache {
   const root = resolve(dir);
@@ -253,14 +296,8 @@ export function pageCache(dir: string, options: PageCacheOptions = {}): PageCach
         options.onMiss?.("incompatible");
         return undefined;
       }
-      let text: string;
-      try {
-        text = await readFile(join(root, `${key}.json`), "utf8");
-      } catch (err) {
-        const code = (err as { code?: unknown }).code;
-        options.onMiss?.(code === "ENOENT" || code === "ENOTDIR" ? "missing" : "corrupt");
-        return undefined;
-      }
+      const text = await readEntry(join(root, `${key}.json`), options.onMiss);
+      if (text === undefined) return undefined;
       let parsed: unknown;
       try {
         parsed = JSON.parse(text);
