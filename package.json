@@ -71,6 +71,9 @@
     "bin/mizzen.js",
     "dist",
     "schema",
+    "skills",
+    "!skills/*-workspace",
+    "!skills/**/evals",
     "CHANGELOG.md"
   ],
   "publishConfig": {
