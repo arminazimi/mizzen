@@ -7,6 +7,7 @@ import { test } from "node:test";
 import type { ContextRequest } from "../src/contracts/context-request.ts";
 import type { Diagnostic, Page, Site, SiteConfig } from "../src/contracts/index.ts";
 import { main, parseArgs, usage } from "../src/cli/index.ts";
+import { version } from "../src/index.ts";
 import { readStandardInput } from "../src/cli/pack-request.ts";
 import { buildModel } from "../src/model/build.ts";
 import { contextPack, type PackEvidence } from "../src/outputs/context-pack.ts";
@@ -420,7 +421,7 @@ test("Markdown and JSON contain the same items and the build's own identity", as
     assert.equal(json.code, 0);
     const evidence = JSON.parse(json.writes[0]!) as PackEvidence;
     assert.match(evidence.build.id, /^[0-9a-f]{64}$/);
-    assert.equal(evidence.build.engine, "0.1.0");
+    assert.equal(evidence.build.engine, version);
     for (const item of evidence.items) {
       assert.equal(item.build, evidence.build.id);
       assert.ok(markdown.writes[0]!.includes(`## ${item.title}`), `Markdown names ${item.id}`);
