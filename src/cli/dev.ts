@@ -10,6 +10,7 @@ import { constants, watch, type FSWatcher } from "node:fs";
 import { open, realpath, stat, type FileHandle } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { loadConfig } from "../config/load.ts";
 import type { Diagnostic } from "../contracts/index.ts";
 import { build } from "../pipeline/build.ts";
@@ -372,24 +373,48 @@ export async function dev(options: DevOptions): Promise<DevServer> {
     return { status: "missing" };
   };
 
+  /**
+   * Serves one opened file. HTML is buffered, because the reload client is inserted into it before the length is
+   * known; every other file is streamed from the verified handle, so a large asset costs one chunk of memory
+   * instead of one copy of itself. The handle is closed on success, on a client that leaves mid-download, and on a
+   * read error.
+   */
   const send = async (req: IncomingMessage, res: ServerResponse, file: ServedFile, status: number): Promise<void> => {
-    let body: Buffer;
+    const type = contentType(file.path);
+    const empty = status === 204 || status === 304;
+    let body: Buffer | undefined;
+    let length = 0;
     try {
-      body = await file.handle.readFile();
+      if (!empty) {
+        if (type.startsWith("text/html")) {
+          body = Buffer.from(withReloadClient((await file.handle.readFile()).toString("utf8")), "utf8");
+          length = body.byteLength;
+        } else {
+          length = (await file.handle.stat()).size;
+        }
+      }
+      const headers: Record<string, string | number> = { "Content-Type": type, "X-Content-Type-Options": "nosniff" };
+      if (!empty) {
+        headers["Content-Length"] = length;
+        headers["Cache-Control"] = "no-store";
+      }
+      res.writeHead(status, headers);
+      if (empty || req.method === "HEAD") {
+        res.end();
+      } else if (body !== undefined) {
+        res.end(body);
+      } else {
+        try {
+          await pipeline(file.handle.createReadStream({ autoClose: false }), res);
+        } catch (err) {
+          // Once the headers are out the socket is the only error channel: a client that left mid-download is not a
+          // server failure, and a read error has already destroyed the response so the client sees a short body.
+          if (!res.destroyed) throw err;
+        }
+      }
     } finally {
       await file.handle.close().catch(() => undefined);
     }
-    const type = contentType(file.path);
-    const empty = status === 204 || status === 304;
-    const headers: Record<string, string | number> = { "Content-Type": type, "X-Content-Type-Options": "nosniff" };
-    if (!empty) {
-      if (type.startsWith("text/html")) body = Buffer.from(withReloadClient(body.toString("utf8")), "utf8");
-      headers["Content-Length"] = body.byteLength;
-      headers["Cache-Control"] = "no-store";
-    }
-    res.writeHead(status, headers);
-    if (req.method === "HEAD" || empty) res.end();
-    else res.end(body);
   };
 
   /** Writes a small text response with the boundary headers; HEAD gets the headers and no body. */
@@ -548,12 +573,14 @@ export async function dev(options: DevOptions): Promise<DevServer> {
       clients.clear();
       // A build in flight finishes, and in-flight responses finish, before the server stops listening.
       await tail.catch(() => undefined);
-      await Promise.allSettled([...active]);
-      await new Promise<void>((resolveClose) => {
+      const stopped = new Promise<void>((resolveClose) => {
         server.close(() => resolveClose());
-        server.closeIdleConnections();
-        server.closeAllConnections();
       });
+      // A streamed download stops here, so a client that stopped reading cannot hold the shutdown open.
+      server.closeIdleConnections();
+      server.closeAllConnections();
+      await Promise.allSettled([...active]);
+      await stopped;
       resolveClosed();
     })();
     return shuttingDown;
