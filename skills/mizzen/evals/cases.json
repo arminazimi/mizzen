@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "velella.skill-evals.v1",
+  "cases": [
+    { "id": "mz-output", "kind": "positive", "prompt": "Add a new generated JSON artifact to the Mizzen build and cover collision behavior.", "shouldTrigger": true, "reason": "Mizzen output workflow." },
+    { "id": "mz-spans", "kind": "positive", "prompt": "Fix the exact source positions in Mizzen's Markdown diagnostics.", "shouldTrigger": true, "reason": "Markdown and source-span work." },
+    { "id": "mz-cli", "kind": "positive", "prompt": "The mizzen check CLI should emit SARIF; implement it and test exit codes.", "shouldTrigger": true, "reason": "Mizzen CLI behavior." },
+    { "id": "mz-determinism", "kind": "positive", "prompt": "Build outputs differ between runs; investigate determinism in src/pipeline.", "shouldTrigger": true, "reason": "Pipeline determinism debugging." },
+    { "id": "mz-fact", "kind": "positive", "prompt": "Add a derived fact to Site.data with the site's _data taking precedence.", "shouldTrigger": true, "reason": "Mizzen derived-fact workflow." },
+    { "id": "mz-config", "kind": "positive", "prompt": "Update mizzen.yml, its JSON schema, and SiteConfig for a new site setting.", "shouldTrigger": true, "reason": "Configuration contract change." },
+    { "id": "mz-edit", "kind": "positive", "prompt": "Make mizzen edit apply reject a patch outside the site without changing the source.", "shouldTrigger": true, "reason": "Safe span-edit workflow." },
+    { "id": "mz-contract", "kind": "positive", "prompt": "Review this change to @velella/mizzen/contracts for compatibility.", "shouldTrigger": true, "reason": "Mizzen public contract review." },
+    { "id": "mz-plugin", "kind": "ambiguous", "prompt": "A docs-engine plugin hook throws and crashes the build; it should report a diagnostic instead.", "shouldTrigger": true, "reason": "Plugin diagnostics without the product name." },
+    { "id": "mz-workers", "kind": "ambiguous", "prompt": "Optimize worker rendering while preserving byte-identical HTML and diagnostics.", "shouldTrigger": true, "reason": "Worker determinism without an explicit repository name." },
+    { "id": "mz-lateen-style", "kind": "negative", "prompt": "Change the Lateen callout border color and regenerate its tokens.", "shouldTrigger": false, "reason": "Lateen visual work uses the lateen Skill." },
+    { "id": "mz-lateen-component", "kind": "negative", "prompt": "Add a Preact component to the Lateen documentation theme.", "shouldTrigger": false, "reason": "Theme component work is outside the engine Skill." },
+    { "id": "mz-rtl", "kind": "negative", "prompt": "Fix the Persian RTL sidebar in Lateen's mobile drawer.", "shouldTrigger": false, "reason": "Lateen RTL and responsive behavior." },
+    { "id": "mz-offing", "kind": "negative", "prompt": "Scan this repository for deprecated runtimes and GitHub Actions.", "shouldTrigger": false, "reason": "Lifecycle discovery belongs to Offing." },
+    { "id": "mz-ebb", "kind": "negative", "prompt": "Check whether Node 18 is end of life before choosing it.", "shouldTrigger": false, "reason": "Lifecycle verification belongs to Ebb or Offing." },
+    { "id": "mz-security", "kind": "negative", "prompt": "Run a vulnerability audit of the npm dependency tree.", "shouldTrigger": false, "reason": "Security auditing is unrelated." },
+    { "id": "mz-ui", "kind": "negative", "prompt": "Build a React dashboard for our sales metrics.", "shouldTrigger": false, "reason": "Generic application UI work." },
+    { "id": "mz-algorithm", "kind": "negative", "prompt": "Implement a stable sorting algorithm in Python.", "shouldTrigger": false, "reason": "Unrelated algorithm work." },
+    { "id": "mz-notice", "kind": "ambiguous", "prompt": "Write a deprecation notice for our public REST API.", "shouldTrigger": false, "reason": "Application API documentation is not docs-engine work." },
+    { "id": "mz-install", "kind": "negative", "prompt": "Install Offing and show me its help command.", "shouldTrigger": false, "reason": "Unrelated product setup." }
+  ]
+}

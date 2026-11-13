@@ -1,0 +1,41 @@
+{
+  "skill_name": "mizzen",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Plan a new Mizzen output named audit-summary that writes audit-summary.json with sorted page URLs and reports duplicate source paths as diagnostics. Do not implement; name the files, invariants, tests, and verification commands.",
+      "expected_output": "An implementation plan covering src/outputs discovery and naming, deterministic sorted output, ctx.report diagnostics, collision safety, focused and full tests.",
+      "files": [],
+      "expectations": [
+        "Names src/outputs/audit-summary.ts, matching output name, and discovery without a shared-index edit.",
+        "Requires deterministic path-sorted output and duplicate-source diagnostics through ctx.report.",
+        "Covers output path containment or collision behavior and adds a focused output test.",
+        "Runs npm run typecheck and npm test."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Users report that mizzen build --workers auto occasionally produces different bytes. Give a debugging plan that isolates the cause without weakening deterministic output or the theme boundary. Do not edit code.",
+      "expected_output": "A debugging plan that compares repeated and single-worker builds, examines pipeline/render ordering and environment inputs, preserves the no-Lateen-import boundary, and uses determinism and boundary tests.",
+      "files": [],
+      "expectations": [
+        "Compares repeated builds and single-worker versus auto-worker bytes and diagnostics.",
+        "Investigates unstable ordering and nondeterministic inputs in pipeline or render code.",
+        "Preserves the no-Lateen-import engine boundary and includes the boundary test.",
+        "Uses relevant determinism and parallel-pipeline tests before the full suite."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Plan a safe enhancement to mizzen edit apply that previews a span patch before writing it. Cover path containment, source hashes, proofs, diagnostics, exit codes, and tests. Do not implement.",
+      "expected_output": "A plan using src/edits and the real CLI conventions, including dry-run, exact spans, before/after hashes, proof behavior, refusal without writes, and CLI tests.",
+      "files": [],
+      "expectations": [
+        "Uses src/edits and the checkout CLI, with a dry-run preview that writes neither source nor proof.",
+        "Covers path containment, exact spans, before-and-after hashes, and proof behavior.",
+        "Preserves diagnostics and documented exit codes 0, 1, and 2.",
+        "Adds focused edit and CLI tests and runs typecheck plus the full suite."
+      ]
+    }
+  ]
+}
