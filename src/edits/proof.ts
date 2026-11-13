@@ -509,7 +509,7 @@ function doctorRecord(doctor: ProofDoctor, siteRoot: string): ProofDoctor {
   return { level: doctor.level, findings: doctor.findings.map((finding) => findingRecord(finding, siteRoot)) };
 }
 
-/** The examples summary with sorted, unique ids and whole, non-negative counts. */
+/** The examples summary with sorted, unique ids and counts that add up to the rerun list. */
 function examplesRecord(examples: ProofExamples): ProofExamples {
   for (const id of examples.rerun) {
     if (typeof id !== "string" || id === "") {
@@ -519,15 +519,24 @@ function examplesRecord(examples: ProofExamples): ProofExamples {
   for (const key of ["passed", "failed", "skipped"] as const) {
     const value = examples[key];
     if (value === undefined) continue;
-    if (!Number.isInteger(value) || value < 0) {
+    if (!Number.isSafeInteger(value) || value < 0) {
       throw new ProofError("invalid-examples", `proof: examples.${key} is not a whole number of examples.`);
     }
   }
 
   const rerun = [...new Set(examples.rerun)].sort(byCodePoint);
+  const skipped = examples.skipped === undefined ? 0 : examples.skipped;
+  const outcomes = examples.passed + examples.failed + skipped;
+  if (outcomes !== rerun.length) {
+    throw new ProofError(
+      "invalid-examples",
+      `proof: examples claims ${outcomes} outcomes but lists ${rerun.length} unique re-run examples; passed, failed, and skipped must add up to the rerun list.`,
+    );
+  }
+
   return examples.skipped === undefined
     ? { rerun, passed: examples.passed, failed: examples.failed }
-    : { rerun, passed: examples.passed, failed: examples.failed, skipped: examples.skipped };
+    : { rerun, passed: examples.passed, failed: examples.failed, skipped };
 }
 
 /**
