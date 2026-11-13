@@ -26,8 +26,8 @@
  *
  */
 import { createHash, randomUUID } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { CONFIG_FILE } from "../config/load.ts";
 import type { Diagnostic, SiteConfig } from "../contracts/index.ts";
@@ -168,9 +168,15 @@ function isInside(path: string): boolean {
   return path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
+/** A file found under a walked folder, and whether it is a symbolic link. */
+interface WalkedFile {
+  readonly path: string;
+  readonly symlink: boolean;
+}
+
 /** Every file under `dir`, skipping folders that cannot affect a build, sorted by path. A missing folder has none. */
-async function filesUnder(dir: string): Promise<string[]> {
-  const found: string[] = [];
+async function filesUnder(dir: string): Promise<WalkedFile[]> {
+  const found: WalkedFile[] = [];
 
   async function walk(current: string, rel: string): Promise<void> {
     let entries;
@@ -185,13 +191,21 @@ async function filesUnder(dir: string): Promise<string[]> {
         if (SKIP_DIRS.has(entry.name)) continue;
         await walk(join(current, entry.name), path);
       } else if (entry.isFile()) {
-        found.push(path);
+        found.push({ path, symlink: false });
+      } else if (entry.isSymbolicLink()) {
+        // A directory link is recorded too, but never traversed: only file links are supported here.
+        found.push({ path, symlink: true });
       }
     }
   }
 
   await walk(dir, "");
-  return found.sort(byCodePoint);
+  return found.sort((a, b) => byCodePoint(a.path, b.path));
+}
+
+/** True when `path` is `root` or below it; both are real paths with no symbolic links left in them. */
+function isWithin(root: string, path: string): boolean {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
 
 /** Runs `run` for every item, at most `limit` at a time, so a thousand small reads stay inside the file descriptor limit. */
@@ -384,6 +398,27 @@ async function cleanAbandoned(cacheRoot: string): Promise<void> {
 interface KeyInput {
   readonly label: string;
   readonly path: string;
+  /** The folder the link at `path` must resolve inside; set only for symbolic links found by {@link filesUnder}. */
+  readonly linkRoot?: string;
+}
+
+/**
+ * The digest of a symbolic link: its target path relative to `root` and the target's bytes, or a marker when the link
+ * is broken, leaves `root`, or cannot be read. The target is read through its resolved path, so a link replaced after
+ * the check cannot redirect the read, and the markers never equal a file digest, so an unusable link can never alias
+ * a missing input to an unrelated entry.
+ */
+async function symlinkDigest(path: string, root: string): Promise<string> {
+  try {
+    const [realRoot, real] = await Promise.all([realpath(root), realpath(path)]);
+    if (!isWithin(realRoot, real)) return hashOf("symlink\0!outside");
+    const hash = createHash("sha256");
+    hash.update(`symlink\0${relative(realRoot, real).split(sep).join("/")}\0`);
+    hash.update(await readFile(real));
+    return hash.digest("hex");
+  } catch {
+    return hashOf("symlink\0!unreadable");
+  }
 }
 
 /**
@@ -408,15 +443,27 @@ export async function cacheKey(options: CacheKeyOptions): Promise<string> {
   // The navigation file may live outside the source folder, so it is hashed on its own as well.
   inputs.push({ label: "navigation", path: resolve(options.root, options.config.navigation) });
 
-  for (const path of await filesUnder(options.themeRoot)) {
-    inputs.push({ label: `theme/${path}`, path: join(options.themeRoot, path) });
+  for (const file of await filesUnder(options.themeRoot)) {
+    inputs.push({
+      label: `theme/${file.path}`,
+      path: join(options.themeRoot, file.path),
+      ...(file.symlink ? { linkRoot: options.themeRoot } : {}),
+    });
   }
-  for (const path of await filesUnder(options.outputsDir)) {
-    inputs.push({ label: `outputs/${path}`, path: join(options.outputsDir, path) });
+  for (const file of await filesUnder(options.outputsDir)) {
+    inputs.push({
+      label: `outputs/${file.path}`,
+      path: join(options.outputsDir, file.path),
+      ...(file.symlink ? { linkRoot: options.outputsDir } : {}),
+    });
   }
 
   const digests: string[] = new Array(inputs.length);
   await inBatches(inputs, 32, async (input, index) => {
+    if (input.linkRoot !== undefined) {
+      digests[index] = await symlinkDigest(input.path, input.linkRoot);
+      return;
+    }
     try {
       digests[index] = hashOf(await readFile(input.path));
     } catch {
