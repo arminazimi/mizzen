@@ -46,8 +46,11 @@ interface Cache {
   readonly key: string;
   /** True when this cache's state is a work tree, so the history below may be read at all. */
   readonly available: boolean;
-  /** Reviews by root-relative path (forward slashes) for this state, read by one `git log` on the first lookup; `undefined` until then. */
-  reviews: Map<string, Review> | undefined;
+  /**
+   * Reviews by root-relative path (forward slashes) for this state, read by one `git log` on the first lookup:
+   * `undefined` until read, `null` when that read failed, so a failure costs one call per state rather than one per page.
+   */
+  reviews: Map<string, Review> | null | undefined;
   /** Bounded window logs for this state, one per window; none of them survives a state change. */
   readonly windows: Map<string, WindowHistory>;
 }
@@ -200,9 +203,10 @@ function historyOf(
   return cache.available ? { cache, path } : undefined;
 }
 
-/** The whole-root reviews of a cache, read by one `git log` the first time this state is asked about. */
-function reviewsOf(cache: Cache): Map<string, Review> | undefined {
-  return (cache.reviews ??= readReviews(cache.base));
+/** The whole-root reviews of a cache, read by one `git log` the first time this state is asked about; a failed read is cached as `null`. */
+function reviewsOf(cache: Cache): Map<string, Review> | null {
+  if (cache.reviews === undefined) cache.reviews = readReviews(cache.base) ?? null;
+  return cache.reviews;
 }
 
 /**
@@ -239,7 +243,7 @@ export function reviewCoverage(root: string, pageFile: string): ReviewCoverage {
   if (found === undefined) return "unavailable";
 
   const reviews = reviewsOf(found.cache);
-  if (reviews === undefined) return "unavailable";
+  if (reviews === null) return "unavailable";
   return reviews.has(found.path) ? "recorded" : "untracked";
 }
 
@@ -403,7 +407,7 @@ export function reviewHistory(root: string, pageFile: string, window: ReviewWind
   // Nothing in the window: the same state's whole-root history still says whether any commit ever names the page,
   // so a last review, a coverage answer, and a window never come from two different HEADs.
   const reviews = reviewsOf(found.cache);
-  if (reviews === undefined) return { coverage: "unavailable", commits: [], reviewers: [] };
+  if (reviews === null) return { coverage: "unavailable", commits: [], reviewers: [] };
   const last = reviews.get(found.path);
   if (last !== undefined) {
     return { coverage: "recorded", commits: [], reviewers: [], lastReview: last };

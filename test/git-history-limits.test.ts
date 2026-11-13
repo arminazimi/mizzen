@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -106,6 +106,46 @@ test("a whole-root log larger than the output cap reads as unavailable, never as
   ].join("\n");
   withGitShim(script, (root) => {
     assert.equal(reviewCoverage(root, "page.md"), "unavailable");
+  });
+});
+
+test("a failed whole-root log is cached for the state, so pages do not each pay for it", { skip: posix ? false : "a POSIX shell is required" }, () => {
+  // Every whole-root log fails by overflowing the cap; the shim records each attempt and reads HEAD from a file so the
+  // test can move it. Two pages must share one failure, and a new HEAD must buy exactly one fresh attempt.
+  const script = [
+    'if [ "$1" = "rev-parse" ]; then',
+    "  printf 'true\\n'",
+    '  cat "$GIT_SHIM_HEAD"',
+    "  exit 0",
+    "fi",
+    'if [ "$1" = "log" ]; then',
+    '  printf x >> "$GIT_SHIM_LOG_COUNT"',
+    "  yes x | head -c 40000000",
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+
+  withGitShim(script, (root) => {
+    const headFile = join(root, "HEAD");
+    const countFile = join(root, "log-count");
+    process.env.GIT_SHIM_HEAD = headFile;
+    process.env.GIT_SHIM_LOG_COUNT = countFile;
+    try {
+      writeFileSync(headFile, `${SHA}\n`);
+      assert.equal(reviewCoverage(root, "one.md"), "unavailable");
+      assert.equal(reviewCoverage(root, "two.md"), "unavailable");
+      assert.equal(readFileSync(countFile, "utf8").length, 1, "the failed whole-root log must run once per state");
+
+      writeFileSync(headFile, `${"f".repeat(40)}\n`);
+      assert.equal(reviewers(root, "three.md"), UNKNOWN);
+      assert.equal(readFileSync(countFile, "utf8").length, 2, "a new HEAD must allow one fresh attempt");
+      assert.equal(reviewers(root, "four.md"), UNKNOWN);
+      assert.equal(readFileSync(countFile, "utf8").length, 2, "the fresh failure must be cached too");
+    } finally {
+      delete process.env.GIT_SHIM_HEAD;
+      delete process.env.GIT_SHIM_LOG_COUNT;
+    }
   });
 });
 
