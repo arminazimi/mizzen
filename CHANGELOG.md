@@ -4,17 +4,6 @@ Releases of this package are tagged `v<version>`. Add a one-line fragment in `ch
 
 ## Unreleased
 
-### Added
-
-- **Same-build trust and drift evidence.** Every build computes its own trust entries and drift findings and puts them
-  in `site.data.trust` and `site.data.drift` before rendering, so a theme can show the evidence of the build that wrote
-  the page. A site's own `_data/trust.yml` or `_data/drift.yml` still wins.
-
-### Fixed
-
-- Review lookups read the repository state once per build instead of once per page. On the 594-page fixture the trust
-  pass went from 7.7 s to about 0.2 s; cold builds went from 10.3 s to about 3.3 s.
-
 ## 0.2.0 — 2026-11-13
 
 This release makes the engine's claims checkable: the CLI reports what it actually does, an agent edit is
@@ -40,6 +29,8 @@ selection, omission, and token it spent.
   scheduling. A cache miss, corrupt entry, or site code file falls back to a full build.
 - **`mizzen watch`** coalesces bursts losslessly, survives watcher failures, and follows renames and
   atomic saves.
+- **A portable Agent Skill** in `skills/mizzen`, installed with `npx skills add velella-sh/mizzen`, so a
+  compatible coding agent has the engine's pipeline, contract, and edit workflows at hand.
 
 ### Changed
 
@@ -58,6 +49,8 @@ selection, omission, and token it spent.
   diagnostic fields are reported instead of clamped or silently accepted.
 - Git-history evidence, proof verification, worker rendering, and pack input have explicit bounds.
 - Version bounds are compared without numeric overflow, and pack budgets honour estimator margins.
+- Review lookups read the repository state once per build instead of once per page: on the 594-page
+  fixture the trust pass fell from 7.7 s to about 0.2 s, and a cold build from 10.3 s to about 3.3 s.
 
 ### Compatibility
 
