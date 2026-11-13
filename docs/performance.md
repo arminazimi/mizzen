@@ -28,6 +28,22 @@ A cache miss, a corrupt or foreign-format entry, a site with a code file, or an 
 build renders the page or builds cold. Nothing is guessed from an incomplete entry. `mizzen build` never needs the
 cache to be correct; deleting `.mizzen/cache` costs time, not output.
 
+## Same-build evidence
+
+Before any page renders, the build computes the drift findings and trust entries for its own pages and puts them in
+`site.data.drift` and `site.data.trust`, so a theme can show current evidence without a second build or a hand-written
+data file. Outputs still run on the raw site: `trust.json` and `drift.json` write their own reports with their own
+provenance.
+
+Review lookups are batched: one `git rev-parse` and one `git log --name-only` answer every page in a build, instead of
+one git process per page. On `fixtures/docs-site` (594 pages) the trust pass went from 7.7 s to about 0.2 s, and drift
+from 0.16 s to 0.16 s. That is where the baseline below improved by roughly 3x: the old numbers were dominated by
+process spawns, not by the engine.
+
+The render cache key carries each page's own evidence, not a site-wide digest, so a body edit still retires one page.
+A commit changes the repository state and the evidence, which is part of the whole-build key, so no page can render
+with the previous HEAD's review date.
+
 ## Correctness
 
 The suite proves the two properties that make the caches safe:
@@ -65,26 +81,28 @@ Result (milliseconds, one run; the script prints the pages rendered and reused):
 
 | Phase | Wall time | Rendered | Reused |
 | --- | --- | --- | --- |
-| cold build (no cache) | 4,710 | 300 | 0 |
-| first cached build | 5,069 | 300 | 0 |
-| no-op build | 139 | 0 | 0 |
-| one body edit, incremental | 4,867 | 1 | 299 |
-| same edit from scratch | 4,507 | 300 | 0 |
+| cold build (no cache) | 1,067 | 300 | 0 |
+| first cached build | 1,449 | 300 | 0 |
+| no-op build | 140 | 0 | 0 |
+| one body edit, incremental | 1,159 | 1 | 299 |
+| same edit from scratch | 781 | 300 | 0 |
 
-An unchanged build is the large win: 139 ms against ~4.7 s. A focused body edit re-renders one page but still pays for
+An unchanged build is the large win: 140 ms against ~1.1 s. A focused body edit re-renders one page but still pays for
 the shared outputs that read every page — the search index, sitemap, feeds, twins, sourcemap, and the rest — so its
 wall time stays close to a clean build at this size. The render cache narrows **work**, and the suite proves the
 output is identical; this fixture does **not** show a wall-clock win for a single edit. Do not quote one.
 
-The same command on `fixtures/docs-site` (594 pages) measured 10.3 s cold, 255 ms no-op, and 10.6 s for a one-page edit,
-against 10.2 s for the same edit from scratch: the same shape, with shared outputs dominating. Both runs were taken on
-the machine above with Node 24.22.2.
+The same command on `fixtures/docs-site` (594 pages) measured 3.3 s cold, 155 ms no-op, and 3.4 s for a one-page edit,
+against 2.8 s for the same edit from scratch: the same shape, with shared outputs dominating, and single-run ordering
+noise at this size. The earlier 10.3 s cold figure was almost entirely the per-page git spawns described above. All
+runs used the machine above with Node 24.22.2.
 
 ## Limits
 
-- Rendering is skipped only when the settings digest and the page model are unchanged. A page that reads another page's
-  body (through a theme component, not through front matter or `site.data`) is outside that contract; the digest covers
-  titles, front matter, navigation, and data, which is what the shipped theme reads.
+- Rendering is skipped only when the settings digest, the page model, and the page's own evidence are unchanged. A page
+  that reads another page's body (through a theme component, not through front matter or `site.data`) is outside that
+  contract; so is a theme that aggregates evidence across pages instead of reading its own entry, which the shipped
+  panel and banner do not do.
 - A site with `mizzen.config.ts` plugins or outputs that read arbitrary files always builds cold, because what those
   files import cannot be keyed.
 - The render cache stores one settings generation. Changing the theme, data, or a title retires it; the next successful
