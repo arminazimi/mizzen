@@ -64,6 +64,58 @@ test("a reply with one well-formed result per requested page, in order, is accep
   );
 });
 
+test("a diagnostic with a complete, valid position, help, and fix is accepted", () => {
+  const diagnostic = {
+    id: "render.bad-thing",
+    severity: "warning",
+    message: "Something is wrong.",
+    pos: { file: "a.md", line: 1, column: 1, endLine: 2, endColumn: 4 },
+    help: "Move it.",
+    fix: { file: "a.md", line: 1, column: 1, endLine: 2, endColumn: 4, text: "ok", description: "Move it." },
+  };
+  assert.equal(
+    renderReplyProblem([page("/a/")], [{ url: "/a/", html: "", css: [], diagnostics: [diagnostic] }]),
+    undefined,
+  );
+});
+
+test("a diagnostic whose pos, help, or fix is malformed refuses its whole reply", () => {
+  const pages = [page("/a/")];
+  const goodPos = { file: "a.md", line: 1, column: 1, endLine: 2, endColumn: 4 };
+  const good = {
+    id: "render.bad-thing",
+    severity: "warning" as const,
+    message: "Something is wrong.",
+    pos: goodPos,
+    help: "Move it.",
+    fix: { ...goodPos, text: "ok", description: "Move it." },
+  };
+  const replyWith = (diagnostic: unknown) => [{ url: "/a/", html: "", css: [], diagnostics: [diagnostic] }];
+  const cases: readonly (readonly [string, unknown])[] = [
+    ["infinite column", { ...good, pos: { ...goodPos, column: Number.POSITIVE_INFINITY } }],
+    ["missing file", { ...good, pos: { line: 1, column: 1, endLine: 1, endColumn: 1 } }],
+    ["zero line", { ...good, pos: { ...goodPos, line: 0 } }],
+    ["fractional column", { ...good, pos: { ...goodPos, column: 1.5 } }],
+    ["missing end line", { ...good, pos: { file: "a.md", line: 1, column: 1, endColumn: 1 } }],
+    ["NaN end column", { ...good, pos: { ...goodPos, endColumn: Number.NaN } }],
+    ["end before start", { ...good, pos: { ...goodPos, line: 2, endLine: 1 } }],
+    ["same line ends before start", { ...good, pos: { file: "a.md", line: 2, column: 5, endLine: 2, endColumn: 4 } }],
+    ["pos not an object", { ...good, pos: "a.md:1:1-2:4" }],
+    ["help not a string", { ...good, help: false }],
+    ["fix not an object", { ...good, fix: "replace the line" }],
+    ["fix without text", { ...good, fix: { ...goodPos } }],
+    ["fix with a bad span", { ...good, fix: { ...goodPos, line: 2, endLine: 1, text: "ok" } }],
+    ["fix description not a string", { ...good, fix: { ...goodPos, text: "ok", description: 7 } }],
+  ];
+  for (const [label, diagnostic] of cases) {
+    assert.equal(
+      renderReplyProblem(pages, replyWith(diagnostic)),
+      "the diagnostics for /a/ are not a list of findings",
+      label,
+    );
+  }
+});
+
 test("a missing, extra, duplicate, wrong-URL, or malformed reply is refused with one deterministic reason", () => {
   const pages = [page("/a/"), page("/b/")];
   const good = [result("/a/"), result("/b/")];
@@ -88,13 +140,14 @@ test("a missing, extra, duplicate, wrong-URL, or malformed reply is refused with
 });
 
 /**
- * A theme whose component renames page `/a/` to `/b/` inside a worker thread. The batch that holds both pages then
- * comes back with a duplicate URL, while the same render in this process is untouched, so the fallback is comparable.
+ * A theme whose components misbehave only in a worker thread: `rename` rewrites the page URL, and `corrupt` spoils a
+ * shared source position that a later page in the same batch reads. This process still renders both pages correctly,
+ * so the fallback is comparable.
  */
-function renamingTheme(): string {
+function workerOnlyTheme(): string {
   return tree({
-    "package.json": JSON.stringify({ type: "module", name: "misidentified-replies" }),
-    "src/index.ts": 'export const theme = { name: "misidentified-replies", folders: ["layouts", "components"] };\n',
+    "package.json": JSON.stringify({ type: "module", name: "worker-only-replies" }),
+    "src/index.ts": 'export const theme = { name: "worker-only-replies", folders: ["layouts", "components"] };\n',
     "layouts/doc.ts": `export default function doc({ page }: { page: { title: string; html: string } }): string {
   return \`<!DOCTYPE html>\\n<html lang="en" dir="ltr"><head><title>\${page.title}</title></head><body>\\n\${page.html}\\n</body></html>\`;
 }
@@ -107,11 +160,19 @@ export default function rename({ page, html }: { page: { url: string }; html: st
   return html;
 }
 `,
+    "components/corrupt/index.ts": `import { isMainThread } from "node:worker_threads";
+
+export default function corrupt({ page, html }: { page: { source: { column: number } }; html: string }): string {
+  // Only the worker spoils the position, which a later page of the same batch shares.
+  if (!isMainThread) page.source.column = Number.POSITIVE_INFINITY;
+  return html;
+}
+`,
   });
 }
 
 test("a misidentified reply falls back to this process for its whole batch, with no cross-page content", async () => {
-  const theme = renamingTheme();
+  const theme = workerOnlyTheme();
   const root = tree({
     "a.md": '---\ntitle: A\nlayout: doc\n---\n# A\n\n<sl-component name="rename">A body</sl-component>\n',
     "b.md": "---\ntitle: B\nlayout: doc\n---\n# B\n",
@@ -167,6 +228,79 @@ test("a misidentified reply falls back to this process for its whole batch, with
     }
     assert.ok(byURL.get("/a/")!.html.includes("A body"));
     assert.ok(!byURL.get("/a/")!.html.includes("B body"));
+  } finally {
+    if (pool !== undefined) await pool.close();
+    rmSync(theme, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a batch with an invalid diagnostic falls back as a whole and settles every waiter", async () => {
+  const theme = workerOnlyTheme();
+  const root = tree({
+    "a.md": '---\ntitle: A\nlayout: doc\n---\n# A\n\n<sl-component name="corrupt">A body</sl-component>\n',
+    "b.md": "---\ntitle: B\n---\n# B\n",
+    "c.md": "---\ntitle: C\nlayout: doc\n---\n# C\n",
+  });
+  let pool: RenderPool | undefined;
+  try {
+    const { site } = await buildModel(root);
+    const registry = await loadRegistry(theme);
+    const byURL = new Map(site.pages.filter((each) => each.kind === "doc").map((each) => [each.url, each]));
+    const first = byURL.get("/a/")!;
+    const second = byURL.get("/b/")!;
+    const third = byURL.get("/c/")!;
+    // The worker corrupts one source object that the first two pages share, so only their batch's reply is invalid.
+    const sharedSource = { ...first.source };
+    const pages = [
+      { ...first, source: sharedSource },
+      { ...second, source: sharedSource },
+      third,
+    ];
+    const model = { ...site, pages };
+    pool = createRenderPool({ themeRoot: theme, site: model, registry, workers: 2, concurrency: 4, renderDeadlineMs: 60000 });
+    pool.prefetch(pages);
+    const started = performance.now();
+    const rendered = await within(
+      "render",
+      30000,
+      Promise.all(
+        pages.map(async (each) => {
+          const a = await pool!.render(each);
+          const b = await pool!.render(each);
+          assert.equal(a, b, `${each.url} is served from one settled result`);
+          return a;
+        }),
+      ),
+    );
+    assert.ok(performance.now() - started < 25000, "the bad batch settled without waiting for its deadline");
+
+    for (const [index, each] of pages.entries()) {
+      const actual = rendered[index]!;
+      assert.equal(actual.url, each.url, `${each.url} keeps its identity`);
+      assert.equal(
+        actual.html,
+        renderOnePage(registry, model, each, undefined).html,
+        `${each.url} is byte for byte the page this process renders`,
+      );
+      const warnings = actual.diagnostics.filter((d) => d.id === "render.worker-failed");
+      if (index < 2) {
+        assert.equal(warnings.length, 1, `${each.url} reports why its batch was not used`);
+        assert.match(
+          warnings[0]!.message,
+          /invalid reply \(the diagnostics for \/b\/ are not a list of findings\)/,
+          `${each.url} names the invalid diagnostic`,
+        );
+      } else {
+        assert.deepEqual(warnings, [], `${each.url} came from a valid batch and was not blamed for its neighbour`);
+      }
+      for (const diagnostic of actual.diagnostics) {
+        if (diagnostic.pos !== undefined) {
+          assert.ok(Number.isFinite(diagnostic.pos.column), `${each.url} publishes no infinite position`);
+        }
+      }
+    }
+    assert.equal(rendered[1]!.diagnostics.filter((d) => d.id === "render.no-layout").length, 1);
   } finally {
     if (pool !== undefined) await pool.close();
     rmSync(theme, { recursive: true, force: true });

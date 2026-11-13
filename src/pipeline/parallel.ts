@@ -30,8 +30,9 @@
  */
 import { Worker, isMainThread, parentPort } from "node:worker_threads";
 import type { Page, Site } from "../contracts/content.ts";
-import type { Diagnostic } from "../contracts/diagnostic.ts";
+import type { Diagnostic, DiagnosticFix } from "../contracts/diagnostic.ts";
 import type { Pager, Trail } from "../contracts/nav.ts";
+import type { SourcePos } from "../contracts/source.ts";
 import type { Head } from "../contracts/render.ts";
 import { OWN_EXTENSION } from "../runtime/modules.ts";
 import { navState } from "../nav/tree.ts";
@@ -321,14 +322,43 @@ export function renderReplyProblem(pages: readonly Page[], reply: unknown): stri
   return undefined;
 }
 
-/** True for a finding a worker may report: a string id and message, and a known severity. */
+/** True for a 1-based whole number. */
+function whole(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+/** True for a source span: a string file and four 1-based whole numbers that do not run backwards. */
+function isSpan(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const { file, line, column, endLine, endColumn } = value as Partial<SourcePos>;
+  return (
+    typeof file === "string" &&
+    whole(line) &&
+    whole(column) &&
+    whole(endLine) &&
+    whole(endColumn) &&
+    (endLine > line || (endLine === line && endColumn >= column))
+  );
+}
+
+/** True for a fix a worker may report: a valid span, its replacement text, and an optional description. */
+function isFix(value: unknown): boolean {
+  if (!isSpan(value)) return false;
+  const { text, description } = value as Partial<DiagnosticFix>;
+  return typeof text === "string" && (description === undefined || typeof description === "string");
+}
+
+/** True for a finding a worker may report, with every optional field in the shape the diagnostic contract gives it. */
 function isDiagnostic(value: unknown): boolean {
   if (value === null || typeof value !== "object") return false;
-  const { id, severity, message } = value as Partial<Diagnostic>;
+  const { id, severity, message, pos, help, fix } = value as Partial<Diagnostic>;
   return (
     typeof id === "string" &&
     (severity === "error" || severity === "warning" || severity === "info") &&
-    typeof message === "string"
+    typeof message === "string" &&
+    (pos === undefined || isSpan(pos)) &&
+    (help === undefined || typeof help === "string") &&
+    (fix === undefined || isFix(fix))
   );
 }
 
