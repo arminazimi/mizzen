@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { directionFromLang, loadConfig, loadConfigText } from "../src/config/load.ts";
 
@@ -10,7 +10,9 @@ const F = "mizzen.yml";
 function site(files: Record<string, string> = {}): string {
   const root = mkdtempSync(join(tmpdir(), "config-load-"));
   for (const [path, text] of Object.entries(files)) {
-    writeFileSync(join(root, path), text);
+    const target = join(root, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, text);
   }
   return root;
 }
@@ -156,6 +158,42 @@ test("options.path picks another file", () => {
     writeFileSync(custom, "title: Custom\n");
     const { config } = loadConfig(root, { path: custom });
     assert.equal(config.title, "Custom");
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("a relative custom path resolves against the site root, not the process cwd", () => {
+  const root = site({ "configs/site.yml": "title: Nested\n" });
+  try {
+    assert.notEqual(process.cwd(), root);
+    const { config, diagnostics } = loadConfig(root, { path: "configs/site.yml" });
+    assert.deepEqual(diagnostics, []);
+    assert.equal(config.title, "Nested");
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("a missing relative custom path falls back to defaults", () => {
+  const root = site();
+  try {
+    const { config, diagnostics } = loadConfig(root, { path: "configs/missing.yml" });
+    assert.deepEqual(diagnostics, []);
+    assert.equal(config.title, basename(root));
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("diagnostics for a relative custom path name it relative to the site root", () => {
+  const root = site({ "configs/site.yml": "title: Nested\ntitel: Typo\n" });
+  try {
+    const { diagnostics } = loadConfig(root, { path: "configs/site.yml" });
+    const d = diagnostics[0]!;
+    assert.equal(d.id, "config.unknown-key");
+    assert.equal(d.pos?.file, "configs/site.yml");
+    assert.equal(d.pos?.line, 2);
   } finally {
     rmSync(root, { recursive: true });
   }
