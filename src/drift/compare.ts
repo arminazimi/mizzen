@@ -78,7 +78,10 @@ import {
  *
  * A finding only means something for the exact content and source bytes it was computed from. Every
  * comparison therefore also returns a {@link DriftIdentity}: a hash of the page's Markdown, body line,
- * and tolerance, plus a hash of each cited file (or a marker saying it was missing or outside the root).
+ * and tolerance, plus a hash of each cited file's exact bytes (or a marker saying it was missing or
+ * outside the root). The hash is taken before the bytes are decoded, so two files whose invalid UTF-8
+ * decodes to the same replacement text still have distinct identities.
+ *
  * A stored report can compare that identity with the current files and refuse evidence that no longer
  * matches instead of reusing it; {@link driftContentOf} gives the content half without reading anything.
  *
@@ -109,6 +112,9 @@ type Target =
   | { readonly kind: "missing"; readonly detail: string }
   | {
       readonly kind: "text";
+      /** The file's exact bytes, which are what its identity hashes. */
+      readonly bytes: Uint8Array;
+      /** The bytes decoded as UTF-8, which is only what line and TypeScript analysis read. */
       readonly text: string;
       readonly symbols: readonly ExportedSymbol[] | null;
       /**
@@ -152,9 +158,9 @@ function byCodePoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** SHA-256 of the text, as 64 lowercase hex characters. */
-function hashOf(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
+/** SHA-256 of the bytes, as 64 lowercase hex characters. */
+function hashOf(bytes: string | Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 /**
@@ -226,7 +232,7 @@ export async function comparePages(
     for (const ref of references) {
       if (sources.has(ref.path)) continue;
       const target = await targetOf(ref.path, root, rootReal, targets);
-      sources.set(ref.path, target.kind === "text" ? hashOf(target.text) : target.kind);
+      sources.set(ref.path, target.kind === "text" ? hashOf(target.bytes) : target.kind);
     }
 
     const findings: ClaimFinding[] = [];
@@ -297,16 +303,17 @@ async function readTarget(path: string, root: string, rootReal: string): Promise
   }
   if (!within(rootReal, real)) return { kind: "outside" };
 
-  let text: string;
+  let bytes: Uint8Array;
   try {
-    text = await readFile(real, "utf8");
+    bytes = await readFile(real);
   } catch (err) {
     return { kind: "missing", detail: missingDetail(err) };
   }
 
-  if (!TYPESCRIPT.test(path)) return { kind: "text", text, symbols: null, scan: [] };
+  const text = new TextDecoder().decode(bytes);
+  if (!TYPESCRIPT.test(path)) return { kind: "text", bytes, text, symbols: null, scan: [] };
   const scanned = exportedSymbols(text, { file: path });
-  return { kind: "text", text, symbols: scanned.symbols, scan: scanned.diagnostics };
+  return { kind: "text", bytes, text, symbols: scanned.symbols, scan: scanned.diagnostics };
 }
 
 /** True when `target` is `base` or inside it, comparing the paths as given. */
