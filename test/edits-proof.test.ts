@@ -14,6 +14,7 @@ import {
   PROOF_VERSION,
   writeProof,
   type ProofInput,
+  type ProofExamples,
 } from "../src/edits/proof.ts";
 
 // ajv is CommonJS: its default export is the class at run time, but its types name it.
@@ -106,6 +107,53 @@ test("summarizes the examples an edit re-ran, sorted by code point and without d
   );
 
   assert.deepEqual(record.examples, { rerun: ["browser/b", "node/a"], passed: 1, failed: 0, skipped: 1 });
+});
+
+test("omitted skipped counts as zero and an explicit zero stays in the record", () => {
+  const omitted = createProof(input({ examples: { rerun: ["node/a", "node/b"], passed: 1, failed: 1 } }));
+  assert.deepEqual(omitted.examples, { rerun: ["node/a", "node/b"], passed: 1, failed: 1 });
+  assert.equal("skipped" in omitted.examples!, false, "an omitted skipped is left out");
+
+  const explicit = createProof(
+    input({ examples: { rerun: ["node/a"], passed: 1, failed: 0, skipped: 0 } }),
+  );
+  assert.deepEqual(explicit.examples, { rerun: ["node/a"], passed: 1, failed: 0, skipped: 0 });
+});
+
+test("refuses a summary whose passed, failed, and skipped do not add up to the unique rerun list", () => {
+  const cases = [
+    { rerun: ["node/a"], passed: 1, failed: 1 },
+    { rerun: ["node/a", "node/b"], passed: 1, failed: 0 },
+    { rerun: [], passed: 1, failed: 0 },
+    { rerun: ["node/a", "node/a"], passed: 2, failed: 0 },
+    { rerun: ["node/a"], passed: 1, failed: 0, skipped: 1 },
+  ];
+  for (const examples of cases) {
+    assert.throws(
+      () => createProof(input({ examples })),
+      (error: unknown) => error instanceof ProofError && error.code === "invalid-examples",
+      JSON.stringify(examples),
+    );
+  }
+});
+
+test("refuses unsafe, fractional, negative, or unknown example counts", () => {
+  const bad = [1.5, -1, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY, "1", null];
+  for (const value of bad) {
+    for (const key of ["passed", "failed", "skipped"] as const) {
+      const examples = {
+        rerun: ["node/a"],
+        passed: 0,
+        failed: 0,
+        [key]: value,
+      } as unknown as ProofExamples;
+      assert.throws(
+        () => createProof(input({ examples })),
+        (error: unknown) => error instanceof ProofError && error.code === "invalid-examples",
+        `examples.${key} = ${String(value)}`,
+      );
+    }
+  }
 });
 
 test("the same input gives the same bytes, whatever order the files came in", () => {
@@ -272,6 +320,28 @@ test("a refused record writes nothing and leaves an existing record untouched", 
     );
     assert.deepEqual(readdirSync(join(root, ".mizzen")), ["proof.json"]);
     assert.equal(first.version, PROOF_VERSION);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a write with an inconsistent examples summary leaves an existing proof unchanged", async () => {
+  const root = scratch();
+  try {
+    const out = join(root, ".mizzen", "proof.json");
+    await writeProof({ ...input(), siteRoot: root, out });
+    const bytes = readFileSync(out, "utf8");
+
+    await assert.rejects(
+      writeProof({
+        ...input({ examples: { rerun: ["node/a"], passed: 1, failed: 1 } }),
+        siteRoot: root,
+        out,
+      }),
+      (error: unknown) => error instanceof ProofError && error.code === "invalid-examples",
+    );
+    assert.equal(readFileSync(out, "utf8"), bytes);
+    assert.deepEqual(readdirSync(join(root, ".mizzen")), ["proof.json"], "no staging folder is left");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
