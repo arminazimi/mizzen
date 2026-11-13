@@ -74,6 +74,16 @@ test("parseArgs: edit apply takes a patch, an optional site root, and its flags"
   assert.deepEqual(parseArgs(["edit", "apply", "patch.json", "--format", "json"]), {
     options: { command: "edit-apply", root: ".", patch: "patch.json", dryRun: false, format: "json" },
   });
+  assert.deepEqual(parseArgs(["edit", "apply", "patch.json", "--allow-unchecked"]), {
+    options: {
+      command: "edit-apply",
+      root: ".",
+      patch: "patch.json",
+      dryRun: false,
+      format: "text",
+      allowUnchecked: true,
+    },
+  });
   assert.deepEqual(parseArgs(["edit", "--help"]), { help: true });
   assert.deepEqual(parseArgs(["edit", "apply", "--help"]), { help: true });
   assert.equal("error" in parseArgs(["edit"]), true);
@@ -162,7 +172,7 @@ test("a stale beforeHash is refused and leaves the file unchanged", async () => 
   }
 });
 
-test("a patch with no expected text or hash is applied, since both are optional", async () => {
+test("a patch with no expected text or hash needs --allow-unchecked", async () => {
   const root = tree({ "docs/a.md": "# Old\n" });
   const patch = patchAt(root, {
     span: { file: "docs/a.md", line: 1, column: 1, endLine: 1, endColumn: 5 },
@@ -170,7 +180,12 @@ test("a patch with no expected text or hash is applied, since both are optional"
   });
   const { errors, io } = capture();
   try {
-    assert.equal(await main(["edit", "apply", patch, root], io), 0, errors.join("\n"));
+    assert.equal(await main(["edit", "apply", patch, root], io), 2);
+    assert.equal(readFileSync(join(root, "docs", "a.md"), "utf8"), "# Old\n");
+    assert.ok(errors[0]?.includes("--allow-unchecked"));
+
+    const allowed = capture();
+    assert.equal(await main(["edit", "apply", patch, root, "--allow-unchecked"], allowed.io), 0, allowed.errors.join("\n"));
     assert.equal(readFileSync(join(root, "docs", "a.md"), "utf8"), "# New\n");
   } finally {
     rmSync(root, { recursive: true });
@@ -352,6 +367,7 @@ test("--format json reports a path escape as failed, with the patch's pushed-out
   const site = join(parent, "site");
   const patch = patchAt(parent, {
     span: { file: "../outside.md", line: 1, column: 1, endLine: 1, endColumn: 5 },
+    expected: "# Old",
     replacement: "# New",
   });
   const { logs, io } = capture();

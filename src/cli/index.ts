@@ -72,6 +72,7 @@ Options:
   --topic <name>       Topic for pack (default: the site's only topic); not with --request
   --budget <tokens>    Token budget for pack, overriding the topic's; not with --request
   --dry-run            Print the diff for edit apply without writing
+  --allow-unchecked    Apply an edit apply patch that carries neither "expected" nor "beforeHash"
   --proof <path>       Proof record for edit apply (default: <patch>.proof.json)
   -h, --help           Show this help
 
@@ -154,6 +155,7 @@ type EditApplyOpts = {
   readonly root: string;
   readonly patch: string;
   readonly dryRun: boolean;
+  readonly allowUnchecked?: boolean;
   readonly proof?: string;
   readonly format: EditFormat;
 };
@@ -237,6 +239,7 @@ function parseEditApply(args: readonly string[]): Parsed {
   let root: string | undefined;
   let proof: string | undefined;
   let dryRun = false;
+  let allowUnchecked = false;
   let format: EditFormat = "text";
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
@@ -248,6 +251,7 @@ function parseEditApply(args: readonly string[]): Parsed {
     try {
       if (arg === "-h" || arg === "--help") return { help: true };
       if (arg === "--dry-run") dryRun = true;
+      else if (arg === "--allow-unchecked") allowUnchecked = true;
       else if (arg === "--proof") proof = value();
       else if (arg === "--format") {
         const raw = value();
@@ -271,6 +275,7 @@ function parseEditApply(args: readonly string[]): Parsed {
       patch,
       dryRun,
       format,
+      ...(allowUnchecked ? { allowUnchecked: true } : {}),
       ...(proof === undefined ? {} : { proof }),
     },
   };
@@ -608,6 +613,7 @@ export async function main(args: readonly string[], io: Io = {}): Promise<number
         patch: options.patch,
         ...(options.proof === undefined ? {} : { proof: options.proof }),
         ...(options.dryRun ? { dryRun: true } : {}),
+        ...(options.allowUnchecked === true ? { allowUnchecked: true } : {}),
       });
       if (options.format === "json") {
         log(formatEditApplyJson(result, 0).replace(/\n$/, ""));
