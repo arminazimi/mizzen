@@ -224,8 +224,10 @@ export interface TrimResult {
 export interface TrimOptions {
   /**
    * Counts the tokens of a text. Defaults to `estimateTokens(text).tokens`. An override is useful
-   * for a caller that prices a particular vocabulary; the result is rounded up and clamped at 0.
-   * A custom estimator reports no margin, because this module cannot know its error.
+   * for a caller that prices a particular vocabulary; it must return a finite, non-negative number,
+   * which is rounded up. Zero is valid; any other unusable result is refused with
+   * {@link TrimEstimateError}. A custom estimator reports no margin, because this module cannot
+   * know its error.
    */
   readonly estimate?: (text: string) => number;
   /**
@@ -284,10 +286,26 @@ interface Signature {
   readonly words: ReadonlySet<string>;
 }
 
-/** Estimates a text's tokens, rounding up, and clamps a missing or negative estimate to 0. */
+/** Raised when a token estimator returns a value that cannot be a token count. */
+export class TrimEstimateError extends Error {
+  /** The value the estimator returned. */
+  readonly value: unknown;
+
+  constructor(value: unknown) {
+    super(`the token estimator returned ${String(value)}, which is not a finite, non-negative number`);
+    this.name = "TrimEstimateError";
+    this.value = value;
+  }
+}
+
+/**
+ * Estimates a text's tokens, rounding a positive result up. Zero is valid; every other unusable
+ * result is refused rather than clamped, so a broken estimator cannot make content look free.
+ */
 function tokensOf(estimate: (text: string) => number, text: string): number {
   const value = estimate(text);
-  return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0;
+  if (!Number.isFinite(value) || value < 0) throw new TrimEstimateError(value);
+  return value > 0 ? Math.ceil(value) : 0;
 }
 
 /** Grows a token count by a relative margin, rounding up: the planning upper bound. */
