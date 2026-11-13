@@ -279,34 +279,46 @@ function cycleKey(cycle: readonly string[]): string {
   return rotate(cycle).join("\u0000");
 }
 
-/** Every cycle of the directed graph, once each, by id, starting at the smallest id. */
-function findCycles(nodes: readonly DependencyNode[], edges: readonly DependencyEdge[]): string[][] {
+/**
+ * Every cycle of the directed graph, once each, by id, starting at the smallest id. Depth-first traversal runs on an
+ * explicit stack, so a chain deeper than the JavaScript call stack is analyzed rather than overflowing it.
+ */
+export function findCycles(nodes: readonly DependencyNode[], edges: readonly DependencyEdge[]): string[][] {
   const adjacency = new Map<string, string[]>();
   for (const node of nodes) adjacency.set(node.id, []);
   for (const edge of edges) adjacency.get(edge.from)?.push(edge.to);
   for (const targets of adjacency.values()) targets.sort(byCodePoint);
 
   const state = new Map<string, 1 | 2>();
-  const stack: string[] = [];
+  /** The path being traversed, each step remembering the next adjacency index to read. */
+  const path: { id: string; next: number }[] = [];
   const cycles = new Map<string, string[]>();
 
-  const visit = (id: string): void => {
-    state.set(id, 1);
-    stack.push(id);
-    for (const next of adjacency.get(id) ?? []) {
+  for (const node of nodes) {
+    if (state.get(node.id) !== undefined) continue;
+    state.set(node.id, 1);
+    path.push({ id: node.id, next: 0 });
+    while (path.length > 0) {
+      const step = path[path.length - 1]!;
+      const targets = adjacency.get(step.id) ?? [];
+      if (step.next >= targets.length) {
+        path.pop();
+        state.set(step.id, 2);
+        continue;
+      }
+      const next = targets[step.next]!;
+      step.next += 1;
       const seen = state.get(next);
       if (seen === 1) {
-        const cycle = rotate(stack.slice(stack.indexOf(next)));
+        const at = path.findIndex((frame) => frame.id === next);
+        const cycle = rotate(path.slice(at).map((frame) => frame.id));
         if (!cycles.has(cycleKey(cycle))) cycles.set(cycleKey(cycle), cycle);
       } else if (seen === undefined) {
-        visit(next);
+        state.set(next, 1);
+        path.push({ id: next, next: 0 });
       }
     }
-    stack.pop();
-    state.set(id, 2);
-  };
-
-  for (const node of nodes) if (state.get(node.id) === undefined) visit(node.id);
+  }
   return [...cycles.values()];
 }
 
