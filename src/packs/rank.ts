@@ -29,7 +29,10 @@ export interface RankWeights {
   readonly trust: number;
   /** How much a page gains for being required by a page the query matches. */
   readonly dependency: number;
-  /** How much measured example evidence may move a page: a passing set gains, any failure loses. */
+  /**
+   * How much measured example evidence may move a page: a fully passing set gains, any failure
+   * loses, and an incomplete set is neutral.
+   */
   readonly examples: number;
   /** How much measured drift evidence may move a page: a clean count gains, any finding loses. */
   readonly drift: number;
@@ -179,11 +182,11 @@ export interface RankReason {
    * Stable evidence for the contribution: `title:<term>`, `headings:<term>`, `body:<term>`,
    * `inbound:<count>`, `focus:<url>`, `version:<name>`, `locale:<tag>`, `status:<value>`, `generated`,
    * `duplicate:<canonical url>`, `canonical`, `examples:passed:<passed>/<total>`,
-   * `examples:failed:<failed>/<total>`, `examples:none`, `examples:missing`, `examples:unknown`,
-   * `examples:invalid`, `drift:clean`, `drift:<findings>`, `drift:missing`, `drift:unknown`,
-   * `drift:invalid`, `review:recent:<days>`, `review:overdue:<days>`,
-   * `review:coverage:<coverage>`, `review:missing`, `review:unknown`, `review:invalid`, or
-   * `dependency:<url>`.
+   * `examples:failed:<failed>/<total>`, `examples:incomplete:<passed>/<total>`, `examples:none`,
+   * `examples:missing`, `examples:unknown`, `examples:invalid`, `drift:clean`, `drift:<findings>`,
+   * `drift:missing`, `drift:unknown`, `drift:invalid`, `review:recent:<days>`,
+   * `review:overdue:<days>`, `review:coverage:<coverage>`, `review:missing`, `review:unknown`,
+   * `review:invalid`, or `dependency:<url>`.
    */
   readonly code: string;
   /** The amount this reason added to {@link RankedPage.score}; negative when it demoted the page. */
@@ -585,7 +588,7 @@ interface RankSignal {
 /** The demotion of a signal that was not measured: half the signal's weight. */
 const MISSING_FRACTION = -0.5;
 
-/** Example evidence: any failure loses the full weight, a passing or absent set is positive or neutral. */
+/** Example evidence: any failure loses the full weight; a fully passing set gains; otherwise neutral. */
 function examplesSignal(value: unknown): RankSignal {
   if (value === "none") return { code: "examples:none", fraction: 0 };
   if (value === undefined) return { code: "examples:missing", fraction: MISSING_FRACTION };
@@ -599,6 +602,8 @@ function examplesSignal(value: unknown): RankSignal {
   }
   if (failed > 0) return { code: `examples:failed:${failed}/${total}`, fraction: -1 };
   if (total === 0) return { code: "examples:none", fraction: 0 };
+  // Unrun or unaccounted examples support nothing: only a fully accounted pass set earns the reward.
+  if (passed + failed < total) return { code: `examples:incomplete:${passed}/${total}`, fraction: 0 };
   return { code: `examples:passed:${passed}/${total}`, fraction: 1 };
 }
 
@@ -717,10 +722,12 @@ function duplicateGroups(
  *   `debug` drift findings, `migrate` version and status trust, `review` review freshness and
  *   coverage, and `explain` navigation and links. An absent or unknown kind keeps the defaults.
  * - **Examples**, **Drift**, **Review**: with same-build `trust` evidence, each measured signal adds
- *   or removes its weight times a fraction: a passing example set, a clean drift count, and a fresh
- *   recorded review gain; any failing example, drift finding, uncovered or overdue review loses the
- *   full weight; missing, unknown, or malformed evidence loses half, so it is never read as clean.
- *   `examples: "none"` is neutral, because the page declares nothing to run. The evidence is read
+ *   or removes its weight times a fraction: a fully passing example set, a clean drift count, and a
+ *   fresh recorded review gain; any failing example, drift finding, uncovered or overdue review
+ *   loses the full weight; missing, unknown, or malformed evidence loses half, so it is never read
+ *   as clean.
+ *   `examples: "none"` and an incomplete example set (some declared examples were not run) are
+ *   neutral, because neither says the page failed or passed them all. The evidence is read
  *   only when its `build` equals `build`; an absent or different build is ignored entirely.
  * - **Dependency**: a page that a matching page links to and that matches no query term gains
  *   `dependency ×` the strongest linking page's relevance. This keeps required supporting pages
