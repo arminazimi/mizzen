@@ -17,7 +17,10 @@
  *   keeps one version folder, and `min`/`max` keep that inclusive range. Pages outside every version
  *   folder are current docs and are kept unless `exact` asks for one folder.
  * - **Budget**: `maxTokens` minus `reservedTokens` is what optional content may spend; required evidence
- *   is priced before it and never dropped. A page's mandatory lead is always kept, as in `trimPages`.
+ *   is priced before it and never dropped. Final acceptance and page removal read the estimator's upper
+ *   bound of the exact Markdown, the pack title, headers, and separators included, so a pack that is not
+ *   diagnosed as over budget satisfies `accounting.upper <= budget`. A page's mandatory lead is always
+ *   kept, as in `trimPages`.
  * - **Required evidence**: a `refs` entry pins the page it names (by URL, source path, section id, or
  *   heading text) and is passed to `trimPages` as a pinned section. The `source`, `versions`, `warnings`,
  *   and `dependencies` flags add machine-readable lines to each selected item, so the Markdown pack and
@@ -737,7 +740,10 @@ export async function compilePack(
   let trimmed: TrimResult | undefined;
   let bodies: string[] = [];
   let contents: string[] = [];
-  let total = 0;
+  let upper = 0;
+  // Slack absorbs the difference between the overhead measured on empty bodies and the overhead the
+  // exact final Markdown really adds, so the trim's limit and the final acceptance measure agree.
+  let slack = 0;
   let evidence = new Map<string, PageEvidence>();
   for (;;) {
     const selected = new Set(chosen);
@@ -754,7 +760,7 @@ export async function compilePack(
     ).upper;
     // A hard limit leaves nothing to the estimator's margin, and the reserve is held back from
     // optional sections. Required evidence may draw on it and is never trimmed.
-    trimmed = await trimPages(chosen, Math.max(0, maxTokens - overhead), {
+    trimmed = await trimPages(chosen, Math.max(0, maxTokens - overhead - slack), {
       mode: "hard",
       reservedTokens: reserved,
       required,
@@ -769,23 +775,32 @@ export async function compilePack(
       if (lines.length === 0) return body;
       return body === "" ? lines.join("\n") : `${lines.join("\n")}\n\n${body}`;
     });
-    total = estimateTokens(
+    upper = estimateTokens(
       assemble(
         topic,
         chosen.map((page, index) => ({ header: headerOf(page, site), body: contents[index] ?? "" })),
       ),
-    ).tokens;
-    if (total <= maxTokens) break;
-    if (chosen.length <= 1) break;
-    let drop = -1;
-    for (let index = chosen.length - 1; index >= 0; index -= 1) {
-      if (!forced.has(chosen[index]!)) {
-        drop = index;
-        break;
+    ).upper;
+    // Final acceptance is the upper bound of the exact bytes, never a point estimate alone.
+    if (upper <= maxTokens) break;
+    if (chosen.length > 1) {
+      let drop = -1;
+      for (let index = chosen.length - 1; index >= 0; index -= 1) {
+        if (!forced.has(chosen[index]!)) {
+          drop = index;
+          break;
+        }
+      }
+      if (drop !== -1) {
+        chosen = chosen.filter((_, index) => index !== drop);
+        slack = 0;
+        continue;
       }
     }
-    if (drop === -1) break;
-    chosen = chosen.filter((_, index) => index !== drop);
+    // Only one page, or only forced pages, remain. A trim that is already over budget means no
+    // feasible result exists: keep the required and mandatory content and let its warning say so.
+    if (trimmed.status === "over-budget") break;
+    slack += upper - maxTokens;
   }
 
   // Every named ref must still be named by a selected page or a kept section. A heading ref that no
@@ -807,12 +822,14 @@ export async function compilePack(
     return undefined;
   }
 
-  const packWarnings: Diagnostic[] = [...(trimmed?.diagnostics ?? [])];
-  if (total > maxTokens && packWarnings.length === 0) {
+  // A trim diagnostic describes the trim's own serialization; the pack publishes it only when the
+  // exact final Markdown is over budget, so a warning never contradicts the accounting it ships with.
+  const packWarnings: Diagnostic[] = upper > maxTokens ? [...(trimmed?.diagnostics ?? [])] : [];
+  if (upper > maxTokens && packWarnings.length === 0) {
     packWarnings.push({
       id: "context-pack.over-budget",
       severity: "warning",
-      message: `Context pack "${topic}" is ${total} tokens, above its budget of ${maxTokens}; its required content is kept.`,
+      message: `Context pack "${topic}" needs up to ${upper} tokens by the estimator's bound, above its budget of ${maxTokens}; its required content is kept.`,
       ...(chosen[0] === undefined ? {} : { pos: chosen[0].source }),
       help: "Raise budget.maxTokens, lower budget.reservedTokens, shorten required evidence, or narrow the goal.",
     });
@@ -866,10 +883,20 @@ export async function compilePack(
   );
   const floorMarkdown = assemble(
     topic,
-    chosen.map((page) => ({
-      header: headerOf(page, site),
-      body: withoutLeadHeading(mandatory.get(page.url)?.markdown ?? page.markdown),
-    })),
+    chosen.map((page, index) => {
+      const lines = evidence.get(page.url)?.lines ?? [];
+      // When the trim is over budget it kept exactly the fixed content — mandatory sections and
+      // pinned refs — so that is the smallest feasible serialization, not the mandatory probe.
+      const fixed =
+        trimmed?.status === "over-budget"
+          ? trimmed.pages[index]?.markdown
+          : mandatory.get(page.url)?.markdown;
+      const body = withoutLeadHeading(fixed ?? page.markdown);
+      return {
+        header: headerOf(page, site),
+        body: lines.length === 0 ? body : body === "" ? lines.join("\n") : `${lines.join("\n")}\n\n${body}`,
+      };
+    }),
   );
   const floor = estimateTokens(floorMarkdown).tokens;
   const floorUpper = Math.ceil(floor * (1 + estimate.margin));
@@ -884,7 +911,7 @@ export async function compilePack(
     method: estimate.method,
     margin: estimate.margin,
     upper: estimate.upper,
-    minimum: estimate.tokens > maxTokens ? { tokens: floor, upper: floorUpper } : null,
+    minimum: estimate.upper > maxTokens ? { tokens: floor, upper: floorUpper } : null,
   };
 
   const pack: PackEvidence = {
