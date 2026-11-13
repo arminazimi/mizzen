@@ -1,7 +1,7 @@
 import type { Page, Site } from "../contracts/content.ts";
 import type { Diagnostic } from "../contracts/diagnostic.ts";
 import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
-import { reviewHistory, type PageReviewHistory, type ReviewCommit } from "../model/reviewers.ts";
+import { repositoryState, reviewHistory, type PageReviewHistory, type ReviewCommit } from "../model/reviewers.ts";
 import {
   policyFor,
   resolveReviewPolicy,
@@ -258,6 +258,10 @@ export async function reviewCoverageReport(
   }
 
   const body: Record<string, ReviewCoverageEntry> = {};
+  // One state for every page: reviewHistory would otherwise spawn one git process per page. A missing as-of reads no
+  // history, so it must not read git either.
+  const repoState =
+    asOfInstant === undefined || options.root === undefined ? undefined : repositoryState(options.root);
   for (const page of pages) {
     const policy = matched.get(page.url)!;
     const base = {
@@ -279,7 +283,7 @@ export async function reviewCoverageReport(
     const history = reviewHistory(options.root, page.source.file, {
       since: new Date(earliest!),
       until: asOf!,
-    });
+    }, repoState);
     const since = asOfInstant - policy.windowDays * DAY;
     const commits = commitsInWindow(history.commits, since, asOfInstant);
     const reviewerNames = reviewersOf(commits);

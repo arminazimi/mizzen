@@ -3,6 +3,7 @@ import type { Output, OutputContext, OutputFile } from "../contracts/output.ts";
 import { comparePages } from "../drift/compare.ts";
 import { examplesOf } from "../markdown/plugins/example-fence.ts";
 import {
+  repositoryState,
   reviewCoverage,
   reviewers,
   UNKNOWN as REVIEW_UNKNOWN,
@@ -618,11 +619,22 @@ function availabilityOf(
   return state === "conflict" ? { ...provenance, availability: "conflict" } : provenance;
 }
 
+/** The per-page entries and shared facts of a trust report, before the build identity is added. */
+export interface TrustPages {
+  /** One entry per doc page, keyed by URL, in URL order. */
+  readonly pages: Record<string, TrustPageEntry>;
+  /** The review-due threshold the entries were scored with. */
+  readonly reviewDueDays: number;
+  /** The instant review ages were measured from, ISO 8601, when one was given. */
+  readonly asOf?: string;
+}
+
 /**
- * Builds `trust.json` from the site model and the available data. Doc pages only, sorted by URL. This is
- * the helper tests call: it takes `root`, `asOf`, and the data inline, and reads no environment itself.
+ * Builds the per-page trust entries from the site model and the available data, without a build identity. Doc pages
+ * only, sorted by URL. The build uses this to put the same entries in `site.data` before a theme renders, so the panel
+ * and `trust.json` cannot disagree; the repository state is read once for the whole batch, not once per page.
  */
-export async function trustReport(site: Site, options: TrustReportOptions = {}): Promise<readonly OutputFile[]> {
+export async function trustPagesOf(site: Site, options: TrustReportOptions = {}): Promise<TrustPages> {
   const pages = site.pages
     .filter((page) => page.kind === "doc")
     .slice()
@@ -634,6 +646,8 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
   const asOf = asOfOf(options.asOf);
   const root = options.root;
   const reviewDueDays = reviewDueDaysOf(options.thresholds === undefined ? {} : { thresholds: options.thresholds });
+  // One repository state for the batch: a lookup per page would spawn one git process per page.
+  const state = root === undefined ? undefined : repositoryState(root);
 
   const driftCounts =
     root !== undefined && pages.some((page) => !driftData.has(page.url))
@@ -690,14 +704,14 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
       // An invalid inline entry still names inline as the source; git could hide it.
       reviewProvenance = { source: "inline", availability: "unavailable", input: page.url };
     } else if (root !== undefined) {
-      const answer = reviewers(root, page.source.file);
+      const answer = reviewers(root, page.source.file, state);
       review = answer;
       reviewProvenance = {
         source: "git",
         availability: answer === REVIEW_UNKNOWN ? "unavailable" : "available",
         input: page.source.file,
       };
-      coverage = answer === REVIEW_UNKNOWN ? reviewCoverage(root, page.source.file) : "recorded";
+      coverage = answer === REVIEW_UNKNOWN ? reviewCoverage(root, page.source.file, state) : "recorded";
     } else {
       reviewProvenance = { source: "none", availability: "missing" };
     }
@@ -736,12 +750,25 @@ export async function trustReport(site: Site, options: TrustReportOptions = {}):
     };
   }
 
+  return { pages: body, reviewDueDays, ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }) };
+}
+
+/**
+ * Builds `trust.json` from the site model and the available data. Doc pages only, sorted by URL. This is
+ * the helper tests call: it takes `root`, `asOf`, and the data inline, and reads no environment itself.
+ */
+export async function trustReport(site: Site, options: TrustReportOptions = {}): Promise<readonly OutputFile[]> {
+  const entries = await trustPagesOf(site, options);
+  const pages = site.pages
+    .filter((page) => page.kind === "doc")
+    .slice()
+    .sort((a, b) => byCodePoint(a.url, b.url));
   const report: TrustReport = {
     version: TRUST_VERSION,
     build: { algorithm: "sha256", id: buildIdOf(pages, options.html), pages: pages.length },
-    reviewDueDays,
-    ...(asOf === undefined ? {} : { asOf: asOf.toISOString() }),
-    pages: body,
+    reviewDueDays: entries.reviewDueDays,
+    ...(entries.asOf === undefined ? {} : { asOf: entries.asOf }),
+    pages: entries.pages,
   };
   return [{ path: "trust.json", contents: `${JSON.stringify(report, null, 2)}\n` }];
 }

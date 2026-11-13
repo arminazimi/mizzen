@@ -4,6 +4,17 @@ Releases of this package are tagged `v<version>`. Add a one-line fragment in `ch
 
 ## Unreleased
 
+### Added
+
+- **Same-build trust and drift evidence.** Every build computes its own trust entries and drift findings and puts them
+  in `site.data.trust` and `site.data.drift` before rendering, so a theme can show the evidence of the build that wrote
+  the page. A site's own `_data/trust.yml` or `_data/drift.yml` still wins.
+
+### Fixed
+
+- Review lookups read the repository state once per build instead of once per page. On the 594-page fixture the trust
+  pass went from 7.7 s to about 0.2 s; cold builds went from 10.3 s to about 3.3 s.
+
 ## 0.2.0 — 2026-11-13
 
 This release makes the engine's claims checkable: the CLI reports what it actually does, an agent edit is

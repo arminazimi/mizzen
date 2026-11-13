@@ -31,10 +31,19 @@ export interface RenderCacheEntry {
   readonly diagnostics: readonly Diagnostic[];
 }
 
-/** A page's identity inside one settings key: its whole model, layout included. */
-export function renderPageKey(settings: string, page: Page, defaultLayout: string | undefined): string {
+/**
+ * A page's identity inside one settings key: its whole model, layout included. `evidence` is the trust and drift
+ * evidence the theme reads for this page, which can move with git and with quoted source positions; it is per page so
+ * a body edit elsewhere does not retire this page.
+ */
+export function renderPageKey(
+  settings: string,
+  page: Page,
+  defaultLayout: string | undefined,
+  evidence = "",
+): string {
   const hash = createHash("sha256");
-  hash.update(`mizzen-render-page\0${RENDER_CACHE_FORMAT}\0${settings}\0${defaultLayout ?? ""}\0`);
+  hash.update(`mizzen-render-page\0${RENDER_CACHE_FORMAT}\0${settings}\0${defaultLayout ?? ""}\0${evidence}\0`);
   hash.update(JSON.stringify(page));
   return hash.digest("hex");
 }

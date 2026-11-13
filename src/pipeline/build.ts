@@ -7,6 +7,8 @@ import { discover } from "../content/discover.ts";
 import type { Diagnostic, Output, OutputContext, OutputFile, Page } from "../contracts/index.ts";
 import { buildModel } from "../model/build.ts";
 import { MANIFEST_PATH, recordBuildHash } from "../outputs/build-hash.ts";
+import { driftPagesOf, driftRoot } from "../outputs/drift-report.ts";
+import { trustAsOf, trustPagesOf, trustRoot } from "../outputs/trust.ts";
 import { CODE_CONFIG_FILE, loadCodeConfig, runModelHooks, runOutputsHooks } from "../plugins/hooks.ts";
 import { createCssBundler, type CssBundle } from "../render/css.ts";
 import { loadRegistry } from "../render/registry.ts";
@@ -267,15 +269,6 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
           ...(options.defaultLayout === undefined ? {} : { defaultLayout: options.defaultLayout }),
           ...(options.themeFiles === undefined ? {} : { themeFiles: options.themeFiles }),
         }).catch(() => undefined);
-  const settingsDir =
-    renderRoot === undefined || settingsKey === undefined ? undefined : join(renderRoot, settingsKey);
-  const renderStore: RenderCache | undefined = settingsDir === undefined ? undefined : renderCache(settingsDir);
-  const previousInputs = settingsDir === undefined ? {} : await readRenderInputs(settingsDir);
-  const retiredSettings =
-    renderRoot === undefined || settingsKey === undefined
-      ? []
-      : (await readdir(renderRoot).catch((): string[] => [])).filter((name) => name !== settingsKey);
-
   // The site's code file is read after the cache, which it never shares a key with. Its problems are diagnostics, not a
   // failed build: the pages still build and the plugin that could not load costs only its own work.
   const code = await loadCodeConfig(root);
@@ -292,6 +285,49 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   for (const d of hookedModel.diagnostics) diagnostics.report(d);
   const site = hookedModel.value;
   for (const d of await placeholderDiagnostics(site)) diagnostics.report(d);
+
+  // Trust and drift are computed once, from this build's pages, and handed to the theme through `site.data` before any
+  // page renders. Outputs still run on the raw site, so `trust.json` and `drift.json` keep their own provenance; the
+  // entries the theme shows are the same levels and reasons, from the same build. A site that supplies `trust` or
+  // `drift` itself keeps its value: data wins over a derived fact.
+  let renderSite = site;
+  /** The evidence a page's theme reads, hashed per page: a review date comes from git, not from source bytes. */
+  const evidenceByUrl = new Map<string, string>();
+  if (site.pages.some((page) => page.kind === "doc")) {
+    try {
+      const evidence: Record<string, unknown> = {};
+      if (!Object.hasOwn(site.data, "drift")) evidence.drift = await driftPagesOf(site, { root: driftRoot() });
+      if (!Object.hasOwn(site.data, "trust")) {
+        const asOf = trustAsOf();
+        const trust = await trustPagesOf(site, {
+          root: trustRoot(),
+          ...(asOf === undefined ? {} : { asOf }),
+          ...(evidence.drift === undefined ? {} : { drift: evidence.drift }),
+        });
+        evidence.trust = trust.pages;
+      }
+      if (Object.keys(evidence).length > 0) {
+        renderSite = { ...site, data: { ...site.data, ...evidence } };
+        const trustPages = evidence.trust as Record<string, unknown> | undefined;
+        const driftPages = evidence.drift as Record<string, unknown> | undefined;
+        for (const page of site.pages) {
+          const own = JSON.stringify([trustPages?.[page.url] ?? null, driftPages?.[page.url] ?? null]);
+          evidenceByUrl.set(page.url, createHash("sha256").update(own).digest("hex"));
+        }
+      }
+    } catch {
+      // Evidence is an enrichment: a build without it still writes the site, and the outputs report what they could not
+      // measure. Nothing is fabricated in its place.
+    }
+  }
+
+  const settingsDir = renderRoot === undefined || settingsKey === undefined ? undefined : join(renderRoot, settingsKey);
+  const renderStore: RenderCache | undefined = settingsDir === undefined ? undefined : renderCache(settingsDir);
+  const previousInputs = settingsDir === undefined ? {} : await readRenderInputs(settingsDir);
+  const retiredSettings =
+    renderRoot === undefined || settingsKey === undefined
+      ? []
+      : (await readdir(renderRoot).catch((): string[] => [])).filter((name) => name !== settingsKey);
 
   const registry = await loadRegistry(themeRoot);
   for (const d of registry.diagnostics) diagnostics.report(d);
@@ -333,7 +369,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       site.pages
         .filter((page) => page.kind === "doc")
         .map(async (page) => {
-          const entry = await renderStore.get(renderPageKey(settingsKey, page, options.defaultLayout));
+          const entry = await renderStore.get(
+            renderPageKey(settingsKey, page, options.defaultLayout, evidenceByUrl.get(page.url) ?? ""),
+          );
           if (entry !== undefined) cachedRenders.set(page.url, entry);
         }),
     );
@@ -379,7 +417,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     workers > 1
       ? createRenderPool({
           themeRoot,
-          site,
+          site: renderSite,
           registry,
           ...(options.defaultLayout === undefined ? {} : { defaultLayout: options.defaultLayout }),
           workers,
@@ -408,11 +446,11 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         });
       }
       const rendered =
-        pool === undefined ? renderOnePage(registry, site, page, options.defaultLayout) : await pool.render(page);
+        pool === undefined ? renderOnePage(registry, renderSite, page, options.defaultLayout) : await pool.render(page);
       renderedPages += 1;
       for (const d of rendered.diagnostics) diagnostics.report(d);
       if (renderStore !== undefined && settingsKey !== undefined) {
-        await renderStore.set(renderPageKey(settingsKey, page, options.defaultLayout), {
+        await renderStore.set(renderPageKey(settingsKey, page, options.defaultLayout, evidenceByUrl.get(page.url) ?? ""), {
           html: rendered.html,
           css: rendered.css,
           ...(rendered.islands === undefined ? {} : { islands: rendered.islands }),

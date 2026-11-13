@@ -31,7 +31,7 @@ export type ReviewLookup = Review | typeof UNKNOWN;
  * the repository moved since an entry was made without reading the clock: HEAD, not time, decides freshness, and the
  * no-clock contract holds.
  */
-interface RepoState {
+export interface RepoState {
   /** True when git answers and the root is inside a work tree; only then may a history be trusted. */
   readonly available: boolean;
   /** The commit HEAD names, or `""` when the repository has no commit yet. */
@@ -102,6 +102,14 @@ function stateOf(root: string): RepoState {
 }
 
 /**
+ * Reads `root`'s repository state once, so a caller that asks about many pages pays for one `git rev-parse` instead of
+ * one per page. A direct lookup still reads the state on every call unless it is handed one.
+ */
+export function repositoryState(root: string): RepoState {
+  return stateOf(root);
+}
+
+/**
  * The identity of `root`'s repository state, for a build cache: a commit changes review dates without changing a source
  * file, so a cache key that ignored it could restore pages whose review evidence is stale. A root that is not a work
  * tree has one stable value.
@@ -115,16 +123,16 @@ export function repositoryStateKey(root: string): string {
  * log happen once for it; a state change — a commit, a repository appearing, or one disappearing — replaces the cache
  * whole. One state therefore answers last-review, coverage, and window lookups together, so they cannot disagree.
  */
-function cacheAt(root: string): Cache {
-  const state = stateOf(root);
-  const key = stateKeyOf(state);
+function cacheAt(root: string, state?: RepoState): Cache {
+  const current = state ?? stateOf(root);
+  const key = stateKeyOf(current);
   const found = CACHES.get(root);
   if (found !== undefined && found.key === key) return found;
 
   const cache: Cache = {
     base: root,
     key,
-    available: state.available,
+    available: current.available,
     reviews: undefined,
     windows: new Map(),
   };
@@ -203,12 +211,13 @@ export type ReviewCoverage = "recorded" | "untracked" | "unavailable";
 function historyOf(
   root: string,
   pageFile: string,
+  state?: RepoState,
 ): { readonly cache: Cache; readonly path: string } | undefined {
   const base = resolve(root);
   const path = gitPathOf(base, pageFile);
   if (path === undefined) return undefined;
 
-  const cache = cacheAt(base);
+  const cache = cacheAt(base, state);
   return cache.available ? { cache, path } : undefined;
 }
 
@@ -234,8 +243,8 @@ function reviewsOf(cache: Cache): Map<string, Review> | null {
  * site's source. A copy of the site without its history reports {@link UNKNOWN}; a build on a machine without git
  * does too.
  */
-export function reviewers(root: string, pageFile: string): ReviewLookup {
-  const found = historyOf(root, pageFile);
+export function reviewers(root: string, pageFile: string, state?: RepoState): ReviewLookup {
+  const found = historyOf(root, pageFile, state);
   if (found === undefined) return UNKNOWN;
 
   const reviews = reviewsOf(found.cache);
@@ -247,8 +256,8 @@ export function reviewers(root: string, pageFile: string): ReviewLookup {
  * per-state cache are the ones {@link reviewers} uses, so asking both costs one `git log` and the two answers agree.
  * A path outside the root is `unavailable`, because no history for it may be read.
  */
-export function reviewCoverage(root: string, pageFile: string): ReviewCoverage {
-  const found = historyOf(root, pageFile);
+export function reviewCoverage(root: string, pageFile: string, state?: RepoState): ReviewCoverage {
+  const found = historyOf(root, pageFile, state);
   if (found === undefined) return "unavailable";
 
   const reviews = reviewsOf(found.cache);
@@ -390,14 +399,19 @@ function authorsOf(commits: readonly ReviewCommit[]): readonly string[] {
  * window, the last review, and {@link reviewCoverage} are all read from the new state, so they cannot name commits
  * from two different repository states.
  */
-export function reviewHistory(root: string, pageFile: string, window: ReviewWindow): PageReviewHistory {
+export function reviewHistory(
+  root: string,
+  pageFile: string,
+  window: ReviewWindow,
+  state?: RepoState,
+): PageReviewHistory {
   const since = window.since.getTime();
   const until = window.until.getTime();
   if (!Number.isFinite(since) || !Number.isFinite(until) || since > until) {
     return { coverage: "unavailable", commits: [], reviewers: [] };
   }
 
-  const found = historyOf(root, pageFile);
+  const found = historyOf(root, pageFile, state);
   if (found === undefined) return { coverage: "unavailable", commits: [], reviewers: [] };
 
   const byPath = windowOf(found.cache, since, until);
