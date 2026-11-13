@@ -32,6 +32,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { CONFIG_FILE } from "../config/load.ts";
 import type { Diagnostic, SiteConfig } from "../contracts/index.ts";
 import { discover } from "../content/discover.ts";
+import { parseFrontMatter } from "../content/frontmatter.ts";
+import { repositoryStateKey } from "../model/reviewers.ts";
+import { expandIncludes } from "../content/includes.ts";
 import { version } from "../index.ts";
 
 /** Bumped when the meaning of an entry changes, so an entry written by an older engine is never trusted. */
@@ -400,6 +403,10 @@ interface KeyInput {
   readonly path: string;
   /** The folder the link at `path` must resolve inside; set only for symbolic links found by {@link filesUnder}. */
   readonly linkRoot?: string;
+  /** Hash only the file's front matter, so a body-only edit does not change the shared settings digest. */
+  readonly frontMatterOnly?: boolean;
+  /** Hash nothing: the file's path is its contribution, because its bytes never reach a rendered page. */
+  readonly pathOnly?: boolean;
 }
 
 /**
@@ -474,6 +481,8 @@ export async function cacheKey(options: CacheKeyOptions): Promise<string> {
   const hash = createHash("sha256");
   hash.update("mizzen-cache\0");
   hash.update(`${CACHE_FORMAT}\0${engine}\0${runtime}\0`);
+  // Review evidence moves with the repository, not the files: a commit must miss the cache that rendered the old date.
+  hash.update(`repository\0${repositoryStateKey(options.root)}\0`);
   // The config values matter as well as the file: a missing config takes its title from the folder name.
   hash.update(`config\0${canonicalJson(options.config)}\0`);
   hash.update(`defaultLayout\0${options.defaultLayout ?? ""}\0`);
@@ -481,7 +490,139 @@ export async function cacheKey(options: CacheKeyOptions): Promise<string> {
   for (let index = 0; index < inputs.length; index++) {
     hash.update(`${inputs[index]!.label}\0${digests[index]!}\0`);
   }
+  // Discovery skips `_` folders, but a page can include a snippet from one, and the snippet's bytes shape the page.
+  // Without them an include edit would be a whole-build hit that restores the old page.
+  for (const path of await includedSnippets(files, options.sourceDir)) {
+    let digest = "";
+    try {
+      digest = hashOf(await readFile(join(options.sourceDir, path)));
+    } catch {
+      digest = "";
+    }
+    hash.update(`include/${path}\0${digest}\0`);
+  }
   return hash.digest("hex");
+}
+
+/** Every file any doc page includes, sorted; a missing include has no bytes to hash and is already a diagnostic. */
+export async function includedSnippets(
+  files: readonly { readonly kind: string; readonly path: string }[],
+  sourceDir: string,
+): Promise<string[]> {
+  const found = new Set<string>();
+  for (const file of files) {
+    if (file.kind !== "doc") continue;
+    try {
+      const source = await readFile(join(sourceDir, file.path), "utf8");
+      const front = parseFrontMatter(source, file.path);
+      const expanded = await expandIncludes({
+        body: front.body,
+        bodyLine: front.bodyLine,
+        file: file.path,
+        sourceDir,
+      });
+      for (const dependency of expanded.includes) if (dependency.missing !== true) found.add(dependency.path);
+    } catch {
+      // A page that cannot be read is reported by the build; the key simply has one input fewer.
+    }
+  }
+  return [...found].sort(byCodePoint);
+}
+
+/**
+ * The settings a page render may depend on besides the page itself: the resolved config, the navigation, every data
+ * file, every theme and output file, the default layout, the engine, and the runtime. A doc page contributes its front
+ * matter, not its body: a body-only edit changes one page's render key, while a title, date, data, navigation, or theme
+ * change changes every key, so no page can be rendered from with stale chrome or metadata.
+ */
+export interface RenderSettingsOptions {
+  readonly root: string;
+  readonly sourceDir: string;
+  readonly config: SiteConfig;
+  readonly themeRoot: string;
+  readonly outputsDir: string;
+  readonly defaultLayout?: string | undefined;
+  readonly themeFiles?: readonly string[] | undefined;
+  readonly engineVersion?: string | undefined;
+  readonly runtimeVersion?: string | undefined;
+}
+
+/** The SHA-256 of the settings {@link RenderSettingsOptions} describes, for the per-page render cache. */
+export async function renderSettingsKey(options: RenderSettingsOptions): Promise<string> {
+  const engine = options.engineVersion ?? version;
+  const runtime = options.runtimeVersion ?? `${process.versions.node}/${process.versions.icu ?? ""}`;
+  const themeFiles = [...new Set(options.themeFiles ?? [])].sort(byCodePoint);
+  const inputs: KeyInput[] = [{ label: "config", path: join(options.root, CONFIG_FILE) }];
+
+  for (const file of await discover(options.sourceDir, {
+    include: options.config.include,
+    exclude: options.config.exclude,
+  })) {
+    // A doc page's body is its own render key; its front matter is shared with every page that shows its title.
+    if (file.kind === "doc") {
+      inputs.push({ label: `page/${file.path}`, path: join(options.sourceDir, file.path), frontMatterOnly: true });
+    } else if (file.kind === "asset") {
+      // An asset's bytes do not reach a page's HTML; its path already arrives through the page that names it.
+      inputs.push({ label: `asset/${file.path}`, path: join(options.sourceDir, file.path), pathOnly: true });
+    } else {
+      inputs.push({ label: `source/${file.kind}/${file.path}`, path: join(options.sourceDir, file.path) });
+    }
+  }
+
+  inputs.push({ label: "navigation", path: resolve(options.root, options.config.navigation) });
+
+  for (const file of await filesUnder(options.themeRoot)) {
+    inputs.push({
+      label: `theme/${file.path}`,
+      path: join(options.themeRoot, file.path),
+      ...(file.symlink ? { linkRoot: options.themeRoot } : {}),
+    });
+  }
+  for (const file of await filesUnder(options.outputsDir)) {
+    inputs.push({
+      label: `outputs/${file.path}`,
+      path: join(options.outputsDir, file.path),
+      ...(file.symlink ? { linkRoot: options.outputsDir } : {}),
+    });
+  }
+
+  const digests: string[] = new Array(inputs.length);
+  await inBatches(inputs, 32, async (input, index) => {
+    if (input.pathOnly === true) {
+      digests[index] = "";
+      return;
+    }
+    if (input.linkRoot !== undefined) {
+      digests[index] = await symlinkDigest(input.path, input.linkRoot);
+      return;
+    }
+    try {
+      const source = await readFile(input.path);
+      digests[index] = hashOf(input.frontMatterOnly === true ? frontMatterText(source.toString("utf8")) : source);
+    } catch {
+      digests[index] = "";
+    }
+  });
+
+  const hash = createHash("sha256");
+  hash.update("mizzen-render\0");
+  hash.update(`${engine}\0${runtime}\0`);
+  hash.update(`repository\0${repositoryStateKey(options.root)}\0`);
+  hash.update(`config\0${canonicalJson(options.config)}\0`);
+  hash.update(`defaultLayout\0${options.defaultLayout ?? ""}\0`);
+  hash.update(`themeFiles\0${themeFiles.join("\0")}\0`);
+  for (let index = 0; index < inputs.length; index++) {
+    hash.update(`${inputs[index]!.label}\0${digests[index]!}\0`);
+  }
+  return hash.digest("hex");
+}
+
+/** The front-matter text of one Markdown file, fences included, or the whole file when it has none. */
+function frontMatterText(source: string): string {
+  const front = parseFrontMatter(source, "");
+  if (front.bodyLine <= 1) return "";
+  const lines = source.split(/(?<=\n)/);
+  return lines.slice(0, front.bodyLine - 1).join("");
 }
 
 /** True when `value` is a manifest this version wrote and can trust the shape of. */
